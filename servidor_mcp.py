@@ -100,9 +100,10 @@ def ver_tela(alvo: str | None = None) -> str:
 
 @mcp.tool(description="Diz se o desktop está acessível e em qual resolução." + ALVOS)
 def estado(alvo: str | None = None) -> str:
+    config = config_do(alvo)
     sessao = None
     try:
-        sessao = AgentSession(config_path=config_do(alvo))
+        sessao = AgentSession(config_path=config)
         observacao = sessao.observe()
         if not observacao.get("connected"):
             return "indisponível: agente desconectado"

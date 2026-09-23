@@ -101,7 +101,7 @@ a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir 
 
 - Texto de console (Windows Terminal) ainda não é lido: comando roda, mas o resultado não é conferido.
 - Leitura da árvore em IDE Delphi leva 10 a 13 s por ciclo (VCL via MSAA); no resto, 1 s.
-- Um objetivo por vez por controlador (`.controle.lock`).
+- Um objetivo por vez por Windows alvo (trava na pasta temporária, por usuário e por alvo).
 
 ## Desenvolver
 

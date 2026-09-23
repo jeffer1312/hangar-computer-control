@@ -50,6 +50,8 @@ class MCPTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(executar.call_args.kwargs["config"], padrao)
                 with self.assertRaisesRegex(ValueError, "disponíveis: delphi-02, tardis"):
                     await servidor_mcp.objetivo("teste", Contexto(), alvo="winboat")
+                with self.assertRaisesRegex(ValueError, "alvo desconhecido"):
+                    servidor_mcp.estado(alvo="winboat")
 
     async def test_client_cancellation_reaches_worker(self):
         iniciado, encerrou = Event(), Event()

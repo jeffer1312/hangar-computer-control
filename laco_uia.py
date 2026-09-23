@@ -6,6 +6,8 @@ Ele interpreta e propõe ações; quem escolhe continua sendo o Jev.
 from __future__ import annotations
 
 import base64
+import getpass
+import hashlib
 import json
 import os
 import tempfile
@@ -308,13 +310,15 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
             resultado.tempos.append(f"{nome}={time.monotonic() - t:.2f}s")
 
     sessao = None
-    # Fora da pasta do pacote: cada versão instalada por uvx tem a sua, e a trava precisa ser uma só.
-    with open(Path(tempfile.gettempdir(), "hangar-computer-control.lock"), "a") as trava:
+    config = config or os.environ.get("HCC_AGENT_CONFIG")
+    # Fora da pasta do pacote (cada versão do uvx tem a sua); uma por usuário e por Windows alvo.
+    alvo = hashlib.sha256(f"{getpass.getuser()}:{config}".encode()).hexdigest()[:12]
+    with open(Path(tempfile.gettempdir(), f"hangar-computer-control-{alvo}.lock"), "a") as trava:
         try:
             bloquear(trava)
             if not objetivo.strip() or not 1 <= max_passos <= 50:
                 raise ValueError("objetivo vazio ou max_passos fora de 1..50")
-            chave, config = os.environ.get("TYPESAFE_API_KEY"), config or os.environ.get("HCC_AGENT_CONFIG")
+            chave = os.environ.get("TYPESAFE_API_KEY")
             if not chave or not config:
                 raise ValueError("faltam TYPESAFE_API_KEY ou HCC_AGENT_CONFIG")
             pasta = Path(tempfile.mkdtemp(prefix="hcu-"))
