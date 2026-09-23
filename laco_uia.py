@@ -165,10 +165,11 @@ def candidatos(arvore, dados):
     return acoes
 
 
-def descrever(acao, arvore):
+def descrever(acao, arvore, com_valor=True):
     alvo = {x["id"]: x for x in [*arvore.get("windows", []), *arvore.get("elements", [])]}.get(acao.get("target"))
     nome = f" {alvo.get('role', 'window')} '{alvo.get('name', '')}'" if alvo else ""
-    extra = {"set_value": lambda: f" = {acao['value']!r}", "text": lambda: f" {acao['value']!r} no foco atual",
+    valor = repr(acao.get("value")) if com_valor else "***"
+    extra = {"set_value": lambda: f" = {valor}", "text": lambda: f" {valor} no foco atual",
              "keys": lambda: " " + "+".join(acao["keys"]),
              "launch": lambda: " " + " ".join([acao["application"], *(acao.get("args") or [])]),
              "scroll": lambda: f" {acao['direction']}",
@@ -299,10 +300,10 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
             raise TimeoutError("limite de duração atingido; objetivo não confirmado")
         return r
 
-    def medir(nome, funcao, *args, **kwargs):
+    def medir(nome, funcao, *args, rotulo=None, **kwargs):
         restante()
         if progresso:
-            progresso(nome)
+            progresso(rotulo or nome)
         t = time.monotonic()
         try:
             return funcao(*args, **kwargs)
@@ -417,7 +418,8 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                 if ciclo == max_passos:
                     break
                 try:
-                    retorno = medir("acao:" + acao["type"], sessao.act, acao, arvore["observation_id"])
+                    retorno = medir("acao:" + acao["type"], sessao.act, acao, arvore["observation_id"],
+                                    rotulo=descrever(acao, arvore, com_valor=False))
                     ok = isinstance(retorno, dict) and retorno.get("ok") is True
                     alvo = {e["id"]: e for e in arvore.get("elements", [])}.get(acao.get("target"), {})
                     recentes.append({"action": nome, "result": "ok" if ok else str(retorno), "screenChanged": None,

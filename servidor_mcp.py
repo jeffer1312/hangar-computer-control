@@ -9,7 +9,9 @@ para e alguém precisa entender por quê.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -43,6 +45,25 @@ def _padrao() -> str:
     return Path(os.environ.get("HCC_AGENT_CONFIG", "")).name.removesuffix("-agent.json") or "nenhum"
 
 
+ETAPAS = {"conexao": "conectando ao Windows", "reconexao": "reconectando ao Windows",
+          "observacao": "lendo a tela", "jev": "decidindo o próximo passo",
+          "captura": "capturando a tela", "llm": "pedindo ajuda visual"}
+
+
+def _arquivo_de_etapas(ctx: Context) -> Path | None:
+    """O Claude sem terminal não repassa o progresso do MCP; o Hangar lê as etapas deste arquivo."""
+    meta = ctx.request_context.meta or {}
+    tool_use_id = meta.get("claudecode/toolUseId") if isinstance(meta, dict) else None
+    if not isinstance(tool_use_id, str) or not re.fullmatch(r"toolu_[A-Za-z0-9_-]{1,80}", tool_use_id):
+        return None
+    pasta = Path.home() / ".hangar" / "tool-progress"
+    try:
+        pasta.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return pasta / f"{tool_use_id}.jsonl"
+
+
 ALVOS = (f"\n\n`alvo` escolhe o Windows controlado. Disponíveis: {', '.join(alvos()) or 'nenhum'}; "
          f"sem `alvo`, usa o padrão ({_padrao()}).")
 
@@ -64,10 +85,18 @@ async def objetivo(texto: str, ctx: Context, max_passos: int = 12,
     cancelado = Event()
     loop = asyncio.get_running_loop()
     etapas = 0
+    arquivo = _arquivo_de_etapas(ctx)
 
     def progresso(etapa):
         nonlocal etapas
         etapas += 1
+        etapa = ETAPAS.get(etapa, etapa)
+        if arquivo:
+            try:
+                with arquivo.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"t": time.time(), "message": etapa}, ensure_ascii=False) + "\n")
+            except OSError:
+                pass
         future = asyncio.run_coroutine_threadsafe(ctx.report_progress(etapas, message=etapa), loop)
         try:
             future.result(timeout=2)

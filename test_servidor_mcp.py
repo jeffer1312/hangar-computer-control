@@ -1,5 +1,6 @@
 """Cancelamento do cliente não deixa o laço enviando entrada remota."""
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -14,6 +15,8 @@ from laco_uia import Resultado
 
 
 class Contexto:
+    request_context = SimpleNamespace(meta=None)
+
     async def report_progress(self, *args, **kwargs):
         pass
 
@@ -52,6 +55,19 @@ class MCPTest(unittest.IsolatedAsyncioTestCase):
                     await servidor_mcp.objetivo("teste", Contexto(), alvo="winboat")
                 with self.assertRaisesRegex(ValueError, "alvo desconhecido"):
                     servidor_mcp.estado(alvo="winboat")
+
+    async def test_steps_written_to_hangar_progress_file(self):
+        def executar(texto, passos, dados, cancelado, progresso, limite_segundos=240, config=None):
+            progresso("observacao")
+            return Resultado()
+
+        ctx = Contexto()
+        ctx.request_context = SimpleNamespace(meta={"claudecode/toolUseId": "toolu_abc"})
+        with tempfile.TemporaryDirectory() as casa, patch.dict(os.environ, HOME=casa), \
+             patch.object(servidor_mcp, "executar", side_effect=executar):
+            await servidor_mcp.objetivo("teste", ctx)
+            linhas = Path(casa, ".hangar/tool-progress/toolu_abc.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(linhas[0])["message"], "lendo a tela")
 
     async def test_client_cancellation_reaches_worker(self):
         iniciado, encerrou = Event(), Event()
