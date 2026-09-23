@@ -1,7 +1,7 @@
 # hangar-computer-control
 
 MCP que opera um desktop Windows a partir de um objetivo em português. O chamador (Claude, Codex, Hangar)
-manda "abrir o PMedico e fazer login" e recebe de volta "concluído" ou "parou: motivo". Ninguém no meio.
+manda "abrir o sistema e fazer login" e recebe de volta "concluído" ou "parou: motivo". Ninguém no meio.
 
 Como funciona, por ciclo:
 
