@@ -1,0 +1,17 @@
+[project]
+name = "hangar-computer-control"
+version = "0.1.0"
+description = "MCP que opera um desktop Windows pela árvore de acessibilidade a partir de um objetivo em português"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["mcp>=2.2,<3", "pydantic>=2.13,<3"]
+
+[project.scripts]
+hangar-computer-control = "servidor_mcp:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["servidor_mcp", "laco_uia", "desktop_agent", "windows_uia"]

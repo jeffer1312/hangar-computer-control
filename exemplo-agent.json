@@ -1,0 +1,6 @@
+{
+  "transport": "ssh",
+  "host": "minha-vm",
+  "agent_path": "/caminho/para/windows-agent.exe",
+  "request_timeout": 40
+}

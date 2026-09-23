@@ -1,0 +1,20 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: ./scripts/build-windows-agent.ps1 -Output dist
+        shell: pwsh
+      - run: gh release create $env:GITHUB_REF_NAME dist/windows-agent.exe --title $env:GITHUB_REF_NAME --generate-notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
