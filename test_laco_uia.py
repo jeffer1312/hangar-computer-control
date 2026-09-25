@@ -133,6 +133,59 @@ class LacoTest(unittest.TestCase):
         self.assertIn("botão Sim", resultado.motivo)
         self.assertEqual(sessao.acoes, [])
 
+    def test_title_bar_close_is_risky_unless_goal_closes_the_window(self):
+        elementos = [{"id": "e0", "name": "", "role": "TitleBar", "enabled": True, "rect": [16, 0, 1920, 23], "actions": []},
+                     {"id": "e1", "name": "Close", "role": "Button", "enabled": True, "rect": [1872, 0, 1920, 22],
+                      "actions": ["invoke"]}]
+        arv = arvore(elementos=elementos)
+        alvo = str(next(i for i, a in enumerate(uia.candidatos(arv, {})) if a.get("target") == "e1"))
+        self.assertIn("closes the whole application window", uia.descrever({"type": "invoke", "target": "e1"}, arv))
+        for texto, fecha in (("fechar a aba Escalas pelo X dela", False), ("fechar o aplicativo", True)):
+            sessao = Sessao([arv, arvore("x", "o2")])
+            respostas = [jev(alvo, .96, risco=.1), jev("DONE", .95)]
+            with patch.dict(os.environ, {"TYPESAFE_API_KEY": "k", "HCC_AGENT_CONFIG": "cfg.json"}), \
+                 patch.object(uia, "AgentSession", lambda **_: sessao), patch.object(uia, "_post", side_effect=lambda *a: respostas.pop(0)):
+                resultado = uia.executar(texto, max_passos=3)
+            self.assertEqual(bool(sessao.acoes), fecha, resultado.motivo)
+
+    def test_done_right_after_visual_help_is_not_confirmed(self):
+        resultado, sessao, _ = rodar([arvore()], [jev("BLOCKED"), llm(), jev("DONE", .95)])
+        self.assertFalse(resultado.ok)
+        self.assertIn("não confirmado", resultado.motivo)
+
+    def test_menu_item_is_offered_as_real_click_and_password_value_is_masked(self):
+        arv = arvore(elementos=[{"id": "e0", "name": "Internação", "role": "MenuItem", "enabled": True,
+                                 "rect": [180, 23, 240, 42], "actions": ["expand", "invoke"]},
+                                {"id": "e1", "name": "", "role": "Edit", "enabled": True, "password": True,
+                                 "actions": ["set_value"]}])
+        acoes = uia.candidatos(arv, {"senha": "segredo"})
+        self.assertIn({"type": "mouse", "target": "e0", "x": 210, "y": 32, "button": "left", "mode": "click"}, acoes)
+        self.assertFalse(any(a["type"] in ("expand", "invoke") for a in acoes))
+        self.assertNotIn("segredo", uia.descrever({"type": "set_value", "target": "e1", "value": "segredo"}, arv))
+        self.assertNotIn("segredo", uia.descrever({"type": "text", "value": "segredo"}, {**arv, "segredos": ["segredo"]}))
+
+    def test_llm_clicks_a_few_pixels_apart_count_as_the_same_click(self):
+        tela = {**arvore(elementos=[]), "windows": [{"id": "w1", "name": "Editor", "rect": [0, 0, 800, 600]}]}
+        cliques = [{"type": "mouse", "x": x, "y": 80, "button": "left", "mode": "click", "rotulo": "link Mais"}
+                   for x in (500, 502, 504)]
+        respostas = [llm(acoes=[cliques[0]]), jev("-"), llm(acoes=[cliques[1]]), jev("-"), llm(acoes=[cliques[2]]),
+                     jev("BLOCKED")]
+        sessao = Sessao([{**tela, "observation_id": f"o{i}"} for i in range(4)])
+        with patch.dict(os.environ, {"TYPESAFE_API_KEY": "k", "HCC_AGENT_CONFIG": "cfg.json", "LLM_PROXY_KEY": "k2"}), \
+             patch.object(uia, "AgentSession", lambda **_: sessao), patch.object(uia, "_post", side_effect=lambda *a: respostas.pop(0)):
+            resultado = uia.executar("abrir Mais", max_passos=5)
+        self.assertEqual(len(sessao.acoes), 2, resultado.motivo)
+
+    def test_same_warning_in_consecutive_cycles_is_not_a_refusal(self):
+        aviso = [{"id": "e0", "name": "Unexpected Memory Leak detected", "role": "Text", "enabled": True, "actions": []},
+                 {"id": "e1", "name": "OK", "role": "Button", "enabled": True, "actions": ["invoke"]}]
+        caixa = arvore(elementos=aviso)
+        ok = str(next(i for i, a in enumerate(uia.candidatos(caixa, {})) if a.get("target") == "e1"))
+        resultado, sessao, _ = rodar([caixa, {**caixa, "observation_id": "o2"}, arvore("Ana", "o3")],
+                                     [jev(ok), jev(ok), jev("DONE", .95)])
+        self.assertTrue(resultado.ok, resultado.motivo)
+        self.assertEqual(len(sessao.acoes), 2)
+
     def test_low_probability_after_help_stops_without_acting(self):
         resultado, sessao, _ = rodar([arvore()], [jev("0", .2), llm(), jev("0", .2)])
         self.assertFalse(resultado.ok)

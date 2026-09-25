@@ -9,6 +9,7 @@ para e alguém precisa entender por quê.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
@@ -19,8 +20,16 @@ from threading import Event
 
 from mcp.server.mcpserver import MCPServer, Context
 
-from desktop_agent import AgentSession
-from laco_uia import executar
+import desktop_agent
+import laco_uia
+
+
+def executar(*args, **kwargs):
+    # O processo do MCP dura a sessão inteira; recarregar aqui aplica código novo sem reconectar o MCP.
+    importlib.reload(desktop_agent)
+    importlib.reload(laco_uia)
+    return laco_uia.executar(*args, **kwargs)
+
 
 mcp = MCPServer("hangar-computer-control")
 
@@ -118,7 +127,7 @@ async def objetivo(texto: str, ctx: Context, max_passos: int = 12,
     Cite o caminho devolvido na sua resposta para que o usuário veja a imagem.""" + ALVOS))
 def ver_tela(alvo: str | None = None) -> str:
     inicio = time.monotonic()
-    sessao = AgentSession(config_path=config_do(alvo))
+    sessao = desktop_agent.AgentSession(config_path=config_do(alvo))
     try:
         caminho = Path(tempfile.mkdtemp(prefix="hcu-tela-")) / "tela.png"
         caminho.write_bytes(sessao.screenshot())
@@ -132,7 +141,7 @@ def estado(alvo: str | None = None) -> str:
     config = config_do(alvo)
     sessao = None
     try:
-        sessao = AgentSession(config_path=config)
+        sessao = desktop_agent.AgentSession(config_path=config)
         observacao = sessao.observe()
         if not observacao.get("connected"):
             return "indisponível: agente desconectado"

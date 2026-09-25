@@ -33,7 +33,7 @@ class MCPTest(unittest.IsolatedAsyncioTestCase):
         desktop.screenshot.return_value = b"fake PNG"
         factory = Mock(return_value=desktop)
         with patch.dict(os.environ, HCC_AGENT_CONFIG="mock.json"), \
-             patch.object(servidor_mcp, "AgentSession", factory):
+             patch.object(servidor_mcp.desktop_agent, "AgentSession", factory):
             self.assertIn("UIA, 800x600", servidor_mcp.estado())
             caminho = servidor_mcp.ver_tela().split(";", 1)[0]
         self.assertEqual(Path(caminho).read_bytes(), b"fake PNG")

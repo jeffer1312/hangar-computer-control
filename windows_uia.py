@@ -136,8 +136,7 @@ class WindowsDesktop:
             element = pending.pop(0)
             visited += 1
             info = element.element_info
-            if info.element.CurrentIsPassword:
-                continue
+            senha = bool(info.element.CurrentIsPassword)
             # Contêiner "invisível" (popup host, pane sem retângulo) ainda tem filhos visíveis.
             pending.extend(element.children()[:40])
             if not element.is_visible():
@@ -152,12 +151,19 @@ class WindowsDesktop:
             expansion = self.pattern(element, "expand_collapse")
             if expansion is not None:
                 actions.append("expand" if expansion.CurrentExpandCollapseState == 0 else "collapse")
+            toggle = self.pattern(element, "toggle")
+            selection = self.pattern(element, "selection_item")
+            if toggle is not None:
+                value = {0: "off", 1: "on"}.get(toggle.CurrentToggleState, "indeterminate")
+            elif selection is not None and role in ("RadioButton", "ListItem", "TabItem", "TreeItem", "DataItem"):
+                value = "selected" if selection.CurrentIsSelected else "not selected"
             edit = self.pattern(element, "value")
             if edit is not None:
-                value = edit.CurrentValue
+                # Senha entra na árvore para ser digitada, mas o conteúdo nunca sai do Windows.
+                value = None if senha else edit.CurrentValue
                 if not edit.CurrentIsReadOnly:
                     actions.append("set_value")
-            elif role in ("Document", "Edit") or (not actions and not info.name):
+            elif not senha and (role in ("Document", "Edit") or (not actions and not info.name)):
                 # Console (Windows Terminal) e visores sem nome expõem o texto só por TextPattern.
                 text = self.pattern(element, "text")
                 if text is not None:
@@ -171,7 +177,8 @@ class WindowsDesktop:
             controls.append({"id": eid, "name": info.name, "role": role,
                              "value": value[:4000] if isinstance(value, str) else value,
                              "enabled": element.is_enabled(), "rect": self.rect(element),
-                             "focused": bool(info.element.CurrentHasKeyboardFocus), "actions": actions})
+                             "focused": bool(info.element.CurrentHasKeyboardFocus), "actions": actions,
+                             **({"password": True} if senha else {})})
         if (self.gui.GetForegroundWindow() or ctypes.windll.user32.GetShellWindow()) != foreground:
             raise RuntimeError("a janela ativa mudou durante a observação; tente novamente")
         self.observation_id = uuid.uuid4().hex
@@ -297,15 +304,14 @@ class WindowsDesktop:
             element, name, role = self.elements[target]
             if element.element_info.name != name or element.element_info.control_type != role or not element.is_enabled():
                 raise RuntimeError("controle mudou; observe novamente")
-            if element.element_info.element.CurrentIsPassword:
-                raise RuntimeError("campo protegido não foi exposto ao controlador")
+            senha = bool(element.element_info.element.CurrentIsPassword)
+            r = element.rectangle()
+            na_tela = r.width() > 0 and r.height() > 0 and not element.element_info.element.CurrentIsOffscreen
             if kind == "invoke":
                 # Invoke por UIA "dá ok" e não faz nada em botão da barra de tarefas e menu VCL;
                 # clique real no controle é o que uma pessoa faz. Invoke só sem posição na tela.
                 # Em item de lista/árvore um clique só seleciona; ali Invoke é a ação padrão (abrir).
-                r = element.rectangle()
-                if role not in ("ListItem", "TreeItem", "DataItem") and r.width() > 0 and r.height() > 0 \
-                        and not element.element_info.element.CurrentIsOffscreen:
+                if role not in ("ListItem", "TreeItem", "DataItem") and na_tela:
                     element.click_input()
                 else:
                     element.iface_invoke.Invoke()
@@ -322,13 +328,18 @@ class WindowsDesktop:
                 send_keys("".join("{" + ch + "}" if ch in "+^%~(){}" else ch for ch in value),
                           with_spaces=True, with_newlines=True, vk_packet=True, pause=.01)
                 time.sleep(.15)
-                lido = element.iface_value.CurrentValue or ""
-                if lido.replace("\r\n", "\n").strip() != value.replace("\r\n", "\n").strip():
+                lido = "" if senha else element.iface_value.CurrentValue or ""
+                if not senha and lido.replace("\r\n", "\n").strip() != value.replace("\r\n", "\n").strip():
                     raise RuntimeError(f"valor digitado não confirmado; campo ficou com {lido[:80]!r}")
-            elif kind == "select":
-                element.iface_selection_item.Select()
-            elif kind == "toggle":
-                element.iface_toggle.Toggle()
+            elif kind in ("select", "toggle"):
+                # Select/Toggle por UIA marca sem disparar o OnClick do Delphi (rádio "marcado" que a
+                # pesquisa ignora); clique real dispara. Pattern só sem posição na tela.
+                if na_tela:
+                    element.click_input()
+                elif kind == "select":
+                    element.iface_selection_item.Select()
+                else:
+                    element.iface_toggle.Toggle()
             elif kind in ("expand", "collapse"):
                 getattr(element.iface_expand_collapse, "Expand" if kind == "expand" else "Collapse")()
             elif kind == "focus":

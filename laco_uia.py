@@ -30,7 +30,7 @@ LLM_URL = os.environ.get("LLM_PROXY_URL", "http://127.0.0.1:8317/v1/chat/complet
 LLM_MODELO = os.environ.get("LLM_MODEL", "gpt-5.6-luna")
 LLM_ESFORCO = os.environ.get("LLM_EFFORT")  # vazio = não envia; nem todo provedor aceita reasoning_effort
 LOTE = 251  # TypeSafe recusa mais de 255 opções por pergunta; sobram 4 para DONE/WAIT/BLOCKED
-MINIMO, MINIMO_DONE, RISCO = .25, .6, .5  # ponytail: corte único; ações certas medidas em 0,25-0,34 com 100+ opções
+MINIMO, MINIMO_DONE, RISCO = .25, .75, .5  # ponytail: corte único; ações certas medidas em 0,25-0,34 com 100+ opções
 DESFECHOS = {"DONE": "Visible evidence shows the WHOLE goal is already satisfied. No action needed.",
              "WAIT": "The needed control is absent or content is still loading; wait briefly.",
              "BLOCKED": "No offered action can make progress on the goal."}
@@ -153,7 +153,8 @@ def candidatos(arvore, dados):
         if not e.get("enabled"):
             continue
         # Item clicável sem padrão UIA (link dentro de item de lista em página web): clique real.
-        if not set(e.get("actions", [])) - {"focus"} and e.get("rect") \
+        # Menu VCL ignora Invoke/Expand da UIA; o clique real abre menu de qualquer tipo.
+        if (e.get("role") == "MenuItem" or not set(e.get("actions", [])) - {"focus"}) and e.get("rect") \
                 and e.get("role") in ("ListItem", "TreeItem", "Hyperlink", "Button", "MenuItem", "TabItem", "Image"):
             r = e["rect"]
             acoes.append({"type": "mouse", "target": e["id"], "x": (r[0] + r[2]) // 2, "y": (r[1] + r[3]) // 2,
@@ -175,13 +176,29 @@ def descrever(acao, arvore, com_valor=True):
     alvo = {x["id"]: x for x in [*arvore.get("windows", []), *arvore.get("elements", [])]}.get(acao.get("target"))
     nome = f" {alvo.get('role', 'window')} '{alvo.get('name', '')}'" if alvo \
         else f" '{acao['rotulo']}'" if acao.get("rotulo") else ""
-    valor = repr(acao.get("value")) if com_valor else "***"
+    if alvo and fecha_janela(acao, arvore):
+        nome += " (title bar button: closes the whole application window)"
+    secreto = (alvo or {}).get("password") or acao.get("value") in arvore.get("segredos", ())
+    valor = repr(acao.get("value")) if com_valor and not secreto else "***"
     extra = {"set_value": lambda: f" = {valor}", "text": lambda: f" {valor} no foco atual",
              "keys": lambda: " " + "+".join(acao["keys"]),
              "launch": lambda: " " + " ".join([acao["application"], *(acao.get("args") or [])]),
              "scroll": lambda: f" {acao['direction']}",
              "mouse": lambda: f" {acao['mode']} ({acao['x']},{acao['y']})"}.get(acao["type"], lambda: "")
     return f"{acao['type']}{nome}{extra()}"
+
+
+def fecha_janela(acao, arvore):
+    """Alt+F4 ou o botão Fechar da barra de título: fecha a janela inteira, não uma aba."""
+    if acao["type"] == "keys":
+        return {k.casefold() for k in acao["keys"]} >= {"alt", "f4"}
+    alvo = {e["id"]: e for e in arvore.get("elements", [])}.get(acao.get("target"))
+    if not alvo or alvo.get("role") != "Button" or str(alvo.get("name", "")).casefold() not in ("close", "fechar") \
+            or not alvo.get("rect"):
+        return False
+    r = alvo["rect"]
+    return any(t.get("role") == "TitleBar" and t.get("rect") and t["rect"][0] <= r[0] + 1 and t["rect"][1] <= r[1] + 1
+               and r[2] <= t["rect"][2] + 1 and r[3] <= t["rect"][3] + 1 for t in arvore.get("elements", []))
 
 
 def intencao(acao, arvore):
@@ -200,11 +217,12 @@ def estado_compacto(objetivo, dados, arvore, recentes, dica):
     janela = next((w for w in arvore.get("windows", []) if w["id"] == arvore.get("foreground")), {})
     elementos = [{"id": e["id"], "role": e.get("role"), "name": e.get("name"),
                   **({"value": str(e["value"])[:200]} if e.get("value") not in (None, "") else {}),
-                  **({"focused": True} if e.get("focused") else {})} for e in arvore.get("elements", [])]
+                  **({"focused": True} if e.get("focused") else {}),
+                  **({"password": True} if e.get("password") else {})} for e in arvore.get("elements", [])]
     outras = [w["name"] for w in arvore.get("windows", []) if w["id"] != arvore.get("foreground")
               and w.get("class_name") not in ("Shell_TrayWnd", "Progman", "Worker Window")]
     return {"goal": objetivo, "data": dados, "window": janela.get("name"), "otherWindows": outras,
-            "elements": elementos, "recentActions": [{k: v for k, v in r.items() if k != "target_rect"} for r in recentes[-10:]],
+            "elements": elementos, "recentActions": [{k: v for k, v in r.items() if k not in ("target_rect", "clique")} for r in recentes[-10:]],
             **({"hint": dica} if dica else {})}
 
 
@@ -375,23 +393,30 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
             pasta = Path(tempfile.mkdtemp(prefix="hcu-"))
             resultado.registro = str(pasta)
             sessao = medir("conexao", AgentSession, config_path=config, cancelado=cancelado)
-            recentes, anterior, avisos = [], None, []
+            recentes, anterior, avisos, aviso_anterior = [], None, [], ""
             for ciclo in range(max_passos + 1):
                 arvore = medir("observacao", observar, sessao)
+                # Valor de senha dos dados sai mascarado de passos, registro e recentActions, em qualquer campo.
+                arvore["segredos"] = [str(v) for k, v in dados.items()
+                                      if re.search(r"senha|password|passwd|pin|token", str(k), re.I)]
                 atual = assinatura(arvore)
                 if recentes and recentes[-1]["screenChanged"] is None:
                     recentes[-1]["screenChanged"] = atual != anterior
                 anterior = atual
-                (pasta / "observacao.json").write_text(json.dumps(arvore, ensure_ascii=False), encoding="utf-8")
+                (pasta / "observacao.json").write_text(json.dumps({k: v for k, v in arvore.items() if k != "segredos"},
+                                                                  ensure_ascii=False), encoding="utf-8")
                 # Mesma caixa de mensagem voltando depois de outra tentativa = o app está dizendo não; devolve o texto.
+                textos = ""
                 if len(arvore.get("elements", [])) <= 25:
                     textos = " ".join(str(e.get("value") or e.get("name") or "") for e in arvore["elements"]
                                       if e.get("role") in ("Text", "Edit") and len(str(e.get("value") or e.get("name") or "")) > 15)
-                    if textos:
+                    # Mesmo aviso em ciclos seguidos é uma caixa atrás da outra (OK que abre a próxima), não recusa.
+                    if textos and textos != aviso_anterior:
                         avisos.append(textos)
                         if avisos.count(textos) >= 2:
                             resultado.motivo = f"o aplicativo respondeu duas vezes com o mesmo aviso: {textos[:400]}"
                             return resultado
+                aviso_anterior = textos
                 acoes = candidatos(arvore, dados)
                 # Ação por acessibilidade "deu ok" mas a tela não mudou (menu VCL ignora Invoke):
                 # oferece o clique real no mesmo controle, sem depender do LLM pra isso.
@@ -403,7 +428,15 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                 # Ação que já rodou sem efeito, ou que já rodou 2 vezes (abre menu / fecha menu em loop), sai da lista.
                 sem_efeito = {r["action"] for r in executadas[-3:] if r["screenChanged"] is False}
                 repetidas = {a for a in {r["action"] for r in executadas} if sum(r["action"] == a for r in executadas) >= 2}
-                acoes = [a for a in acoes if descrever(a, arvore) not in sem_efeito | repetidas]
+
+                def barrada(a):
+                    # Clique do LLM varia uns pixels a cada ciclo (1890, 1893, 1896): conta a região, não o ponto.
+                    if descrever(a, arvore) in sem_efeito | repetidas:
+                        return True
+                    return a["type"] == "mouse" and sum(
+                        1 for r in executadas if r.get("clique") and r["clique"][0] == a["mode"]
+                        and abs(r["clique"][1] - a["x"]) <= 15 and abs(r["clique"][2] - a["y"]) <= 15) >= 2
+                acoes = [a for a in acoes if not barrada(a)]
                 ultima = next((r for r in reversed(recentes) if r["action"] != "WAIT"), None)
                 if ultima and ultima["screenChanged"] is False and ultima.get("target_rect"):
                     r = ultima["target_rect"]
@@ -435,6 +468,7 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                     dica, ajudou = ajuda.interpretacao, True
                     propostas = [a.model_dump(exclude_none=True) for a in ajuda.acoes if a.type in ("mouse", "keys")]
                     # Fora da janela da frente não executa nem vai pro Jev; as demais ficam como opção se o Jev decidir.
+                    propostas = [a for a in propostas if not barrada(a)]
                     acoes += [a for a in propostas if dentro(a, arvore) and a not in acoes]
                     if propostas and dentro(propostas[0], arvore):
                         direta = propostas[0]
@@ -451,6 +485,10 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                         log.write(json.dumps({"ciclo": ciclo, "n_acoes": len(acoes), "bytes_estado": len(json.dumps(estado)),
                                               **decisao}, ensure_ascii=False) + "\n")
                     if opcao == "DONE" and p >= MINIMO_DONE:
+                        # Concluído logo após a ajuda visual é o Jev aceitando a leitura do LLM como prova.
+                        if ajudou:
+                            resultado.motivo = f"não confirmado: só a leitura do print indica que terminou. {dica}"
+                            return resultado
                         resultado.ok = True
                         resultado.motivo = f"objetivo confirmado ({p:.0%}) na janela {estado['window']!r}"
                         return resultado
@@ -473,13 +511,18 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                     # Sem duplicata: a mesma tecla oferecida duas vezes divide o voto do Jev.
                     acoes = acoes + [a.model_dump(exclude_none=True) for a in ajuda.acoes
                                      if a.type != "focus" and (a.target is None or a.target in ids)
-                                     and a.model_dump(exclude_none=True) not in acoes]
+                                     and a.model_dump(exclude_none=True) not in acoes
+                                     and not barrada(a.model_dump(exclude_none=True))]
                 if opcao == "WAIT":
                     cancelado.wait(.5)
                     recentes.append({"action": "WAIT", "result": "esperou 0,5 s", "screenChanged": None})
                     continue
                 acao = acoes[int(opcao)]
                 nome = descrever(acao, arvore)
+                pede_fechar = re.search(r"\b(fech|encerr|sair|close|quit|exit)\w*\b.*\b(janela|aplicativo|aplicação|"
+                                        r"programa|sistema|window|application|app)\b", objetivo, re.I | re.S)
+                if fecha_janela(acao, arvore) and not pede_fechar:
+                    risco = max(risco, 1.0)
                 if risco >= RISCO:
                     resultado.motivo = f"ação arriscada não executada: {nome} (risco {risco:.0%}). Autorize no objetivo."
                     return resultado
@@ -491,7 +534,8 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                     ok = isinstance(retorno, dict) and retorno.get("ok") is True
                     alvo = {e["id"]: e for e in arvore.get("elements", [])}.get(acao.get("target"), {})
                     recentes.append({"action": nome, "result": "ok" if ok else str(retorno), "screenChanged": None,
-                                     **({"target_rect": alvo["rect"]} if alvo.get("rect") else {})})
+                                     **({"target_rect": alvo["rect"]} if alvo.get("rect") else {}),
+                                     **({"clique": [acao["mode"], acao["x"], acao["y"]]} if acao["type"] == "mouse" else {})})
                 except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
                     recentes.append({"action": nome, "result": f"NOT executed: {e}", "screenChanged": False})
                     if isinstance(e, (TimeoutError, ConnectionError)) and not cancelado.is_set():
