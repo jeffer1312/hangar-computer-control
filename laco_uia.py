@@ -10,6 +10,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.error
@@ -64,6 +65,7 @@ class Acao(BaseModel):
     x2: int | None = None
     y2: int | None = None
     delta: int | None = Field(default=None, ge=-50, le=50)
+    rotulo: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
     def parametros(self):
@@ -86,7 +88,11 @@ AJUDA = ("You assist a Windows desktop controller. Jev picks the action; you onl
          "current UIA tree, recent actions and, when attached, a screenshot: describe in `interpretacao` what is on "
          "screen and what is missing for the goal. In `acoes` propose up to 6 concrete actions the tree does not "
          "offer: `text` with the value to type derived from goal/data, `keys` shortcuts, `launch` an application, or "
-         "`mouse` at coordinates of a control seen in the screenshot (never without a screenshot). Never invent data. "
+         "`mouse` at coordinates of a control seen in the screenshot (never without a screenshot). Order `acoes` best "
+         "first: the first one is the next step toward the goal and may be executed directly. Give every action a "
+         "short `rotulo` naming what it hits (\"botão Não\", \"campo Nome\"). Mouse coordinates are pixels of the "
+         "ATTACHED IMAGE, whose size comes in `imageSize`; coordinates written in the goal are screen pixels, never "
+         "copy them. Never invent data. "
          "A message box, warning or error dialog is not a blocker: propose dismissing it (its button by `mouse`, or "
          "`keys` Enter/Escape) so the goal can continue. Fill `impedimento` only when the CURRENT screen demands "
          "a datum, credential or application that is missing (for example a login form is showing and no "
@@ -167,7 +173,8 @@ def candidatos(arvore, dados):
 
 def descrever(acao, arvore, com_valor=True):
     alvo = {x["id"]: x for x in [*arvore.get("windows", []), *arvore.get("elements", [])]}.get(acao.get("target"))
-    nome = f" {alvo.get('role', 'window')} '{alvo.get('name', '')}'" if alvo else ""
+    nome = f" {alvo.get('role', 'window')} '{alvo.get('name', '')}'" if alvo \
+        else f" '{acao['rotulo']}'" if acao.get("rotulo") else ""
     valor = repr(acao.get("value")) if com_valor else "***"
     extra = {"set_value": lambda: f" = {valor}", "text": lambda: f" {valor} no foco atual",
              "keys": lambda: " " + "+".join(acao["keys"]),
@@ -201,6 +208,50 @@ def estado_compacto(objetivo, dados, arvore, recentes, dica):
             **({"hint": dica} if dica else {})}
 
 
+RISCO_PERGUNTA = {"type": "noul", "instructions":
+    "Would the chosen next action (`proposedAction` when present) delete, overwrite, send, publish, install, close "
+    "or discard unsaved work, without `goal` explicitly asking for exactly that?",
+    "criteria": {"true": "The action has one of these effects and the goal does not ask for it.",
+                 "false": "The action is preparation, navigation, typing, or the goal asks for that effect."}}
+
+
+def sem_controles(arvore):
+    """Janela da frente sem nada acionável na árvore (botões desenhados); barra de tarefas não conta."""
+    barra = next((w.get("rect") for w in arvore.get("windows", []) if w.get("class_name") == "Shell_TrayWnd"), None)
+
+    def na_barra(r):
+        return bool(barra and r) and barra[0] <= r[0] and barra[1] <= r[1] and r[2] <= barra[2] and r[3] <= barra[3]
+    return not any(e.get("enabled") and set(e.get("actions", [])) - {"focus"} and not na_barra(e.get("rect"))
+                   for e in arvore.get("elements", []))
+
+
+def para_tela(acoes, arvore, texto):
+    """Coordenada do LLM vem na escala do print (1280 px); a copiada do texto do objetivo já é de tela."""
+    escala = max(1.0, arvore.get("screen", {}).get("width", 1280) / 1280)
+    literais = set(re.findall(r"(\d+)\s*,\s*(\d+)", texto))
+    for a in acoes:
+        if a.type != "mouse":
+            continue
+        if (str(a.x), str(a.y)) not in literais:
+            a.x, a.y = round(a.x * escala), round(a.y * escala)
+        if a.x2 is not None and a.y2 is not None and (str(a.x2), str(a.y2)) not in literais:
+            a.x2, a.y2 = round(a.x2 * escala), round(a.y2 * escala)
+
+
+def dentro(acao, arvore):
+    """Clique fora da janela da frente cairia na de trás."""
+    if acao["type"] != "mouse":
+        return True
+    r = next((w.get("rect") for w in arvore.get("windows", []) if w["id"] == arvore.get("foreground")), None)
+    return bool(r) and (r[0] <= acao["x"] < r[2] and r[1] <= acao["y"] < r[3])
+
+
+def arriscado(estado, nome, chave, timeout):
+    r = _post(JEV, {"model": "jev-latest", "state": {**estado, "proposedAction": nome},
+                    "questions": {"risky": RISCO_PERGUNTA}}, {"authorization": f"Bearer {chave}"}, timeout)
+    return prob(r["answers"].get("risky", {}).get("noul"))
+
+
 def decidir(estado, acoes, arvore, chave, timeout):
     restantes = list(range(len(acoes)))
     while True:
@@ -212,11 +263,7 @@ def decidir(estado, acoes, arvore, chave, timeout):
             nota = "" if len(lotes) == 1 else " This is one batch of a larger list; pick a match here or BLOCKED if none."
             perguntas["action" if len(lotes) == 1 else f"batch_{n}"] = {
                 "type": "choice", "instructions": REGRAS + nota, "criteria": criterios}
-        perguntas["risky"] = {"type": "noul", "instructions":
-            "Would the chosen next action delete, overwrite, send, publish, install, close or discard unsaved work, "
-            "without `goal` explicitly asking for exactly that?",
-            "criteria": {"true": "The action has one of these effects and the goal does not ask for it.",
-                         "false": "The action is preparation, navigation, typing, or the goal asks for that effect."}}
+        perguntas["risky"] = RISCO_PERGUNTA
         respostas = _post(JEV, {"model": "jev-latest", "state": estado, "questions": perguntas},
                           {"authorization": f"Bearer {chave}"}, timeout)["answers"]
         risco = prob(respostas.get("risky", {}).get("noul"))
@@ -254,6 +301,9 @@ def ajudar(estado, imagem, timeout):
     chave = os.environ.get("LLM_PROXY_KEY")
     if not chave:
         raise RuntimeError("falta LLM_PROXY_KEY no ambiente para o fallback de interpretação")
+    if imagem and imagem[:8] == b"\x89PNG\r\n\x1a\n":
+        estado = {**estado, "imageSize": {"width": int.from_bytes(imagem[16:20], "big"),
+                                          "height": int.from_bytes(imagem[20:24], "big")}}
     conteudo: list[dict] = [{"type": "text", "text": json.dumps(estado, ensure_ascii=False)}]
     if imagem:
         conteudo.append({"type": "image_url", "image_url": {
@@ -361,8 +411,39 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                                   "button": "left", "mode": "click"})
                     if "real mouse click" not in ultima["result"]:
                         ultima["result"] += "; a real mouse click on the same control is now offered"
-                dica, ajudou = "", False
-                while True:
+                dica, ajudou, direta = "", False, None
+
+                def ver(estado):
+                    imagem = medir("captura", sessao.screenshot)
+                    resultado.captura = str(pasta / "tela.png")
+                    Path(resultado.captura).write_bytes(imagem)
+                    try:
+                        ajuda = medir("llm", ajudar, estado, imagem, min(45, restante()))
+                    except (TimeoutError, RuntimeError, ValueError, OSError) as e:
+                        ajuda = Ajuda(interpretacao=f"ajuda visual indisponível: {type(e).__name__}: {str(e)[:300]}")
+                    para_tela(ajuda.acoes, arvore, objetivo)
+                    return ajuda
+
+                # Botões desenhados (caixa TMS sem filhos na UIA): o Jev não tem o que escolher.
+                # O LLM vê o print e devolve o clique já rotulado; executa sem votação, só com a trava de risco.
+                if sem_controles(arvore):
+                    estado = estado_compacto(objetivo, dados, arvore, recentes, dica)
+                    ajuda = ver(estado)
+                    if ajuda.impedimento:
+                        resultado.motivo = ajuda.impedimento
+                        return resultado
+                    dica, ajudou = ajuda.interpretacao, True
+                    propostas = [a.model_dump(exclude_none=True) for a in ajuda.acoes if a.type in ("mouse", "keys")]
+                    # Fora da janela da frente não executa nem vai pro Jev; as demais ficam como opção se o Jev decidir.
+                    acoes += [a for a in propostas if dentro(a, arvore) and a not in acoes]
+                    if propostas and dentro(propostas[0], arvore):
+                        direta = propostas[0]
+                        opcao, p = str(acoes.index(direta)), 1.0
+                        risco = medir("jev", arriscado, estado, descrever(direta, arvore), chave, min(30, restante()))
+                        with (pasta / "jev.jsonl").open("a", encoding="utf-8") as log:
+                            log.write(json.dumps({"ciclo": ciclo, "direta": descrever(direta, arvore), "risky": risco,
+                                                  "dica": dica}, ensure_ascii=False) + "\n")
+                while direta is None:
                     estado = estado_compacto(objetivo, dados, arvore, recentes, dica)
                     decisao = medir("jev", decidir, estado, acoes, arvore, chave, min(30, restante()))
                     opcao, p, risco = decisao["choice"], decisao["probability"], decisao["risky"]
@@ -383,25 +464,12 @@ def executar(objetivo, max_passos=12, dados=None, cancelado=None, progresso=None
                         resultado.motivo = f"sem ação segura: Jev escolheu {opcao} com {p:.0%}. {dica}".strip()
                         return resultado
                     ajudou = True
-                    imagem = medir("captura", sessao.screenshot)
-                    resultado.captura = str(pasta / "tela.png")
-                    Path(resultado.captura).write_bytes(imagem)
-                    try:
-                        ajuda = medir("llm", ajudar, estado, imagem, min(45, restante()))
-                    except (TimeoutError, RuntimeError, ValueError, OSError) as e:
-                        ajuda = Ajuda(interpretacao=f"ajuda visual indisponível: {type(e).__name__}")
+                    ajuda = ver(estado)
                     dica = ajuda.interpretacao
                     if ajuda.impedimento:
                         resultado.motivo = ajuda.impedimento
                         return resultado
                     ids = {x["id"] for x in [*arvore.get("windows", []), *arvore.get("elements", [])]}
-                    # O print vai reduzido a 1280 px de largura; coordenada do LLM volta pra escala da tela.
-                    escala = max(1.0, arvore.get("screen", {}).get("width", 1280) / 1280)
-                    for a in ajuda.acoes:
-                        if a.type == "mouse":
-                            a.x, a.y = round(a.x * escala), round(a.y * escala)
-                            if a.x2 is not None and a.y2 is not None:
-                                a.x2, a.y2 = round(a.x2 * escala), round(a.y2 * escala)
                     # Sem duplicata: a mesma tecla oferecida duas vezes divide o voto do Jev.
                     acoes = acoes + [a.model_dump(exclude_none=True) for a in ajuda.acoes
                                      if a.type != "focus" and (a.target is None or a.target in ids)

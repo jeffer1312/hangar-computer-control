@@ -110,7 +110,8 @@ class WindowsDesktop:
             # processo não entra, senão a árvore dobra e o alvo fica ambíguo.
             # Popup, menu e diálogo têm dono (no VCL é a janela oculta do TApplication, não a principal);
             # janela principal solta tem dono 0 e fica fora, senão a árvore dobra. Menu Win32 (#32768) não tem dono.
-            if handle != foreground and self.gui.IsWindowVisible(handle) \
+            # Desabilitada = está atrás de um diálogo modal; seus controles não respondem e confundem o alvo.
+            if handle != foreground and self.gui.IsWindowVisible(handle) and self.gui.IsWindowEnabled(handle) \
                     and win32process.GetWindowThreadProcessId(handle)[1] == pid \
                     and (self.gui.GetWindow(handle, 4) or self.gui.GetClassName(handle) == "#32768"):
                 popups.append(handle)

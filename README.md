@@ -10,7 +10,9 @@ Como funciona, por ciclo:
 2. O laço transforma a árvore em ações concretas (clicar botão X, digitar valor Y no campo Z, ativar janela W).
 3. O Jev (TypeSafe) escolhe uma ação. Não gera texto.
 4. Só quando o Jev não acha saída, ou a árvore vem vazia, um LLM barato olha o print e propõe ações extras,
-   que voltam pro Jev escolher.
+   que voltam pro Jev escolher. Janela da frente sem nenhum controle na árvore (botões desenhados, como a
+   caixa de mensagem da TMS): o print vai direto ao LLM, que devolve o clique rotulado ("botão Não"); o laço
+   executa sem votação, só depois da pergunta de risco ao Jev e se o clique cair dentro dessa janela.
 5. O agente executa, o laço observa de novo. Repete até DONE, impedimento real ou limite.
 
 Não tem regra por aplicativo. Tela nova é só árvore nova.
