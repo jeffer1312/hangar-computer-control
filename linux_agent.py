@@ -430,14 +430,20 @@ class LinuxDesktop:
         else:
             if target not in self.elements:
                 raise ValueError("controle não pertence à observação")
-            node, name, role, rect = self.elements[target]
+            node, name, role, _ = self.elements[target]
             info = self.read(node)
             if (info["name"], role_name(info["role"], info["states"])) != (name, role) \
                     or not {"enabled", "sensitive"} & info["states"]:
                 raise RuntimeError("controle mudou; observe novamente")
+            # Posição relida agora: lista rolada ou janela redimensionada depois da observação
+            # faria o centro antigo cair em outro controle.
+            at, size = (window := hypr("activewindow"))["at"], window["size"]
+            window_rect = [at[0] - self.area[0], at[1] - self.area[1],
+                           at[0] - self.area[0] + size[0], at[1] - self.area[1] + size[1]]
+            rect = info["extents"] and element_rect(info["extents"], window_rect)
             center = rect and ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
-            on_screen = bool(center) and 0 <= center[0] < self.area[2] - self.area[0] \
-                and 0 <= center[1] < self.area[3] - self.area[1]
+            on_screen = bool(center) and window_rect[0] <= center[0] < window_rect[2] \
+                and window_rect[1] <= center[1] < window_rect[3]
             # O "click" do AT-SPI no WebKitGTK responde ok e só mostra a dica do botão; clique real é o que
             # uma pessoa faz. Ação AT-SPI só sem posição na tela; em item de lista o clique só seleciona.
             if kind == "invoke" and role not in ITEMS and on_screen or kind in ("select", "toggle") and on_screen:

@@ -136,11 +136,15 @@ class EntradaTest(unittest.TestCase):
         desktop = la.LinuxDesktop.__new__(la.LinuxDesktop)
         desktop.area = [1536, 0, 3456, 1080]
         botao, item = object(), object()
-        desktop.elements = {"e0": (botao, "Configurações", "Button", [1878, 58, 1906, 86]),
+        desktop.elements = {"e0": (botao, "Configurações", "Button", [0, 0, 1, 1]),
                             "e1": (item, "Downloads", "ListItem", [5, 43, 175, 103])}
+        # A posição vem da leitura no momento do clique (janela em 1542,51), não da observação guardada.
         desktop.read = lambda n: {"name": "Configurações" if n is botao else "Downloads",
-                                  "role": "push button" if n is botao else "list item", "states": {"enabled"}}
+                                  "role": "push button" if n is botao else "list item", "states": {"enabled"},
+                                  "extents": (1872, 7, 28, 28) if n is botao else (5, 43, 170, 60)}
+        janela = {"at": [1542, 51], "size": [1908, 958]}
         with patch.object(desktop, "validate_observation"), patch.object(desktop, "mouse") as mouse, \
+                patch.object(la, "hypr", return_value=janela), \
                 patch.object(desktop, "do_action") as do_action:
             desktop.observation_id = "o"
             desktop.act({"type": "invoke", "target": "e0"}, "o")
