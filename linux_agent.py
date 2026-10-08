@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import time
 import uuid
@@ -133,11 +134,14 @@ def walk(roots, read, children, window_rect, vanished=(), budget=4.0, limit=800)
         visited += 1
         try:
             info = read(node)
-            if "showing" not in info["states"]:
-                continue  # no AT-SPI filho de nó oculto também é oculto: a subárvore inteira sai
-            pending.extend(children(node))
         except vanished:
             continue  # nó destruído durante a leitura (lista atualizando) já não está na tela
+        if "showing" not in info["states"]:
+            continue  # no AT-SPI filho de nó oculto também é oculto: a subárvore inteira sai
+        try:
+            pending.extend(children(node))
+        except vanished:
+            pass  # filhos sumiram; o próprio nó foi lido e continua valendo
         element = element_from(info, window_rect)
         # Rolado para fora da janela (lista longa): o laço não deve mirar nele.
         if element is None or (element["rect"] and not intersects(element["rect"], window_rect)):
@@ -244,7 +248,8 @@ class LinuxDesktop:
 
     @staticmethod
     def children(node):
-        return [c for c in (node.getChildAtIndex(i) for i in range(min(node.childCount, 100))) if c is not None]
+        # Sem teto por nó: o limite de nós e de tempo do walk é que corta, e aí marca truncated.
+        return [c for c in (node.getChildAtIndex(i) for i in range(node.childCount)) if c is not None]
 
     def pid(self, app):
         try:
@@ -255,7 +260,8 @@ class LinuxDesktop:
     def roots(self, client):
         """Filhos do frame da janela ativa e dos menus/popups abertos do mesmo aplicativo."""
         apps = [a for a in self.atspi.Registry.getDesktop(0) if a is not None]
-        own = [a for a in apps if self.pid(a) == client["pid"]] or apps
+        # Sem app com o pid da janela, não há árvore confiável: o laço cai no print.
+        own = [a for a in apps if self.pid(a) == client["pid"]]
         tops = [t for app in own for t in self.children(app)]
         frames = [t for t in tops if t.getRoleName() in ("frame", "dialog")]
         chosen = choose_frame([(f.name or "", {s.value_nick for s in f.getState().getStates()}) for f in frames],
@@ -320,8 +326,11 @@ class LinuxDesktop:
         events = [f"{c}:1" for c in codes] + [f"{c}:0" for c in reversed(codes)]
         try:
             run_command(["ydotool", "key", *events])
-        except RuntimeError:
-            subprocess.run(["ydotool", "key", *[f"{c}:0" for c in reversed(codes)]], capture_output=True, timeout=15)
+        except BaseException:
+            try:
+                subprocess.run(["ydotool", "key", *[f"{c}:0" for c in reversed(codes)]], capture_output=True, timeout=15)
+            except (OSError, subprocess.SubprocessError):
+                pass  # o erro que importa é o original, relançado abaixo
             raise
 
     @staticmethod
@@ -403,11 +412,15 @@ class LinuxDesktop:
             app, args = action.get("application"), action.get("args", [])
             if not isinstance(app, str) or not app or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
                 raise ValueError("application e args inválidos")
+            if not shutil.which(app):  # exec_cmd responde "ok" mesmo sem o programa
+                raise ValueError(f"programa não encontrado: {app}")
             # Pelo Hyprland o programa nasce na sessão, não como filho do agente que encerra junto.
             dispatch(f"hl.dsp.exec_cmd({lua_string(shlex.join([app, *args]))})")
         elif kind == "keys":
             self.keys(action.get("keys"))
         elif kind == "text":
+            if target is not None and target not in self.elements:
+                raise ValueError("controle não pertence à observação")
             if target in self.elements:  # digitar "no campo X" começa focando X
                 self.focus_field(target)
                 time.sleep(.15)
@@ -438,6 +451,9 @@ class LinuxDesktop:
                 # Digitar como pessoa dispara as notificações do campo, como no agente Windows.
                 self.focus_field(target)
                 time.sleep(.15)
+                # Sem leitura de volta, o foco confirmado é a única garantia de que Ctrl+A cai no campo certo.
+                if info["text"] is None and "focused" not in self.read(node)["states"]:
+                    raise RuntimeError("campo não recebeu o foco; nada foi digitado")
                 self.keys(["ctrl", "a"])
                 self.keys(["delete"])
                 self.type_text(value)

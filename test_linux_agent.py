@@ -81,6 +81,14 @@ class ArvoreTest(unittest.TestCase):
         controles, _, _ = self.montar([oculto, rolado, sumiu, no("label", "Pronto")])
         self.assertEqual([c["name"] for c in controles], ["Pronto"])
 
+    def test_no_cujos_filhos_somem_continua_valendo(self):
+        def filhos(n):
+            if n["name"] == "Lista":
+                raise Sumiu
+            return n["filhos"]
+        controles, _, _ = la.walk([no("list", "Lista", actions=["click"])], ler, filhos, self.janela, (Sumiu,))
+        self.assertEqual([c["name"] for c in controles], ["Lista"])
+
     def test_corte_por_limite_e_informado(self):
         _, _, cortou = la.walk([no("label", str(i)) for i in range(5)], ler, lambda n: [], self.janela, limit=3)
         self.assertTrue(cortou)
@@ -110,6 +118,19 @@ class EntradaTest(unittest.TestCase):
         with patch.object(la, "run_command") as run:
             la.LinuxDesktop.keys(["ctrl", "shift", "t"])
         run.assert_called_once_with(["ydotool", "key", "29:1", "42:1", "20:1", "20:0", "42:0", "29:0"])
+
+    def test_texto_com_alvo_desconhecido_e_programa_inexistente_falham(self):
+        desktop = la.LinuxDesktop.__new__(la.LinuxDesktop)
+        desktop.elements, desktop.windows = {}, {}
+        with patch.object(desktop, "validate_observation"), patch.object(la, "run_command") as run, \
+                patch.object(la, "dispatch") as dispatch:
+            desktop.observation_id = "o"
+            with self.assertRaisesRegex(ValueError, "não pertence"):
+                desktop.act({"type": "text", "target": "e9", "value": "x"}, "o")
+            with self.assertRaisesRegex(ValueError, "não encontrado"):
+                desktop.act({"type": "launch", "application": "programa-que-nao-existe-hcc"}, "o")
+        run.assert_not_called()
+        dispatch.assert_not_called()
 
     def test_mouse_soma_origem_do_monitor_e_rolagem_desce_com_delta_positivo(self):
         desktop = la.LinuxDesktop.__new__(la.LinuxDesktop)
