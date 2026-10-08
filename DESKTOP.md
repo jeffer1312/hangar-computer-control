@@ -48,6 +48,28 @@ para reutilização. Não altera serviços nem abre porta pública.
 Isso não instala SSH nem configura RDP automaticamente em uma máquina desconhecida.
 Tela bloqueada/UAC e aplicativos que não expõem controles podem impedir uma ação.
 
+## Agente Linux (Hyprland)
+
+`linux_agent.py` fala o mesmo protocolo do agente Windows; o laço e o MCP não mudam.
+Roda só com transporte `local`, dentro da sessão Hyprland do usuário (precisa de
+`HYPRLAND_INSTANCE_SIGNATURE` e `WAYLAND_DISPLAY` no ambiente do MCP), e com o Python do
+sistema, onde está o `pyatspi` (pacote `python-atspi`); fora dele só usa a biblioteca padrão.
+Configuração: `linux-agent.json`, com o caminho absoluto do `linux_agent.py`.
+
+- Janelas e foco: `hyprctl` (`clients`, `activewindow`, `monitors`; `dispatch` na sintaxe
+  Lua `hl.dsp.*` do Hyprland 0.56). Programas abrem por `hl.dsp.exec_cmd`.
+- Controles: AT-SPI, com os papéis traduzidos para os nomes da UIA (Button, Edit, MenuItem...).
+  No Wayland o AT-SPI só dá posição dentro da janela; a da janela vem do `hyprctl`.
+- Coordenadas: lógicas, relativas ao monitor da janela ativa (escala do monitor já aplicada).
+  O print (`grim -o <monitor> -s`) é desse monitor, com no máximo 1280 px de largura.
+- Mouse: `hl.dsp.cursor.move` posiciona e `ydotool click` clica (serviço `ydotool` do usuário).
+  Teclas: `ydotool key` com códigos evdev. Texto: `wtype`, que digita acento em qualquer layout.
+- Tela bloqueada (`hyprlock` rodando) faz o agente recusar.
+
+Aplicativo sem árvore (Chrome sem `--force-renderer-accessibility`, vários Electron) chega
+sem controles e cai no fallback de imagem do laço. Campo sem interface Text (WebKitGTK)
+recebe o texto, mas o valor não é lido de volta.
+
 ## Usar no Hangar
 
 O Hangar já inicia os MCPs configurados no harness; não precisa carregar a automação

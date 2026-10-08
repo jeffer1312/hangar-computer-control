@@ -14,4 +14,4 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["servidor_mcp", "laco_uia", "desktop_agent", "windows_uia"]
+py-modules = ["servidor_mcp", "laco_uia", "desktop_agent", "windows_uia", "linux_agent"]

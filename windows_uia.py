@@ -380,8 +380,8 @@ class WindowsDesktop:
         raise ValueError("operação inválida")
 
 
-def run(config):
-    desktop = WindowsDesktop()
+def run(config, factory=None):
+    desktop = (factory or WindowsDesktop)()
     boot = uuid.uuid4().hex
     response = {"hello": True, "boot": boot, "session_id": desktop.session_id, "pid": os.getpid()}
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -405,7 +405,7 @@ def run(config):
             response["error"] = f"{type(exc).__name__}: {exc}"
 
 
-if __name__ == "__main__":
+def main(factory=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
@@ -413,8 +413,14 @@ if __name__ == "__main__":
     try:
         config = json.loads(path.read_text(encoding="utf-8-sig"))
         path.unlink()  # A credencial de partida não fica no disco depois de carregada.
-        run(config)
+        run(config, factory)
     except Exception:
         import traceback
+        # Agente local apaga a pasta da credencial ao falhar; o stderr chega ao MCP.
+        traceback.print_exc()
         path.with_suffix(".error.log").write_text(traceback.format_exc(), encoding="utf-8")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
