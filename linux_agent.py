@@ -290,7 +290,7 @@ class LinuxDesktop:
                 raise RuntimeError("a janela ativa mudou durante a observação")
             controls, nodes, truncated = walk(self.roots(active), self.read, self.children, window["rect"],
                                               self.vanished)
-            self.elements = {e["id"]: (n, e["name"], e["role"]) for e, n in zip(controls, nodes)}
+            self.elements = {e["id"]: (n, e["name"], e["role"], e["rect"]) for e, n in zip(controls, nodes)}
         else:
             # Área de trabalho vazia não tem janela ativa; uma janela fictícia faz o papel do shell.
             self.foreground = "desktop"
@@ -366,6 +366,19 @@ class LinuxDesktop:
             finally:
                 run_command(["ydotool", "click", hex(0x80 | code)])
 
+    def focus_field(self, target):
+        node, _, _, rect = self.elements[target]
+        try:
+            if node.queryComponent().grabFocus():
+                return
+        except self.vanished:
+            pass  # GTK4 não implementa grabFocus pelo AT-SPI
+        if not rect:
+            raise RuntimeError("aplicativo recusou o foco e o campo não tem posição na tela")
+        # Clicar no campo foca como uma pessoa faria.
+        self.point((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+        run_command(["ydotool", "click", hex(0xC0 | BUTTONS["left"])])
+
     def do_action(self, node, wanted):
         action = node.queryAction()
         names = [action.getName(i).casefold() for i in range(action.nActions)]
@@ -396,7 +409,7 @@ class LinuxDesktop:
             self.keys(action.get("keys"))
         elif kind == "text":
             if target in self.elements:  # digitar "no campo X" começa focando X
-                self.elements[target][0].queryComponent().grabFocus()
+                self.focus_field(target)
                 time.sleep(.15)
             self.type_text(action.get("value"))
         elif kind == "mouse":
@@ -404,7 +417,7 @@ class LinuxDesktop:
         else:
             if target not in self.elements:
                 raise ValueError("controle não pertence à observação")
-            node, name, role = self.elements[target]
+            node, name, role, _ = self.elements[target]
             info = self.read(node)
             if (info["name"], role_name(info["role"], info["states"])) != (name, role) \
                     or not {"enabled", "sensitive"} & info["states"]:
@@ -423,8 +436,7 @@ class LinuxDesktop:
                 if not isinstance(value, str) or len(value) > 20000:
                     raise ValueError("valor inválido")
                 # Digitar como pessoa dispara as notificações do campo, como no agente Windows.
-                if not node.queryComponent().grabFocus():
-                    raise RuntimeError("aplicativo recusou o foco no campo")
+                self.focus_field(target)
                 time.sleep(.15)
                 self.keys(["ctrl", "a"])
                 self.keys(["delete"])
