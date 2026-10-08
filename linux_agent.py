@@ -430,12 +430,19 @@ class LinuxDesktop:
         else:
             if target not in self.elements:
                 raise ValueError("controle não pertence à observação")
-            node, name, role, _ = self.elements[target]
+            node, name, role, rect = self.elements[target]
             info = self.read(node)
             if (info["name"], role_name(info["role"], info["states"])) != (name, role) \
                     or not {"enabled", "sensitive"} & info["states"]:
                 raise RuntimeError("controle mudou; observe novamente")
-            if kind == "invoke":
+            center = rect and ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+            on_screen = bool(center) and 0 <= center[0] < self.area[2] - self.area[0] \
+                and 0 <= center[1] < self.area[3] - self.area[1]
+            # O "click" do AT-SPI no WebKitGTK responde ok e só mostra a dica do botão; clique real é o que
+            # uma pessoa faz. Ação AT-SPI só sem posição na tela; em item de lista o clique só seleciona.
+            if kind == "invoke" and role not in ITEMS and on_screen or kind in ("select", "toggle") and on_screen:
+                self.mouse({"x": center[0], "y": center[1], "button": "left", "mode": "click"})
+            elif kind == "invoke":
                 self.do_action(node, INVOKE)
             elif kind in ("select", "toggle"):
                 self.do_action(node, ("toggle", *INVOKE))

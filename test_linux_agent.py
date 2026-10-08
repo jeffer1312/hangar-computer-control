@@ -132,6 +132,23 @@ class EntradaTest(unittest.TestCase):
         run.assert_not_called()
         dispatch.assert_not_called()
 
+    def test_botao_visivel_recebe_clique_real_e_item_de_lista_a_acao(self):
+        desktop = la.LinuxDesktop.__new__(la.LinuxDesktop)
+        desktop.area = [1536, 0, 3456, 1080]
+        botao, item = object(), object()
+        desktop.elements = {"e0": (botao, "Configurações", "Button", [1878, 58, 1906, 86]),
+                            "e1": (item, "Downloads", "ListItem", [5, 43, 175, 103])}
+        desktop.read = lambda n: {"name": "Configurações" if n is botao else "Downloads",
+                                  "role": "push button" if n is botao else "list item", "states": {"enabled"}}
+        with patch.object(desktop, "validate_observation"), patch.object(desktop, "mouse") as mouse, \
+                patch.object(desktop, "do_action") as do_action:
+            desktop.observation_id = "o"
+            desktop.act({"type": "invoke", "target": "e0"}, "o")
+            desktop.observation_id = "o"
+            desktop.act({"type": "invoke", "target": "e1"}, "o")
+        mouse.assert_called_once_with({"x": 1892, "y": 72, "button": "left", "mode": "click"})
+        do_action.assert_called_once_with(item, la.INVOKE)
+
     def test_mouse_soma_origem_do_monitor_e_rolagem_desce_com_delta_positivo(self):
         desktop = la.LinuxDesktop.__new__(la.LinuxDesktop)
         desktop.area = [1536, 0, 3456, 1080]
