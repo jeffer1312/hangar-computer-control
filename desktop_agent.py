@@ -173,7 +173,11 @@ class AgentSession:
                 self._check_cancel()
                 for process in (self.process, self.tunnel):
                     if process is not None and process.poll() is not None:
-                        raise RuntimeError(f"processo de conexão encerrou com código {process.returncode}")
+                        # O agente local grava o motivo ao lado da credencial; sem ele, só sobraria o código.
+                        log = Path(self.directory.name) / "connection.error.log"
+                        linhas = log.read_text(errors="replace").strip().splitlines() if log.exists() else []
+                        raise RuntimeError(f"processo de conexão encerrou com código {process.returncode}"
+                                           + (f": {linhas[-1]}" if linhas else ""))
                 if time.monotonic() >= deadline:
                     raise TimeoutError("agente não respondeu; confira usuário logado, tarefa e canal de retorno")
         except BaseException:

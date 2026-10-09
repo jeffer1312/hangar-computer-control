@@ -34,7 +34,7 @@ class MCPTest(unittest.IsolatedAsyncioTestCase):
         factory = Mock(return_value=desktop)
         with patch.dict(os.environ, HCC_AGENT_CONFIG="mock.json"), \
              patch.object(servidor_mcp.desktop_agent, "AgentSession", factory):
-            self.assertIn("UIA, 800x600", servidor_mcp.estado())
+            self.assertIn("acessibilidade, 800x600", servidor_mcp.estado())
             caminho = servidor_mcp.ver_tela().split(";", 1)[0]
         self.assertEqual(Path(caminho).read_bytes(), b"fake PNG")
         self.assertEqual(desktop.close.call_count, 2)
@@ -55,6 +55,24 @@ class MCPTest(unittest.IsolatedAsyncioTestCase):
                     await servidor_mcp.objetivo("teste", Contexto(), alvo="winboat")
                 with self.assertRaisesRegex(ValueError, "alvo desconhecido"):
                     servidor_mcp.estado(alvo="winboat")
+
+    async def test_linux_with_hyprland_gets_local_target_without_config_file(self):
+        with tempfile.TemporaryDirectory() as casa, patch.dict(os.environ, HOME=casa, HYPRLAND_INSTANCE_SIGNATURE="x"), \
+             patch.object(servidor_mcp.sys, "platform", "linux"):
+            os.environ.pop("HCC_AGENT_CONFIG", None)
+            os.environ.pop("HCC_AGENTS_DIR", None)
+            config = json.loads(Path(servidor_mcp.config_do(None)).read_text())
+            self.assertEqual(config["transport"], "local")
+            self.assertEqual(config["command"][0], "/usr/bin/python3")
+            self.assertTrue(Path(config["command"][1]).is_file())
+            self.assertEqual(servidor_mcp.config_do("linux"), servidor_mcp.config_do(None))
+            # Um linux-agent.json na pasta de alvos continua mandando.
+            proprio = Path(casa, "linux-agent.json")
+            proprio.write_text("{}")
+            with patch.dict(os.environ, HCC_AGENTS_DIR=casa):
+                self.assertEqual(servidor_mcp.config_do("linux"), str(proprio))
+        with patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": ""}):
+            self.assertIsNone(servidor_mcp.linux_local())
 
     async def test_steps_written_to_hangar_progress_file(self):
         def executar(texto, passos, dados, cancelado, progresso, limite_segundos=240, config=None):

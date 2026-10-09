@@ -62,6 +62,17 @@ class AgentTest(unittest.TestCase):
             self.agent.act({"type": "keys", "keys": ["Enter"]}, state["observation_id"])
 
 
+class FailedStartTest(unittest.TestCase):
+    def test_agent_failure_reason_reaches_caller(self):
+        script = ("import sys, pathlib; p = pathlib.Path(sys.argv[2]); "
+                  "p.with_suffix('.error.log').write_text('Traceback...\\nRuntimeError: faltam programas no sistema: wtype'); sys.exit(1)")
+        with tempfile.TemporaryDirectory() as pasta:
+            config = Path(pasta) / "config.json"
+            config.write_text(json.dumps({"transport": "local", "command": [sys.executable, "-c", script]}))
+            with self.assertRaisesRegex(RuntimeError, "código 1: RuntimeError: faltam programas no sistema: wtype"):
+                AgentSession(config)
+
+
 class ObservationTest(unittest.TestCase):
     def setUp(self):
         self.desktop = object.__new__(WindowsDesktop)

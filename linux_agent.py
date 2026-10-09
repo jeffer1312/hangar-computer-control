@@ -201,8 +201,14 @@ def dispatch(lua):
 
 class LinuxDesktop:
     def __init__(self):
-        import pyatspi
-        from gi.repository import GLib
+        try:
+            import pyatspi
+            from gi.repository import GLib
+        except ImportError as exc:
+            raise RuntimeError(f"falta o pacote python-atspi no Python do sistema ({exc})") from exc
+        faltando = [p for p in ("hyprctl", "grim", "ydotool", "wtype", "pgrep") if not shutil.which(p)]
+        if faltando:
+            raise RuntimeError("faltam programas no sistema: " + ", ".join(faltando))
         self.atspi = pyatspi
         self.vanished = (GLib.Error,)
         if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or not os.environ.get("WAYLAND_DISPLAY"):

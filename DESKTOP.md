@@ -54,7 +54,9 @@ Tela bloqueada/UAC e aplicativos que não expõem controles podem impedir uma a�
 Roda só com transporte `local`, dentro da sessão Hyprland do usuário (precisa de
 `HYPRLAND_INSTANCE_SIGNATURE` e `WAYLAND_DISPLAY` no ambiente do MCP), e com o Python do
 sistema, onde está o `pyatspi` (pacote `python-atspi`); fora dele só usa a biblioteca padrão.
-Configuração: `linux-agent.json`, com o caminho absoluto do `linux_agent.py`.
+Programas do sistema: `python-atspi`, `hyprctl`, `grim`, `ydotool` (com o serviço do usuário
+ativo) e `wtype`; o que faltar aparece no erro da conexão. O alvo `linux` é automático (ver README);
+`linux-agent.json` é o modelo para apontar outro `linux_agent.py`.
 
 - Janelas e foco: `hyprctl` (`clients`, `activewindow`, `monitors`; `dispatch` na sintaxe
   Lua `hl.dsp.*` do Hyprland 0.56). Programas abrem por `hl.dsp.exec_cmd`.

@@ -13,6 +13,7 @@ import importlib
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -34,16 +35,31 @@ def executar(*args, **kwargs):
 mcp = MCPServer("hangar-computer-control")
 
 
+def linux_local() -> Path | None:
+    """Neste Linux com Hyprland, o agente que vem no pacote vira o alvo `linux`: ninguém cria arquivo."""
+    if not sys.platform.startswith("linux") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return None
+    caminho = Path.home() / ".cache" / "hangar-computer-control" / "linux-agent.json"
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    # Python do sistema: é nele que o pyatspi está instalado, não no ambiente do uvx.
+    caminho.write_text(json.dumps({"transport": "local", "request_timeout": 15, "command": [
+        "/usr/bin/python3", str(Path(__file__).with_name("linux_agent.py"))]}))
+    return caminho
+
+
 def alvos() -> dict[str, Path]:
     pasta = os.environ.get("HCC_AGENTS_DIR") or os.path.dirname(os.environ.get("HCC_AGENT_CONFIG", ""))
-    if not pasta:
-        return {}
-    return {p.name.removesuffix("-agent.json"): p for p in sorted(Path(pasta).glob("*-agent.json"))}
+    encontrados = {p.name.removesuffix("-agent.json"): p for p in sorted(Path(pasta).glob("*-agent.json"))} if pasta else {}
+    local = linux_local()
+    if local and "linux" not in encontrados:
+        encontrados["linux"] = local
+    return encontrados
 
 
 def config_do(alvo: str | None) -> str | None:
     if not alvo:
-        return os.environ.get("HCC_AGENT_CONFIG")
+        local = None if os.environ.get("HCC_AGENT_CONFIG") else linux_local()
+        return os.environ.get("HCC_AGENT_CONFIG") or (str(local) if local else None)
     disponiveis = alvos()
     if alvo not in disponiveis:
         raise ValueError(f"alvo desconhecido: {alvo}; disponíveis: {', '.join(disponiveis) or 'nenhum'}")
@@ -51,7 +67,8 @@ def config_do(alvo: str | None) -> str | None:
 
 
 def _padrao() -> str:
-    return Path(os.environ.get("HCC_AGENT_CONFIG", "")).name.removesuffix("-agent.json") or "nenhum"
+    padrao = Path(os.environ.get("HCC_AGENT_CONFIG", "")).name.removesuffix("-agent.json")
+    return padrao or ("linux" if linux_local() else "nenhum")
 
 
 ETAPAS = {"conexao": "conectando ao Windows", "reconexao": "reconectando ao Windows",
@@ -73,7 +90,7 @@ def _arquivo_de_etapas(ctx: Context) -> Path | None:
     return pasta / f"{tool_use_id}.jsonl"
 
 
-ALVOS = (f"\n\n`alvo` escolhe o Windows controlado. Disponíveis: {', '.join(alvos()) or 'nenhum'}; "
+ALVOS = (f"\n\n`alvo` escolhe o desktop controlado. Disponíveis: {', '.join(alvos()) or 'nenhum'}; "
          f"sem `alvo`, usa o padrão ({_padrao()}).")
 
 
@@ -146,7 +163,7 @@ def estado(alvo: str | None = None) -> str:
         if not observacao.get("connected"):
             return "indisponível: agente desconectado"
         tela = observacao["screen"]
-        return f"disponível via UIA, {tela['width']}x{tela['height']}"
+        return f"disponível via acessibilidade, {tela['width']}x{tela['height']}"
     except Exception as e:
         return f"indisponível: {e}"
     finally:

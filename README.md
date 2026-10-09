@@ -57,8 +57,10 @@ Modelo: `exemplo-agent.json`.
 
 Na mesma máquina Windows: `{"transport": "local", "command": ["C:\\HangarComputerControl\\windows-agent.exe"]}`.
 
-Linux com Hyprland (Wayland), na mesma máquina: `linux-agent.json` é o modelo
-(`{"transport": "local", "command": ["/usr/bin/python3", "/caminho/para/linux_agent.py"]}`). Detalhes em `DESKTOP.md`.
+Linux com Hyprland (Wayland), na mesma máquina: não precisa de arquivo. Com o MCP rodando na sessão
+Hyprland, o alvo `linux` aparece sozinho e vira o padrão quando `HCC_AGENT_CONFIG` não está definido; ele
+usa o `linux_agent.py` do próprio pacote. Um `linux-agent.json` na pasta de alvos substitui o automático.
+Requisitos do sistema e detalhes em `DESKTOP.md`.
 
 Vários Windows: cada um é um `<nome>-agent.json` na pasta `HCC_AGENTS_DIR` (ausente = pasta do
 `HCC_AGENT_CONFIG`). As ferramentas aceitam `alvo="<nome>"`; sem ele, vale o `HCC_AGENT_CONFIG`. A lista
