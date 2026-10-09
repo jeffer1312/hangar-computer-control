@@ -1,0 +1,3 @@
+# Each checkout builds into its own target/, overriding a user-wide target-dir.
+[build]
+target-dir = "target"

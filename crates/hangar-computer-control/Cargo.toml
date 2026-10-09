@@ -1,0 +1,37 @@
+[package]
+name = "hangar-computer-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "hangar-computer-control"
+path = "src/main.rs"
+
+[features]
+motor-fake = []
+fake-desktop = ["hcc-agente/fake"]
+
+[dependencies]
+hcc-protocolo.workspace = true
+hcc-agente.workspace = true
+hcc-controlador.workspace = true
+hcc-laco.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hcc-agente-linux.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+hcc-agente-windows.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tempfile.workspace = true

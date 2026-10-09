@@ -1,0 +1,19 @@
+{
+  "observation_id": "9f1c2b3a4d5e4f60a1b2c3d4e5f60718",
+  "connected": true,
+  "session_id": 2,
+  "foreground": "w123",
+  "windows": [
+    {"id": "w123", "name": "Cadastro", "process_id": 4120, "class_name": "TMainForm", "rect": [0, 0, 1280, 800]},
+    {"id": "w456", "name": "Confirmação", "process_id": 4120, "class_name": "TMessageForm", "rect": [400, 300, 880, 500]}
+  ],
+  "elements": [
+    {"id": "e1", "name": "Nome", "role": "Edit", "value": "Ana", "enabled": true, "rect": [10, 20, 210, 44], "focused": true, "actions": ["set_value", "focus"]},
+    {"id": "e2", "name": "Senha", "role": "Edit", "value": null, "enabled": true, "rect": [10, 50, 210, 74], "focused": false, "actions": ["set_value", "focus"], "password": true},
+    {"id": "e3", "name": "Relatório", "role": "TabItem", "value": null, "enabled": true, "rect": null, "focused": false, "actions": ["select"]},
+    {"id": "e4", "name": "Salvar", "role": "Button", "value": null, "enabled": false, "rect": [220, 760, 300, 790], "focused": false, "actions": ["invoke"]}
+  ],
+  "truncated": false,
+  "timestamp": 1791545400.25,
+  "screen": {"width": 1280, "height": 800}
+}

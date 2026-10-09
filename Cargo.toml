@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.2", features = ["rt-multi-thread","macros","io-std","io-util","process","time","sync","net","signal","fs"] }
+tokio-util = "0.7.19"
+rmcp = { version = "3.5.1", default-features = false, features = ["server","macros","transport-io"] }
+schemars = "1.2.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }   # no TLS: agent/controller talk http to 127.0.0.1; hcc-laco adds "rustls" in its own manifest
+axum = { version = "0.8.9", default-features = false, features = ["http1","tokio","json"] }
+atspi = { version = "0.30.0", features = ["tokio"] }
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+uiautomation = { version = "0.25.1", default-features = false, features = ["input","pattern","screenshot"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation","Win32_Security","Win32_System_Threading","Win32_System_RemoteDesktop","Win32_System_StationsAndDesktops","Win32_UI_WindowsAndMessaging","Win32_UI_Input_KeyboardAndMouse","Win32_UI_HiDpi"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+sha2 = "0.11.0"
+base64 = "0.23.1"
+uuid = { version = "1.27.0", features = ["v4"] }
+tempfile = "3.27.0"
+regex = "1.13.1"
+wiremock = "0.6.5"
+hcc-protocolo = { path = "crates/hcc-protocolo" }
+hcc-agente = { path = "crates/hcc-agente" }
+hcc-agente-linux = { path = "crates/hcc-agente-linux" }
+hcc-agente-windows = { path = "crates/hcc-agente-windows" }
+hcc-controlador = { path = "crates/hcc-controlador" }
+hcc-laco = { path = "crates/hcc-laco" }
+
+[profile.release]
+lto = "thin"
+strip = true
