@@ -386,7 +386,12 @@ where C::S: 'static {
     let mut controle = Controle { prazo: inicio.checked_add(op.limite).unwrap_or(inicio), cancel: &cancel, progresso, tempos: vec![] };
     let mut sessao = None;
     let lock = controle.rodar(async {
-        let file = tokio::fs::OpenOptions::new().create(true).append(true).open(trava).await.map_err(erro_io)?;
+        let mut abrir = tokio::fs::OpenOptions::new();
+        abrir.create(true).append(true);
+        // Windows LockFileEx needs read or write access; append-only is refused.
+        #[cfg(windows)]
+        abrir.read(true);
+        let file = abrir.open(trava).await.map_err(erro_io)?;
         Ok(file.into_std().await)
     }).await;
     match lock {
