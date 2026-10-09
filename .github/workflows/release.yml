@@ -5,16 +5,37 @@ on:
 permissions:
   contents: write
 jobs:
-  windows-agent:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # zbus is pure Rust: the release binary links only libc/libm/libgcc_s, no libdbus-1-dev needed.
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - run: cargo build --release
+      - run: cp target/release/hangar-computer-control hangar-computer-control-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: hangar-computer-control-linux-x86_64
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - run: cargo build --release
+      - run: Copy-Item target/release/hangar-computer-control.exe windows-agent.exe
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
         with:
-          python-version: "3.13"
-      - run: ./scripts/build-windows-agent.ps1 -Output dist
-        shell: pwsh
-      - run: gh release create $env:GITHUB_REF_NAME dist/windows-agent.exe --title $env:GITHUB_REF_NAME --generate-notes
-        shell: pwsh
+          name: windows
+          path: windows-agent.exe
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" hangar-computer-control-linux-x86_64 windows-agent.exe --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

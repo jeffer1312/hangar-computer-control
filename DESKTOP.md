@@ -5,7 +5,7 @@ cliente (Codex/Claude/Hangar) e usa `HCC_AGENT_CONFIG` (obrigatória) para escol
 o agente local ou remoto.
 
 O agente não tem Jev nem LLM: fornece janelas, controles e ações pela UI Automation.
-O laço (`laco_uia.py`) monta as ações possíveis a partir da árvore e o Jev escolhe uma
+O laço (crate `hcc-laco`) monta as ações possíveis a partir da árvore e o Jev escolhe uma
 por ciclo. O LLM (`LLM_PROXY_URL`, `LLM_PROXY_KEY`, `LLM_MODEL`) só entra quando o Jev
 não acha saída ou a árvore vem vazia: recebe a imagem, interpreta e propõe ações que
 voltam para o Jev escolher. Ação com risco (apagar, sobrescrever, enviar) não pedida
@@ -15,9 +15,10 @@ desconexão precisam de nova observação; captura antiga não é resposta váli
 
 ## Empacotar no Windows
 
-Execute `scripts/build-windows-agent.ps1`. O resultado é `dist/windows-agent.exe`,
-incluindo Python e as bibliotecas. A máquina de destino não precisa instalar Python.
-O MCP controlador continua precisando do ambiente Python com suas dependências.
+O `windows-agent.exe` da release é o binário `hangar-computer-control` compilado para
+Windows: o mesmo arquivo é MCP sem argumentos e agente com `--config`. Para gerar à mão,
+`cargo build --release` num Windows produz `target\release\hangar-computer-control.exe`.
+A máquina de destino não precisa instalar nada além dele.
 O executável ainda não possui assinatura digital.
 
 ## Agente na mesma máquina
@@ -50,13 +51,13 @@ Tela bloqueada/UAC e aplicativos que não expõem controles podem impedir uma a�
 
 ## Agente Linux (Hyprland)
 
-`linux_agent.py` fala o mesmo protocolo do agente Windows; o laço e o MCP não mudam.
+O agente Linux é o próprio binário (`hangar-computer-control agent --config <arquivo>`) e fala
+o mesmo protocolo do agente Windows; o laço e o MCP não mudam.
 Roda só com transporte `local`, dentro da sessão Hyprland do usuário (precisa de
-`HYPRLAND_INSTANCE_SIGNATURE` e `WAYLAND_DISPLAY` no ambiente do MCP), e com o Python do
-sistema, onde está o `pyatspi` (pacote `python-atspi`); fora dele só usa a biblioteca padrão.
-Programas do sistema: `python-atspi`, `hyprctl`, `grim`, `ydotool` (com o serviço do usuário
+`HYPRLAND_INSTANCE_SIGNATURE` e `WAYLAND_DISPLAY` no ambiente do MCP). Lê o AT-SPI direto pelo
+D-Bus, sem Python. Programas do sistema: `hyprctl`, `pgrep` (procps), `grim`, `ydotool` (com o serviço do usuário
 ativo) e `wtype`; o que faltar aparece no erro da conexão. O alvo `linux` é automático (ver README);
-`linux-agent.json` é o modelo para apontar outro `linux_agent.py`.
+`linux-agent.json` é o modelo para apontar outro binário.
 
 - Janelas e foco: `hyprctl` (`clients`, `activewindow`, `monitors`; `dispatch` na sintaxe
   Lua `hl.dsp.*` do Hyprland 0.56). Programas abrem por `hl.dsp.exec_cmd`.
@@ -75,25 +76,17 @@ recebe o texto, mas o valor não é lido de volta.
 ## Usar no Hangar
 
 O Hangar já inicia os MCPs configurados no harness; não precisa carregar a automação
-no seu backend. O registro abaixo cria o MCP separado `desktop`, o servidor principal é `hangar-computer-control`:
-
-```bash
-.venv/bin/python scripts/register_desktop_mcp.py --target codex \
-  --client-config /caminho/da/conta/config.toml \
-  --agent-config /caminho/para/config-do-agente.json --check
-```
-
-Remova `--check` para gravar, com cópia da configuração anterior. Para Claude, use
-`--target claude` e o arquivo de configuração MCP correspondente. O registro não
-sobrescreve um MCP `desktop` preexistente de outra origem. `TYPESAFE_API_KEY` deve
+no seu backend. A tela Configurações > Controle do Windows registra o MCP
+`hangar-computer-control`; à mão, o registro é o do README (`command` = caminho
+do binário, `args` vazio). `TYPESAFE_API_KEY` deve
 estar no ambiente da sessão; no Hangar, isso corresponde à opção Jev do navegador.
 As chaves do LLM/Jev permanecem no controlador, não são enviadas ao agente Windows.
 
-Novas sessões carregam o registro; processos MCP já abertos não recarregam Python
+Novas sessões carregam o registro; processos MCP já abertos não recarregam o binário
 automaticamente. Esta integração não altera nem publica os instaladores do Hangar.
 
 ## Verificação
 
-`python -m unittest -v` executa os testes locais. O teste com modelos e Windows reais
+`cargo test --workspace` executa os testes locais. O teste com modelos e Windows reais
 deve usar um processo MCP novo e registrar os tempos e a captura final. Simulações
 de contrato não comprovam autonomia nem comportamento em telas Delphi.
