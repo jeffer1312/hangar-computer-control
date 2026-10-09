@@ -1,0 +1,159 @@
+{
+  "initialize": {
+    "capabilities": {
+      "prompts": {
+        "listChanged": false
+      },
+      "resources": {
+        "listChanged": false,
+        "subscribe": false
+      },
+      "tools": {
+        "listChanged": false
+      }
+    },
+    "protocolVersion": "2025-06-18",
+    "serverInfo": {
+      "name": "hangar-computer-control"
+    }
+  },
+  "tools_list": {
+    "tools": [
+      {
+        "description": "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    limite_segundos é o orçamento total; max_passos limita os ciclos internos.\n\n`alvo` escolhe o desktop controlado. Disponíveis: vm-a, vm-b; sem `alvo`, usa o padrão (vm-a).",
+        "inputSchema": {
+          "properties": {
+            "texto": {
+              "title": "Texto",
+              "type": "string"
+            },
+            "max_passos": {
+              "default": 12,
+              "title": "Max Passos",
+              "type": "integer"
+            },
+            "dados": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Dados"
+            },
+            "limite_segundos": {
+              "default": 240,
+              "title": "Limite Segundos",
+              "type": "number"
+            },
+            "alvo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Alvo"
+            }
+          },
+          "required": [
+            "texto"
+          ],
+          "type": "object",
+          "title": "objetivoArguments"
+        },
+        "name": "objetivo",
+        "outputSchema": {
+          "properties": {
+            "result": {
+              "title": "Result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result"
+          ],
+          "type": "object",
+          "title": "objetivoOutput"
+        }
+      },
+      {
+        "description": "Captura a tela do desktop e devolve o caminho do arquivo PNG.\n\n    Para quando o `objetivo` parou e você precisa olhar o que há na tela.\n    Cite o caminho devolvido na sua resposta para que o usuário veja a imagem.\n\n`alvo` escolhe o desktop controlado. Disponíveis: vm-a, vm-b; sem `alvo`, usa o padrão (vm-a).",
+        "inputSchema": {
+          "properties": {
+            "alvo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Alvo"
+            }
+          },
+          "type": "object",
+          "title": "ver_telaArguments"
+        },
+        "name": "ver_tela",
+        "outputSchema": {
+          "properties": {
+            "result": {
+              "title": "Result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result"
+          ],
+          "type": "object",
+          "title": "ver_telaOutput"
+        }
+      },
+      {
+        "description": "Diz se o desktop está acessível e em qual resolução.\n\n`alvo` escolhe o desktop controlado. Disponíveis: vm-a, vm-b; sem `alvo`, usa o padrão (vm-a).",
+        "inputSchema": {
+          "properties": {
+            "alvo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Alvo"
+            }
+          },
+          "type": "object",
+          "title": "estadoArguments"
+        },
+        "name": "estado",
+        "outputSchema": {
+          "properties": {
+            "result": {
+              "title": "Result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result"
+          ],
+          "type": "object",
+          "title": "estadoOutput"
+        }
+      }
+    ]
+  }
+}
