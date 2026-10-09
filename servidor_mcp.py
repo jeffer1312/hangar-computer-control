@@ -40,10 +40,20 @@ def linux_local() -> Path | None:
     if not sys.platform.startswith("linux") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return None
     caminho = Path.home() / ".cache" / "hangar-computer-control" / "linux-agent.json"
-    caminho.parent.mkdir(parents=True, exist_ok=True)
     # Python do sistema: é nele que o pyatspi está instalado, não no ambiente do uvx.
-    caminho.write_text(json.dumps({"transport": "local", "request_timeout": 15, "command": [
-        "/usr/bin/python3", str(Path(__file__).with_name("linux_agent.py"))]}))
+    conteudo = json.dumps({"transport": "local", "request_timeout": 15, "command": [
+        "/usr/bin/python3", str(Path(__file__).with_name("linux_agent.py"))]})
+    try:
+        if not caminho.is_file() or caminho.read_text() != conteudo:
+            caminho.parent.mkdir(parents=True, exist_ok=True)
+            # Troca atômica: outra sessão lendo ao mesmo tempo nunca vê o arquivo pela metade.
+            temporario = caminho.with_name(f".{caminho.name}.{os.getpid()}")
+            temporario.write_text(conteudo)
+            os.replace(temporario, caminho)
+    except OSError as e:
+        # Roda na importação: falhar aqui derrubaria também os alvos Windows.
+        print(f"alvo linux indisponível: não gravei {caminho}: {e}", file=sys.stderr)
+        return None
     return caminho
 
 
