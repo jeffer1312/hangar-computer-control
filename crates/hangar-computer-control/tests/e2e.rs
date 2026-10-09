@@ -17,6 +17,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const BIN: &str = env!("CARGO_BIN_EXE_hangar-computer-control");
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+const JEV_MODEL: &str = "~typesafe/jev-latest";
 
 #[test]
 fn fake_desktop_build_refuses_real_desktop() {
@@ -87,7 +88,7 @@ fn observacao(valor: &str, conectado: bool) -> Value {
 struct Ambiente {
     casa: tempfile::TempDir,
     alvos: tempfile::TempDir,
-    _rt: tokio::runtime::Runtime,
+    rt: tokio::runtime::Runtime,
     modelos: MockServer,
 }
 
@@ -105,7 +106,7 @@ impl Ambiente {
                 .mount(&s).await;
             s
         });
-        let amb = Self { casa: tempfile::tempdir().unwrap(), alvos: tempfile::tempdir().unwrap(), _rt: rt, modelos };
+        let amb = Self { casa: tempfile::tempdir().unwrap(), alvos: tempfile::tempdir().unwrap(), rt, modelos };
         std::fs::write(amb.alvos.path().join("roteiro.json"), roteiro.to_string()).unwrap();
         // Short RPC timeout: a dead agent is noticed in 3 s instead of the default 15 s.
         let config = json!({"transport": "local", "request_timeout": 3, "command": [BIN, "agent"]});
@@ -132,7 +133,8 @@ impl Ambiente {
             .env("HCC_AGENT_CONFIG", self.config())
             .env("HCC_FAKE_DESKTOP", self.alvos.path().join("roteiro.json"))
             .env("TYPESAFE_API_KEY", "chave-falsa")
-            .env("HCC_JEV_URL", format!("{}/jev", self.modelos.uri()))
+            .env("JEV_ENDPOINT", format!("{}/jev", self.modelos.uri()))
+            .env("JEV_MODEL", JEV_MODEL)
             .env("LLM_PROXY_URL", format!("{}/llm", self.modelos.uri()))
             .env("LLM_PROXY_KEY", "chave-falsa")
             .stdin(Stdio::piped())
@@ -293,6 +295,10 @@ fn objetivo_reaches_concluido() {
     let acoes: Vec<Value> = acoes.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(acoes.len(), 1, "{acoes:?}");
     assert_eq!(acoes[0]["action"], json!({"type": "set_value", "target": "e0", "value": "Zé"}));
+    let pedidos = amb.rt.block_on(amb.modelos.received_requests()).unwrap();
+    let modelos: Vec<Value> = pedidos.iter().filter(|p| p.url.path() == "/jev")
+        .map(|p| serde_json::from_slice::<Value>(&p.body).unwrap()["model"].clone()).collect();
+    assert!(!modelos.is_empty() && modelos.iter().all(|m| m == JEV_MODEL), "{modelos:?}");
 }
 
 #[test]
@@ -343,7 +349,7 @@ fn objetivo_pendurado() -> (Ambiente, Servidor, u32) {
     let agente = esperar_agente(&s);
     // The agent is up; give the loop time to reach the Jev call that hangs.
     let limite = Instant::now() + Duration::from_secs(10);
-    while amb._rt.block_on(amb.modelos.received_requests()).unwrap_or_default().is_empty() {
+    while amb.rt.block_on(amb.modelos.received_requests()).unwrap_or_default().is_empty() {
         assert!(Instant::now() < limite, "o laço não chegou ao Jev");
         std::thread::sleep(Duration::from_millis(50));
     }

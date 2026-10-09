@@ -79,7 +79,8 @@ O Hangar já inicia os MCPs configurados no harness; não precisa carregar a aut
 no seu backend. A tela Configurações > Controle do Windows registra o MCP
 `hangar-computer-control`; à mão, o registro é o do README (`command` = caminho
 do binário, `args` vazio). `TYPESAFE_API_KEY` deve
-estar no ambiente da sessão; no Hangar, isso corresponde à opção Jev do navegador.
+estar no ambiente da sessão; `JEV_ENDPOINT` e `JEV_MODEL` são opcionais (vazios usam
+`https://api.typesafe.ai/v1/systemone` e `jev-latest`). No Hangar, isso corresponde à opção Jev do navegador.
 As chaves do LLM/Jev permanecem no controlador, não são enviadas ao agente Windows.
 
 Novas sessões carregam o registro; processos MCP já abertos não recarregam o binário

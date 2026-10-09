@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use hcc_controlador::AgentConnector;
 use hcc_laco::executar::{Opcoes, executar};
-use hcc_laco::jev::{JEV_URL, Jev};
+use hcc_laco::jev::{JEV_MODEL, JEV_URL, Jev};
 use hcc_laco::llm::Llm;
 use hcc_laco::tipos::Progresso;
 use hcc_protocolo::{Connector, Session};
@@ -26,10 +26,14 @@ fn conector(config: Option<PathBuf>) -> AgentConnector {
 }
 
 fn jev() -> Option<Jev> {
-    let chave = std::env::var("TYPESAFE_API_KEY").ok().filter(|k| !k.is_empty())?;
-    // HCC_JEV_URL: test/ops override of the TypeSafe endpoint, read only when set.
-    let url = std::env::var("HCC_JEV_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| JEV_URL.to_owned());
-    Some(Jev::new(url, chave))
+    let var = |nome| std::env::var(nome).unwrap_or_default();
+    resolver_jev(var("TYPESAFE_API_KEY"), var("JEV_ENDPOINT"), var("JEV_MODEL"))
+}
+
+/// Shared Jev configuration: empty endpoint or model falls back to the TypeSafe default.
+fn resolver_jev(chave: String, endpoint: String, modelo: String) -> Option<Jev> {
+    let ou = |v: String, padrao: &str| if v.is_empty() { padrao.to_owned() } else { v };
+    (!chave.is_empty()).then(|| Jev::new(ou(endpoint, JEV_URL), chave, ou(modelo, JEV_MODEL)))
 }
 
 /// `tempfile.mkdtemp(prefix="hcu-tela-")`: a new private directory in the temp dir.
@@ -117,5 +121,19 @@ impl Motor for MotorReal {
 
     fn estado(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<String> {
         Box::pin(consultar(config, cancel))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolver_jev;
+
+    #[test]
+    fn default_endpoint_and_model_when_env_empty() {
+        let jev = resolver_jev("k".into(), String::new(), String::new()).unwrap();
+        assert_eq!((jev.url.as_str(), jev.model.as_str()), ("https://api.typesafe.ai/v1/systemone", "jev-latest"));
+        let jev = resolver_jev("k".into(), "http://x/decisions".into(), "~typesafe/jev-latest".into()).unwrap();
+        assert_eq!((jev.url.as_str(), jev.model.as_str()), ("http://x/decisions", "~typesafe/jev-latest"));
+        assert!(resolver_jev(String::new(), String::new(), String::new()).is_none());
     }
 }

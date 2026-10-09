@@ -25,7 +25,8 @@ No controlador (esta máquina, Linux ou Windows):
   (`https://github.com/jeffer1312/hangar-computer-control/releases`): `hangar-computer-control-linux-x86_64`
   no Linux (renomeie e dê `chmod +x`), `windows-agent.exe` no Windows. Sem argumentos ele é o MCP (stdio);
   `hangar-computer-control agent --config <arquivo>` é o agente. Não precisa de Python nem de outro runtime.
-- `TYPESAFE_API_KEY` no ambiente (Jev).
+- `TYPESAFE_API_KEY` no ambiente (Jev) e, se não for o padrão, `JEV_ENDPOINT` (padrão `https://api.typesafe.ai/v1/systemone`)
+  e `JEV_MODEL` (padrão `jev-latest`). Vazio usa o padrão.
 - `LLM_PROXY_KEY` no ambiente e, se não for o padrão, `LLM_PROXY_URL` (padrão `http://127.0.0.1:8317/v1/chat/completions`)
   e `LLM_MODEL` (padrão `gpt-5.6-luna`). `LLM_EFFORT` (`low`/`medium`/`high`) vai como `reasoning_effort`;
   vazio não envia. Qualquer endpoint compatível com OpenAI `/v1/chat/completions` serve. Só é usado no fallback com imagem.
@@ -81,6 +82,7 @@ O Hangar faz isso pela tela Configurações > Controle do Windows. À mão, no `
   "command": "/caminho/para/hangar-computer-control",
   "args": [],
   "env": {"HCC_AGENT_CONFIG": "/caminho/minha-vm-agent.json", "TYPESAFE_API_KEY": "…",
+          "JEV_ENDPOINT": "…", "JEV_MODEL": "…",
           "LLM_PROXY_URL": "…", "LLM_PROXY_KEY": "…", "LLM_MODEL": "…"}}}}
 ```
 

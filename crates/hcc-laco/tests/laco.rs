@@ -11,7 +11,7 @@ use hcc_laco::candidatos::{candidatos, segredos};
 use hcc_laco::descrever::descrever;
 use hcc_laco::executar::{Opcoes, executar};
 use hcc_laco::geometria::{dentro, para_tela};
-use hcc_laco::jev::{Jev, LOTE};
+use hcc_laco::jev::{JEV_MODEL, Jev, LOTE};
 use hcc_laco::llm::Llm;
 use hcc_laco::resultado::Resultado;
 use hcc_laco::tipos::{Escolha, Progresso};
@@ -31,7 +31,7 @@ async fn setup(answers: Vec<Answer>) -> (Opcoes, MockServer) {
     let op = Opcoes {
         texto: "preencher Nome com Ana".into(), max_passos: 3,
         dados: json!({"nome":"Ana"}).as_object().unwrap().clone(), limite: seconds(240), config: Some(config),
-        jev: Some(Jev::new(format!("{}/jev", server.uri()), "fake-key".into())),
+        jev: Some(Jev::new(format!("{}/jev", server.uri()), "fake-key".into(), JEV_MODEL.into())),
         llm: Llm::new(format!("{}/llm", server.uri()), "fake-model".into(), None, Some("fake-key".into())),
     };
     (op, server)
@@ -237,7 +237,7 @@ async fn batch_selection_returns_numeric_winner() {
         "batch_1":{"choice":"260","probabilities":{"260":0.8}}, "risky":{"noul":0},
     }}))).mount(&server).await;
     let c = candidatos(&obs, &Map::new(), &HashSet::new());
-    let d = Jev::new(server.uri(), "fake-key".into()).decidir(&json!({}), &c, seconds(10)).await.unwrap();
+    let d = Jev::new(server.uri(), "fake-key".into(), JEV_MODEL.into()).decidir(&json!({}), &c, seconds(10)).await.unwrap();
     assert_eq!((d.escolha, d.p, d.risco), (Escolha::Indice(260), 0.8, 0.0));
     assert_eq!(bodies(&server).await[0]["questions"]["batch_0"]["criteria"].as_object().unwrap().len(), LOTE + 3);
 }
@@ -596,7 +596,7 @@ async fn budget_caps_hanging_jev_request() {
     let server = MockServer::start().await;
     Mock::given(path("/jev")).respond_with(ResponseTemplate::new(200).set_delay(seconds(5)).set_body_json(json!({}))).mount(&server).await;
     let (mut op, _server) = setup(vec![]).await;
-    op.jev = Some(Jev::new(format!("{}/jev", server.uri()), "fake-key".into()));
+    op.jev = Some(Jev::new(format!("{}/jev", server.uri()), "fake-key".into(), JEV_MODEL.into()));
     op.limite = Duration::from_millis(50);
     let start = Instant::now();
     let r = run(op, &con).await;
