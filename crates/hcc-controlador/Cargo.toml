@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "fake-agent"
+path = "src/bin/fake-agent.rs"
+required-features = ["test-fake"]
+
 [features]
 test-fake = []
 
