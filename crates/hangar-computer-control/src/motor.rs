@@ -28,8 +28,8 @@ pub trait Motor: Send + Sync + 'static {
         progresso: Box<dyn Fn(String) + Send + Sync>,
     ) -> Futuro<String>;
     /// `"<png path>; <secs>s"`.
-    fn ver_tela(&self, config: Option<PathBuf>) -> Futuro<Result<String, String>>;
-    fn estado(&self, config: Option<PathBuf>) -> Futuro<String>;
+    fn ver_tela(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<Result<String, String>>;
+    fn estado(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<String>;
 }
 
 pub fn rotulo(p: &Progresso) -> String {
@@ -83,15 +83,27 @@ impl Motor for FakeMotor {
         })
     }
 
-    fn ver_tela(&self, config: Option<PathBuf>) -> Futuro<Result<String, String>> {
+    fn ver_tela(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<Result<String, String>> {
         Box::pin(async move {
+            if config.as_ref().and_then(|c| c.file_name()).is_some_and(|n| n.to_string_lossy().contains("esperar-cancelamento")) {
+                eprintln!("fake: ver_tela esperando cancelamento");
+                cancel.cancelled().await;
+                eprintln!("fake: ver_tela cancelado");
+                return Err("cancelado".to_owned());
+            }
             config.map(|c| format!("{}; 0.00s", c.display())).ok_or_else(|| "sem config".to_owned())
         })
     }
 
-    fn estado(&self, config: Option<PathBuf>) -> Futuro<String> {
+    fn estado(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<String> {
         Box::pin(async move {
             let Some(c) = config else { return "indisponível: sem config".to_owned() };
+            if c.file_name().is_some_and(|n| n.to_string_lossy().contains("esperar-cancelamento")) {
+                eprintln!("fake: estado esperando cancelamento");
+                cancel.cancelled().await;
+                eprintln!("fake: estado cancelado");
+                return "indisponível: cancelado".to_owned();
+            }
             let lido = std::fs::read_to_string(&c).map_err(|e| e.to_string()).and_then(|t| {
                 serde_json::from_str::<Value>(&t).map_err(|e| e.to_string())
             });

@@ -382,7 +382,14 @@ async fn lock_busy_message() {
     let key = format!("{user}:{}", op.config.as_ref().unwrap().display());
     let digest: String = Sha256::digest(key.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
     let path = std::env::temp_dir().join(format!("hangar-computer-control-{}.lock", &digest[..12]));
-    let lock = OpenOptions::new().create(true).append(true).open(path).unwrap();
+    let mut abrir = OpenOptions::new();
+    abrir.create(true).read(true).append(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        abrir.share_mode(0);
+    }
+    let lock = abrir.open(path).unwrap();
     lock.try_lock().unwrap();
     let r = run(op, &con).await;
     assert_eq!(r.motivo, "outro objetivo ainda está controlando o desktop");
@@ -418,6 +425,83 @@ async fn whole_run_never_leaks_secret() {
     let observation: Value = serde_json::from_slice(&std::fs::read(dir.join("observacao.json")).unwrap()).unwrap();
     assert_eq!(observation["elements"][0]["value"], "echo: <senha>");
     assert_eq!(r.captura, Some(dir.join("tela.png")));
+}
+
+#[test]
+fn escaped_agent_echoes_mask_only_the_full_secret() {
+    for (senha, eco) in [
+        ("ab\u{a0}\\c9", "campo ficou com 'xab\u{a0}\\\\c9'"),
+        ("ab\u{200b}\u{e000}\u{f0000}\\c9", "campo ficou com 'xab\\u200b\\ue000\u{f0000}\\\\c9'"),
+    ] {
+        let normal = "ab\u{a0}\\c8";
+        let dados = json!({"senha": senha, "nome": normal}).as_object().unwrap().clone();
+        let estado = hcc_laco::estado::estado_compacto("preencher", &dados, &tree("o1", normal), &[], Some(eco));
+        assert_eq!(estado["hint"], "campo ficou com 'x<senha>'");
+        assert_eq!(estado["data"]["senha"], "<senha>");
+        assert_eq!(estado["data"]["nome"], normal);
+        assert_eq!(estado["elements"][0]["value"], normal);
+    }
+}
+
+#[tokio::test]
+async fn echoed_readback_with_backslash_is_masked() {
+    fn sem_segredo(valor: &Value, formas: &[&str]) {
+        match valor {
+            Value::String(s) => {
+                for forma in formas { assert!(!s.contains(forma), "segredo {forma:?} exposto em {s:?}"); }
+                if let Ok(interno) = serde_json::from_str::<Value>(s) { sem_segredo(&interno, formas); }
+            }
+            Value::Array(a) => a.iter().for_each(|v| sem_segredo(v, formas)),
+            Value::Object(m) => {
+                for (k, v) in m { sem_segredo(&json!(k), formas); sem_segredo(v, formas); }
+            }
+            _ => {}
+        }
+    }
+    for (senha, simples, duplas, lido) in [
+        ("ab\\c9", "ab\\\\c9", "ab\\\\c9", "'xab\\\\c9'"),
+        ("ab'c9", "ab\\'c9", "ab'c9", "\"xab'c9\""),
+        ("ab\"c9", "ab\"c9", "ab\\\"c9", "'xab\"c9'"),
+        ("ab'\"c9", "ab\\'\"c9", "ab'\\\"c9", "'xab\\'\"c9'"),
+        ("ab\r\n\t\0c9", "ab\\r\\n\\t\\x00c9", "ab\\r\\n\\t\\x00c9", "'xab\\r\\n\\t\\x00c9'"),
+        ("ab\u{200b}\u{e000}\u{f0000}c9", "ab\\u200b\\ue000\\U000f0000c9", "ab\\u200b\\ue000\\U000f0000c9", "'xab\\u200b\\ue000\\U000f0000c9'"),
+        ("ab\u{a0}\\c9", "ab\\xa0\\\\c9", "ab\\xa0\\\\c9", "'xab\u{a0}\\\\c9'"),
+        ("ab\u{200b}\u{e000}\u{f0000}\\c9", "ab\\u200b\\ue000\\U000f0000\\\\c9", "ab\\u200b\\ue000\\U000f0000\\\\c9", "'xab\\u200b\\ue000\u{f0000}\\\\c9'"),
+    ] {
+        let mut obs = tree("o1", &format!("raw: {senha}; single: {simples}; double: {duplas}"));
+        obs.elements[0].password = true;
+        obs.elements[0].name = format!("Senha {simples} | {duplas}");
+        obs.windows[0].name = format!("Editor {simples} | {duplas}");
+        let erro = format!("valor digitado não confirmado; campo ficou com {lido}");
+        let con = FakeConnector::new(vec![obs]);
+        con.state.lock().unwrap().act_errors.push_back(SessionError::Agent(erro));
+        let (mut op, server) = setup(vec![select("set_value"), Answer::Choice("BLOCKED", 0.9, 0.05),
+            Answer::Vision(json!({"interpretacao":format!("campo ficou com {lido}"), "acoes":[]})), done()]).await;
+        op.dados = json!({"senha":senha}).as_object().unwrap().clone();
+        let progress = Mutex::new(vec![]);
+        let r = executar(op, &con, CancellationToken::new(), &|p| progress.lock().unwrap().push(p)).await;
+        let requests = bodies(&server).await;
+        assert_eq!(requests.len(), 4, "{}", r.resumo());
+        assert_eq!(requests[1]["state"]["recentActions"][0]["result"],
+            format!("NOT executed: valor digitado não confirmado; campo ficou com {}x<senha>{}",
+                &lido[..1], &lido[lido.len() - 1..]));
+        let llm_estado: Value = serde_json::from_str(requests[2]["messages"][1]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(llm_estado["recentActions"], requests[1]["state"]["recentActions"]);
+        assert_eq!(requests[3]["state"]["hint"], format!("campo ficou com {}x<senha>{}", &lido[..1], &lido[lido.len() - 1..]));
+        let formas = [senha, simples, duplas];
+        for body in requests { sem_segredo(&body, &formas); }
+        let dir = r.registro.as_ref().unwrap();
+        for file in ["jev.jsonl", "observacao.json"] {
+            for linha in std::fs::read_to_string(dir.join(file)).unwrap().lines() {
+                sem_segredo(&serde_json::from_str::<Value>(linha).unwrap(), &formas);
+            }
+        }
+        sem_segredo(&json!(r.passos), &formas);
+        sem_segredo(&json!(r.resumo()), &formas);
+        sem_segredo(&json!(format!("{:?}", progress.lock().unwrap())), &formas);
+        assert_eq!(r.passos.len(), 1);
+        assert!(r.resumo().contains("<senha>"));
+    }
 }
 
 #[tokio::test]
@@ -555,7 +639,7 @@ async fn slow_cleanup_keeps_lock_without_delaying_result() {
         let entered = entered_rx.recv_timeout(seconds(3)).is_ok();
         let returned = returned_rx.recv_timeout(Duration::from_millis(100)).is_ok();
         let busy = if returned {
-            let file = OpenOptions::new().append(true).open(lock_path).unwrap();
+            let file = OpenOptions::new().read(true).append(true).open(lock_path).unwrap();
             matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
         } else { false };
         release.send(()).unwrap();

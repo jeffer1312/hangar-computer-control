@@ -1,12 +1,14 @@
 //! Compact state sent to Jev, screen signature and the no-controls check (laco_uia.py:211-243).
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use hcc_protocolo::{ElementAction, Observation, Rect};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use crate::candidatos::{chave_secreta, segredos};
+use crate::descrever::py_repr_com;
 use crate::tipos::Registro;
 
 const NAO_JANELAS: [&str; 3] = ["Shell_TrayWnd", "Progman", "Worker Window"];
@@ -75,8 +77,10 @@ pub fn estado_compacto(
     if let Some(h) = hint.filter(|h| !h.is_empty()) {
         estado["hint"] = json!(h);
     }
-    if let Some(re) = padrao_segredos(dados) {
-        mascarar(&mut estado, &re);
+    let valores = segredos(dados);
+    let padrao = padrao_segredos(&valores);
+    if valores.iter().any(|s| !s.is_empty()) {
+        mascarar(&mut estado, &padrao.expect("não foi possível preparar a proteção dos segredos"));
     }
     // After the pass, so a short secret never re-matches inside the placeholder.
     for (k, v) in estado["data"].as_object_mut().into_iter().flatten() {
@@ -93,12 +97,32 @@ pub fn estado_compacto(
     estado
 }
 
-/// One alternation, longest first, so `<senha>` itself is never re-matched by a short secret.
-fn padrao_segredos(dados: &Map<String, Value>) -> Option<Regex> {
-    let mut sec: Vec<String> = segredos(dados).into_iter().filter(|s| !s.is_empty()).collect();
-    sec.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-    let alternativas: Vec<String> = sec.iter().map(|s| regex::escape(s)).collect();
-    (!alternativas.is_empty()).then(|| Regex::new(&alternativas.join("|")).unwrap())
+/// Raw and repr echoes in one pass, longest first, without re-matching `<senha>`.
+pub(crate) fn padrao_segredos(valores: &HashSet<String>) -> Option<Regex> {
+    let mut sec = Vec::new();
+    for s in valores.iter().filter(|s| !s.is_empty()) {
+        sec.push((s.len(), regex::escape(s)));
+        for aspa in ['\'', '"'] {
+            let tamanho = py_repr_com(s, aspa).len() - 2;
+            let mut alternativa = String::new();
+            for c in s.chars() {
+                let literal = c.to_string();
+                let repr = py_repr_com(&literal, aspa);
+                let interior = &repr[1..repr.len() - 1];
+                // Agents disagree on which Unicode characters are printable.
+                if !c.is_control() && c != '\\' && c != aspa && interior != literal {
+                    alternativa.push_str(&format!("(?:{}|{})", regex::escape(interior), regex::escape(&literal)));
+                } else {
+                    alternativa.push_str(&regex::escape(interior));
+                }
+            }
+            sec.push((tamanho, alternativa));
+        }
+    }
+    sec.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    sec.dedup();
+    let alternativas: Vec<String> = sec.into_iter().map(|(_, s)| s).collect();
+    (!alternativas.is_empty()).then(|| Regex::new(&alternativas.join("|"))).and_then(Result::ok)
 }
 
 /// Every string of the state, whatever field echoes it (titles, recent actions, data under a plain key).

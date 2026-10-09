@@ -121,13 +121,55 @@ fn erro(texto: String) -> CallToolResult {
 struct Servidor {
     motor: Arc<dyn Motor>,
     ferramentas: Vec<Tool>,
-    /// Cancels every running objective (stdin EOF or signal).
+    /// Cancels every running tool (stdin EOF or signal).
     desligar: CancellationToken,
-    /// Each running objective holds a read guard; shutdown takes the write side to wait for them.
+    /// Each running tool holds a read guard; shutdown takes the write side to wait for them.
     vivos: Arc<RwLock<()>>,
 }
 
 impl Servidor {
+    fn cancelamento(&self, do_cliente: CancellationToken) -> CancellationToken {
+        let cancel = self.desligar.child_token();
+        let ponte = cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = do_cliente.cancelled() => ponte.cancel(),
+                () = ponte.cancelled() => {}
+            }
+        });
+        cancel
+    }
+
+    async fn consultar(&self, nome: &str, a: ArgsAlvo, ctx: RequestContext<RoleServer>) -> CallToolResult {
+        let config = match alvos::config_do(a.alvo.as_deref()) {
+            Ok(c) => c,
+            Err(e) => return erro(e),
+        };
+        let Ok(guarda) = self.vivos.clone().try_read_owned() else {
+            return erro("servidor encerrando".to_owned());
+        };
+        let cancel = self.cancelamento(ctx.ct.clone());
+        let _cancela_ao_sair = cancel.clone().drop_guard();
+        let motor = self.motor.clone();
+        let tela = nome == "ver_tela";
+        let tarefa = tokio::spawn(async move {
+            let r = if tela {
+                match motor.ver_tela(config, cancel).await {
+                    Ok(t) => sucesso(t),
+                    Err(e) => erro(e),
+                }
+            } else {
+                sucesso(motor.estado(config, cancel).await)
+            };
+            drop(guarda);
+            r
+        });
+        match tarefa.await {
+            Ok(r) => r,
+            Err(e) => erro(format!("falha interna: {e}")),
+        }
+    }
+
     async fn objetivo(&self, a: ArgsObjetivo, ctx: RequestContext<RoleServer>) -> CallToolResult {
         let config = match alvos::config_do(a.alvo.as_deref()) {
             Ok(c) => c,
@@ -147,15 +189,7 @@ impl Servidor {
             config,
         };
 
-        let cancel = self.desligar.child_token();
-        let do_cliente = ctx.ct.clone();
-        let ponte = cancel.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                () = do_cliente.cancelled() => ponte.cancel(),
-                () = ponte.cancelled() => {}
-            }
-        });
+        let cancel = self.cancelamento(ctx.ct.clone());
         // If rmcp drops this handler, the motor still sees the cancel.
         let _cancela_ao_sair = cancel.clone().drop_guard();
 
@@ -234,14 +268,7 @@ impl ServerHandler for Servidor {
             },
             nome @ ("ver_tela" | "estado") => match serde_json::from_value::<ArgsAlvo>(args) {
                 Err(e) => invalido(e),
-                Ok(a) => match alvos::config_do(a.alvo.as_deref()) {
-                    Err(e) => erro(e),
-                    Ok(config) if nome == "estado" => sucesso(self.motor.estado(config).await),
-                    Ok(config) => match self.motor.ver_tela(config).await {
-                        Ok(t) => sucesso(t),
-                        Err(e) => erro(e),
-                    },
-                },
+                Ok(a) => self.consultar(nome, a, context).await,
             },
             outro => erro(format!("ferramenta desconhecida: {outro}")),
         };

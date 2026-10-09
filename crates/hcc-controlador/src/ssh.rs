@@ -243,6 +243,10 @@ impl SshTransport {
 
     pub async fn close(&mut self, pid: Option<u32>) -> Result<(), String> {
         if self.closed { return Ok(()); }
+        let tunnel = match self.tunnel.take() {
+            Some(mut tunnel) => tunnel.stop().await,
+            None => Ok(()),
+        };
         let remote = if self.executable.is_some() {
             match self.stop_command(pid) {
                 Ok(command) => self.runner.run(command).await
@@ -251,25 +255,21 @@ impl SshTransport {
                 Err(error) => Err(error),
             }
         } else { Ok(()) };
-        let tunnel = match self.tunnel.take() {
-            Some(mut tunnel) => tunnel.stop().await,
-            None => Ok(()),
-        };
         self.closed = true;
         self.cleanup_result(remote, tunnel)
     }
 
     pub fn close_sync(&mut self, pid: Option<u32>) -> Result<(), String> {
         if self.closed { return Ok(()); }
+        let tunnel = match self.tunnel.take() {
+            Some(mut tunnel) => tunnel.stop_sync(),
+            None => Ok(()),
+        };
         let remote = if self.executable.is_some() {
             self.stop_command(pid).and_then(|command| self.runner.run_sync(command))
                 .map_err(|e| format!("inicialização Windows falhou: {}", tail(&e, 1500)))
                 .and_then(parse_remote).map(|_| ())
         } else { Ok(()) };
-        let tunnel = match self.tunnel.take() {
-            Some(mut tunnel) => tunnel.stop_sync(),
-            None => Ok(()),
-        };
         self.closed = true;
         self.cleanup_result(remote, tunnel)
     }

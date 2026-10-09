@@ -18,6 +18,21 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 const BIN: &str = env!("CARGO_BIN_EXE_hangar-computer-control");
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+#[test]
+fn fake_desktop_build_refuses_real_desktop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("agent.json");
+    std::fs::write(&config, "{}").unwrap();
+    let output = Command::new(BIN)
+        .env_clear()
+        .args(["agent", "--config"])
+        .arg(&config)
+        .output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("build fake-desktop: defina HCC_FAKE_DESKTOP; o desktop real não é usado"), "{stderr}");
+}
+
 #[derive(Clone)]
 enum Resposta {
     /// Picks the option whose criterion contains the text.
@@ -295,6 +310,29 @@ fn agent_killed_mid_run_answers_parou_within_limit() {
     assert!(gasto < limite, "{gasto:.1}s ≥ {limite}s: {texto}");
     #[cfg(target_os = "linux")]
     assert_eq!(filhos(s.filho.id()), Vec::<u32>::new(), "agente sobrou (ou zumbi) depois da resposta");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_during_consultation_startup_reaps_child() {
+    for nome in ["ver_tela", "estado"] {
+        let amb = Ambiente::novo(roteiro_cadastro(), concluir());
+        let config = json!({"transport": "local", "command": ["/usr/bin/python3", "-I", "-c", "import signal; signal.pause()"]});
+        std::fs::write(amb.config(), config.to_string()).unwrap();
+        let mut s = Servidor::iniciar(amb.comando());
+        s.pedir(1, nome, json!({}), json!({}));
+        let agente = esperar_agente(&s);
+        assert!(Command::new("kill").args(["-TERM", &s.filho.id().to_string()]).status().unwrap().success());
+        let saiu = s.sair_em(Duration::from_secs(6));
+        let sobrou = vivo(agente);
+        if sobrou {
+            assert!(Command::new("kill").args(["-KILL", &agente.to_string()]).status().unwrap().success());
+        }
+        assert!(saiu, "{nome}: server did not exit on SIGTERM");
+        assert!(!sobrou, "{nome}: child {agente} survived shutdown");
+        assert!(!std::fs::read_dir(amb.casa.path()).unwrap().any(|e|
+            e.unwrap().file_name().to_string_lossy().starts_with("hcc-agent-")), "{nome}: connection directory survived shutdown");
+    }
 }
 
 #[cfg(target_os = "linux")]

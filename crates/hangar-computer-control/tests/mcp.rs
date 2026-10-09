@@ -89,6 +89,9 @@ impl Servidor {
     }
 
     fn resposta(&mut self, id: u64) -> Value {
+        if let Some(i) = self.notificacoes.iter().position(|m| m["id"] == json!(id)) {
+            return self.notificacoes.remove(i);
+        }
         let limite = Instant::now() + Duration::from_secs(10);
         loop {
             let resto = limite.saturating_duration_since(Instant::now());
@@ -370,6 +373,63 @@ fn stdin_eof_exits_0() {
     s.entrada = None;
     let status = s.esperar_saida(Duration::from_secs(3)).expect("server did not exit on EOF");
     assert_eq!(status.code(), Some(0), "{}", s.stderr());
+}
+
+fn consulta_esperando_cancelamento(nome: &str) -> (Ambiente, Servidor) {
+    let amb = Ambiente::novo(&[("esperar-cancelamento-agent.json", VALIDO), ("vm-a-agent.json", VALIDO)]);
+    let mut s = Servidor::iniciar(amb.comando());
+    s.inicializar();
+    s.enviar(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+        "name": nome, "arguments": {"alvo": "esperar-cancelamento"}}}));
+    ferramentas(&mut s);
+    (amb, s)
+}
+
+fn eof_durante_consulta(nome: &str) {
+    let (_amb, mut s) = consulta_esperando_cancelamento(nome);
+    s.entrada = None;
+    let resposta = s.resposta(3)["result"].clone();
+    if nome == "ver_tela" {
+        assert_eq!(resposta["isError"], json!(true), "{resposta}");
+        assert_eq!(texto(&resposta), "cancelado");
+    } else {
+        assert_eq!(texto(&resposta), "indisponível: cancelado");
+    }
+    let status = s.esperar_saida(Duration::from_secs(6)).expect("server did not exit on EOF");
+    assert_eq!(status.code(), Some(0), "{}", s.stderr());
+    assert!(s.esperar_stderr(&format!("fake: {nome} cancelado"), Duration::from_secs(2)), "{}", s.stderr());
+}
+
+#[test]
+fn eof_during_ver_tela_cancels_and_exits() { eof_durante_consulta("ver_tela"); }
+
+#[test]
+fn eof_during_estado_cancels_and_exits() { eof_durante_consulta("estado"); }
+
+#[test]
+fn client_cancel_reaches_ver_tela_and_estado() {
+    for nome in ["ver_tela", "estado"] {
+        let (_amb, mut s) = consulta_esperando_cancelamento(nome);
+        assert!(s.esperar_stderr(&format!("fake: {nome} esperando cancelamento"), Duration::from_secs(3)), "{}", s.stderr());
+        s.enviar(json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": 3, "reason": "teste"}}));
+        assert!(s.esperar_stderr(&format!("fake: {nome} cancelado"), Duration::from_secs(3)), "{}", s.stderr());
+        let r = s.chamar(4, "estado", json!({"alvo": "vm-a"}), None);
+        assert_eq!(texto(&r), "disponível via acessibilidade, 1280x800");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_during_ver_tela_and_estado_cancels_and_exits() {
+    for nome in ["ver_tela", "estado"] {
+        let (_amb, mut s) = consulta_esperando_cancelamento(nome);
+        assert!(s.esperar_stderr(&format!("fake: {nome} esperando cancelamento"), Duration::from_secs(3)), "{}", s.stderr());
+        assert!(Command::new("kill").args(["-TERM", &s.filho.id().to_string()]).status().unwrap().success());
+        let status = s.esperar_saida(Duration::from_secs(6)).expect("server did not exit on SIGTERM");
+        assert_eq!(status.code(), Some(0), "{}", s.stderr());
+        assert!(s.esperar_stderr(&format!("fake: {nome} cancelado"), Duration::from_secs(2)), "{}", s.stderr());
+    }
 }
 
 #[test]

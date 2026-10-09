@@ -22,6 +22,8 @@ struct FakeRunner {
     calls: Mutex<Vec<(String, ProcessCommand)>>,
     results: Mutex<VecDeque<Result<Output, String>>>,
     tunnel_pid: Mutex<Option<u32>>,
+    #[cfg(target_os = "linux")]
+    tunnel_reaped_before_sync_stop: Mutex<Option<bool>>,
 }
 
 impl FakeRunner {
@@ -59,6 +61,11 @@ impl Runner for FakeRunner {
     }
 
     fn run_sync(&self, command: ProcessCommand) -> Result<Output, String> {
+        #[cfg(target_os = "linux")]
+        if serde_json::from_slice::<Value>(&command.stdin).unwrap()["operation"] == "stop" {
+            let pid = self.tunnel_pid.lock().unwrap().unwrap();
+            *self.tunnel_reaped_before_sync_stop.lock().unwrap() = Some(!Path::new(&format!("/proc/{pid}")).exists());
+        }
         self.record("run_sync", command)
     }
 }
@@ -241,6 +248,8 @@ async fn drop_runs_stop_synchronously_with_twenty_second_limit_and_reaps_tunnel(
     assert_eq!(kind, "run_sync");
     assert_eq!(command.timeout, Duration::from_secs(20));
     assert_eq!(serde_json::from_slice::<Value>(&command.stdin).unwrap()["operation"], "stop");
+    #[cfg(target_os = "linux")]
+    assert_eq!(*runner.tunnel_reaped_before_sync_stop.lock().unwrap(), Some(true));
     assert_reaped(*runner.tunnel_pid.lock().unwrap());
 }
 
@@ -371,6 +380,28 @@ async fn cancelled_start_stops_remote_task_and_reaps_tunnel() {
     assert_eq!(fake.payloads().last().unwrap()["operation"], "stop");
     assert_eq!(fake.calls.lock().unwrap().last().unwrap().0, "run_sync");
     assert_reaped(*fake.tunnel_pid.lock().unwrap());
+}
+
+#[tokio::test]
+async fn close_kills_tunnel_before_slow_remote_stop() {
+    let artifact = artifact();
+    let fake = FakeRunner::new(vec![prepared(true), success(), success(), success()]);
+    let runner = Arc::new(BlockingRunner { fake: fake.clone(), operation: "stop",
+        entered: tokio::sync::Notify::new() });
+    let mut transport = SshTransport::start(&config(artifact.path()), &connection(), runner.clone()).await.unwrap();
+    let task = tokio::spawn(async move { transport.close(None).await });
+    tokio::time::timeout(Duration::from_secs(5), runner.entered.notified()).await.unwrap();
+    let pending = !task.is_finished();
+    let pid = *fake.tunnel_pid.lock().unwrap();
+    #[cfg(target_os = "linux")]
+    let reaped = !Path::new(&format!("/proc/{}", pid.unwrap())).exists();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(pending, "remote stop should still be pending");
+    #[cfg(target_os = "linux")]
+    assert!(reaped, "tunnel was still alive while remote stop was pending");
+    #[cfg(not(target_os = "linux"))]
+    assert_reaped(pid);
 }
 
 #[tokio::test]
