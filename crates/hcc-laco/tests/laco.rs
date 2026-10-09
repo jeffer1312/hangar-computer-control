@@ -105,6 +105,53 @@ async fn drawn_dialog_click_checks_risk_only() {
     assert_eq!(requests[1]["state"]["proposedAction"], "mouse 'botão Não' click (1044,549)");
 }
 
+#[tokio::test]
+async fn direct_path_types_text_then_presses_enter() {
+    let con = FakeConnector::new(vec![empty("o1"), empty("o2"), tree("o3", "fim")]);
+    let (op, server) = setup(vec![help(json!([
+        {"type":"text","value":"https://x.com"}, {"type":"keys","keys":["Enter"]},
+    ])), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([{"type":"keys","keys":["Enter"]}])),
+        Answer::Choice("BLOCKED", 0.9, 0.05), done()]).await;
+    let r = run(op, &con).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, id, _)| (a.clone(), id.clone())).collect();
+    assert_eq!(acts, vec![
+        (action(json!({"type":"text","value":"https://x.com"})), "o1".into()),
+        (action(json!({"type":"keys","keys":["Enter"]})), "o2".into()),
+    ], "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    let requests = bodies(&server).await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[1]["state"]["proposedAction"], "text 'https://x.com' no foco atual");
+    assert_eq!(requests[3]["state"]["proposedAction"], "keys Enter");
+    for i in [1, 3] { assert_eq!(requests[i]["questions"].as_object().unwrap().len(), 1); }
+}
+
+#[tokio::test]
+async fn direct_text_secret_is_masked() {
+    let secret = "sëgredo-direto-123";
+    let con = FakeConnector::new(vec![empty("o1"), tree("o2", "fim")]);
+    let (mut op, server) = setup(vec![help(json!([{"type":"text","value":secret}])),
+        Answer::Choice("BLOCKED", 0.9, 0.05), done()]).await;
+    op.dados = json!({"senha":secret}).as_object().unwrap().clone();
+    let progress = Mutex::new(vec![]);
+    let r = executar(op, &con, CancellationToken::new(), &|p| progress.lock().unwrap().push(p)).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"text","value":secret}))], "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(r.passos, vec!["1. text *** no foco atual [100%]"]);
+    assert!(!r.resumo().contains(secret));
+    assert!(!format!("{:?}", progress.lock().unwrap()).contains(secret));
+    let requests = bodies(&server).await;
+    assert_eq!(requests[1]["state"]["proposedAction"], "text *** no foco atual");
+    for body in requests { assert!(!body.to_string().contains(secret), "{body}"); }
+    let dir = r.registro.as_ref().unwrap();
+    let log = std::fs::read_to_string(dir.join("jev.jsonl")).unwrap();
+    assert!(!log.contains(secret));
+    let first: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(first["direta"], "text *** no foco atual");
+    assert!(!std::fs::read_to_string(dir.join("observacao.json")).unwrap().contains(secret));
+}
+
 #[test]
 fn literal_coordinates_preserve_position() {
     let mut obs = empty("o1");
