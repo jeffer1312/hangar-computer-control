@@ -1,5 +1,5 @@
 {
   "transport": "local",
-  "command": ["/usr/bin/python3", "/caminho/para/hangar-computer-control/linux_agent.py"],
+  "command": ["/caminho/para/hangar-computer-control", "agent"],
   "request_timeout": 15
 }

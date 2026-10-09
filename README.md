@@ -21,7 +21,10 @@ Não tem regra por aplicativo. Tela nova é só árvore nova.
 
 No controlador (esta máquina, Linux ou Windows):
 
-- [uv](https://docs.astral.sh/uv/) (ele baixa o Python 3.13 e as dependências sozinho).
+- O binário `hangar-computer-control`, baixado da página de releases
+  (`https://github.com/jeffer1312/hangar-computer-control/releases`): `hangar-computer-control-linux-x86_64`
+  no Linux (renomeie e dê `chmod +x`), `windows-agent.exe` no Windows. Sem argumentos ele é o MCP (stdio);
+  `hangar-computer-control agent --config <arquivo>` é o agente. Não precisa de Python nem de outro runtime.
 - `TYPESAFE_API_KEY` no ambiente (Jev).
 - `LLM_PROXY_KEY` no ambiente e, se não for o padrão, `LLM_PROXY_URL` (padrão `http://127.0.0.1:8317/v1/chat/completions`)
   e `LLM_MODEL` (padrão `gpt-5.6-luna`). `LLM_EFFORT` (`low`/`medium`/`high`) vai como `reasoning_effort`;
@@ -34,8 +37,9 @@ No Windows controlado:
   recusar (`sessão Windows desconectada`). Pra manter ativa sem cliente RDP: `tscon <id> /dest:console`.
 - Pra controle remoto: SSH com chave (PowerShell ou cmd como shell) e permissão de criar tarefa agendada
   interativa. O agente sobe elevado (`RunLevel Highest`).
-- Nada de Python lá: o `windows-agent.exe` já carrega tudo (PyInstaller). Baixe da página de releases
-  (`https://github.com/jeffer1312/hangar-computer-control/releases`), gerado a cada tag pelo GitHub Actions.
+- Nada de Python lá: o `windows-agent.exe` é o mesmo binário Rust compilado pra Windows, sem dependência.
+  Baixe da página de releases (`https://github.com/jeffer1312/hangar-computer-control/releases`), gerado a
+  cada tag pelo GitHub Actions.
 
 ## Arquivo de configuração do agente (`HCC_AGENT_CONFIG`)
 
@@ -59,7 +63,9 @@ Na mesma máquina Windows: `{"transport": "local", "command": ["C:\\HangarComput
 
 Linux com Hyprland (Wayland), na mesma máquina: não precisa de arquivo. Com o MCP rodando na sessão
 Hyprland, o alvo `linux` aparece sozinho e vira o padrão quando `HCC_AGENT_CONFIG` não está definido; ele
-usa o `linux_agent.py` do próprio pacote. Um `linux-agent.json` na pasta de alvos substitui o automático.
+usa o próprio binário do MCP como agente (`agent --config`), com a configuração gravada em
+`~/.cache/hangar-computer-control/linux-agent.v2.json`. Um `linux-agent.json` na pasta de alvos substitui o
+automático; modelo no `linux-agent.json` do repositório.
 Requisitos do sistema e detalhes em `DESKTOP.md`.
 
 Vários Windows: cada um é um `<nome>-agent.json` na pasta `HCC_AGENTS_DIR` (ausente = pasta do
@@ -72,8 +78,8 @@ O Hangar faz isso pela tela Configurações > Controle do Windows. À mão, no `
 
 ```json
 {"mcpServers": {"hangar-computer-control": {
-  "command": "uvx",
-  "args": ["--from", "git+https://github.com/jeffer1312/hangar-computer-control@v0.1.0", "hangar-computer-control"],
+  "command": "/caminho/para/hangar-computer-control",
+  "args": [],
   "env": {"HCC_AGENT_CONFIG": "/caminho/minha-vm-agent.json", "TYPESAFE_API_KEY": "…",
           "LLM_PROXY_URL": "…", "LLM_PROXY_KEY": "…", "LLM_MODEL": "…"}}}}
 ```
@@ -112,7 +118,9 @@ a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir 
 
 ## Desenvolver
 
-- Suíte local, sem Windows: `uv run python -m unittest -q`.
-- Recompilar o agente num Windows: `scripts/build-windows-agent.ps1`. Tag `v*` publicada faz o mesmo no
-  GitHub Actions e anexa o exe à release.
+- Toolchain fixado em `rust-toolchain.toml`. Suíte local, sem Windows: `cargo test --workspace`.
+- Testes num Windows por SSH, sem RDP: `HCC_WINDOWS_HOST=<alias-ssh> scripts/windows-test.sh <crate>...`.
+- Binário: `cargo build --release` gera `target/release/hangar-computer-control`. Tag `v*` publicada
+  compila Linux e Windows no GitHub Actions e anexa `hangar-computer-control-linux-x86_64` e
+  `windows-agent.exe` à release.
 - Detalhes do transporte remoto e empacotamento: `DESKTOP.md`.
