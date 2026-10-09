@@ -1,0 +1,1 @@
+[{"operation":"heartbeat"},{"operation":"stop"},{"operation":"observe","id":"a1","ttl_ms":15000},{"operation":"act","id":"a2","ttl_ms":15000,"action":{"type":"set_value","target":"e3","value":"Ana"},"observation_id":"o1"},{"operation":"screenshot","id":"a3","ttl_ms":15000}]

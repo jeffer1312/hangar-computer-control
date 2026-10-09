@@ -1,0 +1,16 @@
+[package]
+name = "hcc-agente-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+hcc-protocolo.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi.workspace = true
+zbus.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "hcc-controlador"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+hcc-protocolo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+sha2.workspace = true
+base64.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+reqwest.workspace = true

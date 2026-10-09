@@ -1,0 +1,1 @@
+//! Scripted desktop for tests.

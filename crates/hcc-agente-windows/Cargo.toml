@@ -1,0 +1,15 @@
+[package]
+name = "hcc-agente-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+hcc-protocolo.workspace = true
+image.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+uiautomation.workspace = true
+windows.workspace = true
