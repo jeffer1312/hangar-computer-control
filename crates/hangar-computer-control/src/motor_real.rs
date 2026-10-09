@@ -51,10 +51,14 @@ fn pasta_nova() -> std::io::Result<PathBuf> {
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "nenhum nome livre para hcu-tela-*"))
 }
 
-async fn capturar(config: Option<PathBuf>) -> Result<String, String> {
+async fn capturar(config: Option<PathBuf>, cancel: CancellationToken) -> Result<String, String> {
     let inicio = Instant::now();
-    let mut sessao = conector(config).connect(&CancellationToken::new()).await.map_err(|e| e.to_string())?;
-    let imagem = sessao.screenshot().await.map_err(|e| e.to_string());
+    let mut sessao = conector(config).connect(&cancel).await.map_err(|e| e.to_string())?;
+    let imagem = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err("controle cancelado ou encerrado".to_owned()),
+        r = sessao.screenshot() => r.map_err(|e| e.to_string()),
+    };
     let fechamento = sessao.close().await;
     let png = imagem?;
     fechamento?;
@@ -63,12 +67,17 @@ async fn capturar(config: Option<PathBuf>) -> Result<String, String> {
     Ok(format!("{}; {:.2}s", caminho.display(), inicio.elapsed().as_secs_f64()))
 }
 
-async fn consultar(config: Option<PathBuf>) -> String {
-    let mut sessao = match conector(config).connect(&CancellationToken::new()).await {
+async fn consultar(config: Option<PathBuf>, cancel: CancellationToken) -> String {
+    let mut sessao = match conector(config).connect(&cancel).await {
         Ok(s) => s,
         Err(e) => return format!("indisponível: {e}"),
     };
-    let texto = match sessao.observe().await {
+    let observacao = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(hcc_protocolo::SessionError::Cancelled("controle cancelado ou encerrado".to_owned())),
+        r = sessao.observe() => r,
+    };
+    let texto = match observacao {
         Ok(o) if !o.connected => "indisponível: agente desconectado".to_owned(),
         Ok(o) => format!("disponível via acessibilidade, {}x{}", o.screen.width, o.screen.height),
         Err(e) => format!("indisponível: {e}"),
@@ -102,11 +111,11 @@ impl Motor for MotorReal {
         })
     }
 
-    fn ver_tela(&self, config: Option<PathBuf>) -> Futuro<Result<String, String>> {
-        Box::pin(capturar(config))
+    fn ver_tela(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<Result<String, String>> {
+        Box::pin(capturar(config, cancel))
     }
 
-    fn estado(&self, config: Option<PathBuf>) -> Futuro<String> {
-        Box::pin(consultar(config))
+    fn estado(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<String> {
+        Box::pin(consultar(config, cancel))
     }
 }

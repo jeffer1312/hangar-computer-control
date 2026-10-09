@@ -6,23 +6,28 @@ use hcc_protocolo::Desktop;
 
 pub fn rodar(config: &Path) -> i32 {
     #[cfg(feature = "fake-desktop")]
-    if std::env::var_os("HCC_FAKE_DESKTOP").is_some() {
-        return servir(hcc_agente::fake::FakeDesktop::from_env(), config);
+    {
+        if std::env::var_os("HCC_FAKE_DESKTOP").is_none() {
+            eprintln!("build fake-desktop: defina HCC_FAKE_DESKTOP; o desktop real não é usado");
+            return 2;
+        }
+        servir(hcc_agente::fake::FakeDesktop::from_env(), config)
     }
+    #[cfg(not(feature = "fake-desktop"))]
     real(config)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "fake-desktop")))]
 fn real(config: &Path) -> i32 {
     servir(hcc_agente_linux::LinuxDesktop::new(), config)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(feature = "fake-desktop")))]
 fn real(config: &Path) -> i32 {
     servir(hcc_agente_windows::WindowsDesktop::new(), config)
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(all(not(any(target_os = "linux", windows)), not(feature = "fake-desktop")))]
 fn real(config: &Path) -> i32 {
     falhar(config, "sistema sem agente de desktop")
 }

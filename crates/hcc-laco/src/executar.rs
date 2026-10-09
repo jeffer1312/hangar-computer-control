@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::barreiras::{Barreiras, aviso, fecha_janela, objetivo_pede_fechar};
 use crate::candidatos::{candidatos, py_str, segredos};
 use crate::descrever::{descrever, intencao, py_repr};
-use crate::estado::{assinatura, estado_compacto, sem_controles};
+use crate::estado::{assinatura, estado_compacto, padrao_segredos, sem_controles};
 use crate::geometria::{dentro, para_tela};
 use crate::http::py_dumps;
 use crate::jev::Jev;
@@ -80,12 +80,10 @@ struct Segredos {
 impl Segredos {
     fn new(dados: &Map<String, Value>) -> Result<Self, String> {
         let valores = segredos(dados);
-        let mut partes: Vec<&str> = valores.iter().filter(|s| !s.is_empty()).map(String::as_str).collect();
-        partes.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-        let partes: Vec<String> = partes.into_iter().map(regex::escape).collect();
-        let padrao = if partes.is_empty() { None } else {
-            Some(Regex::new(&partes.join("|")).map_err(|_| "ValueError: não foi possível preparar a proteção dos segredos".to_owned())?)
-        };
+        let padrao = padrao_segredos(&valores);
+        if padrao.is_none() && valores.iter().any(|s| !s.is_empty()) {
+            return Err("ValueError: não foi possível preparar a proteção dos segredos".to_owned());
+        }
         Ok(Self { valores, padrao })
     }
 
@@ -154,6 +152,13 @@ fn validar(op: &Opcoes) -> Result<&Jev, String> {
 
 fn erro_sessao(e: SessionError) -> String { format!("{}: {e}", e.tipo()) }
 fn erro_io(e: io::Error) -> String { format!("OSError: {e}") }
+fn erro_trava(e: io::Error) -> String {
+    #[cfg(windows)]
+    if e.kind() == io::ErrorKind::PermissionDenied || matches!(e.raw_os_error(), Some(32 | 33)) {
+        return "outro objetivo ainda está controlando o desktop".into();
+    }
+    erro_io(e)
+}
 fn reconectavel(e: &SessionError) -> bool { matches!(e, SessionError::Timeout(_) | SessionError::Disconnected(_)) }
 fn escolha(e: Escolha) -> String {
     match e {
@@ -391,7 +396,7 @@ where C::S: 'static {
         // Windows LockFileEx needs read or write access; append-only is refused.
         #[cfg(windows)]
         abrir.read(true);
-        let file = abrir.open(trava).await.map_err(erro_io)?;
+        let file = abrir.open(trava).await.map_err(erro_trava)?;
         Ok(file.into_std().await)
     }).await;
     match lock {
@@ -399,7 +404,7 @@ where C::S: 'static {
         Ok(file) => {
             match file.try_lock() {
                 Err(std::fs::TryLockError::WouldBlock) => r.motivo = "outro objetivo ainda está controlando o desktop".into(),
-                Err(std::fs::TryLockError::Error(e)) => r.motivo = erro_io(e),
+                Err(std::fs::TryLockError::Error(e)) => r.motivo = erro_trava(e),
                 Ok(()) => {
                     match validar(&op).and_then(|_| Segredos::new(&op.dados)) {
                         Ok(s) => {

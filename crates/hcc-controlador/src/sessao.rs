@@ -169,7 +169,10 @@ impl Session for AgentSession {
         };
         self.server.close().await;
         self.closed = true;
-        result
+        if let Err(error) = result && matches!(&self.transport, AgentTransport::Local(_)) {
+            eprintln!("não foi possível encerrar agente: {error}");
+        }
+        Ok(())
     }
 }
 
@@ -183,4 +186,65 @@ pub(crate) fn exit_code(status: std::process::ExitStatus) -> i32 {
 
 impl Drop for AgentSession {
     fn drop(&mut self) { self.close_sync(); }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::ssh::{ProcessCommand, RunFuture, Runner};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output, Stdio};
+
+    struct FailingStopRunner;
+
+    impl Runner for FailingStopRunner {
+        fn run(&self, command: ProcessCommand) -> RunFuture<'_> {
+            Box::pin(async move { self.run_sync(command) })
+        }
+
+        fn spawn(&self, _: ProcessCommand) -> Result<tokio::process::Child, String> {
+            NativeRunner.spawn(ProcessCommand { program: "/bin/sh".into(),
+                args: vec!["-c".into(), "exec sleep 60".into()], stdin: vec![],
+                timeout: Duration::from_secs(60) })
+        }
+
+        fn run_sync(&self, command: ProcessCommand) -> Result<Output, String> {
+            let payload: serde_json::Value = serde_json::from_slice(&command.stdin).unwrap();
+            let (code, stdout, stderr) = match payload["operation"].as_str().unwrap() {
+                "prepare" => (0, br#"{"executable":"agent.exe","valid":true}"#.to_vec(), vec![]),
+                "start" => (0, b"{}".to_vec(), vec![]),
+                "stop" => (1, vec![], b"cleanup failed".to_vec()),
+                other => panic!("unexpected operation: {other}"),
+            };
+            Ok(Output { status: ExitStatus::from_raw(code << 8), stdout, stderr })
+        }
+    }
+
+    #[tokio::test]
+    async fn close_reports_remote_stop_failure_only_on_stderr() {
+        const MARKER: &str = "HCC_SESSION_CLOSE_STDERR_TEST";
+        if std::env::var_os(MARKER).is_some() {
+            let artifact = tempfile::NamedTempFile::new().unwrap();
+            let cancel = CancellationToken::new();
+            let server = Server::start(cancel.clone()).await.unwrap();
+            let config = AgentConfig { transport: Transport::Ssh, host: Some("vm-a".into()),
+                agent_path: Some(artifact.path().into()), ..AgentConfig::default() };
+            let transport = SshTransport::start(&config, server.connection(), Arc::new(FailingStopRunner)).await.unwrap();
+            let mut session = AgentSession { server, transport: AgentTransport::Ssh(transport),
+                timeout: Duration::from_secs(15), cancel, closed: false };
+            assert_eq!(session.close().await, Ok(()));
+            assert!(session.is_closed());
+            assert_eq!(session.close().await, Ok(()));
+            return;
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sessao::tests::close_reports_remote_stop_failure_only_on_stderr", "--nocapture"])
+                .env(MARKER, "1").stdout(Stdio::null()).stderr(Stdio::piped())
+                .kill_on_drop(true).output()).await.unwrap().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        assert!(stderr.contains("não foi possível remover tarefa HangarComputerControl-"), "{stderr}");
+        assert!(stderr.contains("inicialização Windows falhou: cleanup failed"), "{stderr}");
+    }
 }

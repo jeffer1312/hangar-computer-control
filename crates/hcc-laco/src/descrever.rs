@@ -113,6 +113,10 @@ pub fn casefold(s: &str) -> String {
 /// Python `repr(str)`.
 pub fn py_repr(s: &str) -> String {
     let aspa = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    py_repr_com(s, aspa)
+}
+
+pub(crate) fn py_repr_com(s: &str, aspa: char) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push(aspa);
     for c in s.chars() {
