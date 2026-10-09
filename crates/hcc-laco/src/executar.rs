@@ -266,7 +266,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let ajuda = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
             dica = ajuda.interpretacao; ajudou = true;
-            let propostas = ajuda.acoes.into_iter().filter(|a| matches!(a.kind, ActionType::Mouse | ActionType::Keys))
+            let propostas = ajuda.acoes.into_iter().filter(|a| matches!(a.kind, ActionType::Mouse | ActionType::Keys | ActionType::Text))
                 .map(|a| secretos.candidato(a, &obs)).collect();
             let propostas = Barreiras::barrar(propostas, &recentes);
             for proposta in propostas.iter().filter(|p| dentro(&p.acao, &obs)) {
