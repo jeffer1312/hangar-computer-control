@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use hcc_laco::candidatos::{candidatos, segredos};
 use hcc_laco::estado::estado_compacto;
-use hcc_laco::jev::Jev;
+use hcc_laco::jev::{JEV_MODEL, Jev};
 use hcc_laco::llm::Llm;
 use hcc_protocolo::Observation;
 use serde_json::{Value, json};
@@ -71,7 +71,7 @@ async fn llm_without_key_is_unavailable() {
 async fn http_error_text_redacts_key() {
     let corpo = format!("token segredo-123 inválido {}", "x".repeat(3000));
     let s = responde(ResponseTemplate::new(403).set_body_string(corpo)).await;
-    let e = Jev::new(s.uri(), "segredo-123".into()).arriscado(&json!({}), "p", T).await.unwrap_err();
+    let e = Jev::new(s.uri(), "segredo-123".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", T).await.unwrap_err();
     let esperado = format!("token [redigido] inválido {}", "x".repeat(2000 - "token segredo-123 inválido ".len()));
     assert_eq!(e, format!("RuntimeError: HTTP 403 em {}: {esperado}", s.uri()));
     let a = llm(&s, Some("segredo-123")).ajudar(&json!({}), PNG, T).await;
@@ -79,7 +79,7 @@ async fn http_error_text_redacts_key() {
 
     // A key straddling byte 2000 is kept whole and redacted: no prefix of it survives.
     let s = responde(ResponseTemplate::new(500).set_body_string(format!("{}segredo-123", "x".repeat(1995)))).await;
-    let e = Jev::new(s.uri(), "segredo-123".into()).arriscado(&json!({}), "p", T).await.unwrap_err();
+    let e = Jev::new(s.uri(), "segredo-123".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", T).await.unwrap_err();
     assert_eq!(e, format!("RuntimeError: HTTP 500 em {}: {}[redigido]", s.uri(), "x".repeat(1995)));
 }
 
@@ -87,7 +87,7 @@ async fn http_error_text_redacts_key() {
 async fn http_error_key_twice_never_leaks() {
     let k = "K".repeat(50);
     let s = responde(ResponseTemplate::new(500).set_body_string(format!("{k}{}{k}", "x".repeat(1980)))).await;
-    let e = Jev::new(s.uri(), k.clone()).arriscado(&json!({}), "p", T).await.unwrap_err();
+    let e = Jev::new(s.uri(), k.clone(), JEV_MODEL.into()).arriscado(&json!({}), "p", T).await.unwrap_err();
     assert!(!e.contains(&"K".repeat(10)), "vazou: ...{}", &e[e.len() - 40..]);
 }
 
@@ -95,19 +95,19 @@ async fn http_error_key_twice_never_leaks() {
 async fn malformed_risk_answer_fails_closed() {
     for corpo in [json!({"answers": null}), json!({"answers": {"risky": null}}), json!({"answers": {"risky": 0.9}})] {
         let s = responde(ResponseTemplate::new(200).set_body_json(corpo.clone())).await;
-        let r = Jev::new(s.uri(), "KEY".into()).arriscado(&json!({}), "p", T).await;
+        let r = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", T).await;
         assert!(r.as_ref().is_err_and(|e| e.starts_with("AttributeError: ")), "{corpo} -> {r:?}");
     }
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"answers": {
         "action": {"probabilities": {"DONE": 0.9}}, "risky": 0.9}}))).await;
-    let r = Jev::new(s.uri(), "KEY".into()).decidir(&json!({}), &[], T).await;
+    let r = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).decidir(&json!({}), &[], T).await;
     assert_eq!(r.unwrap_err(), "AttributeError: 'float' object has no attribute 'get'");
 }
 
 #[tokio::test]
 async fn redirect_is_an_http_error_not_followed() {
     let s = responde(ResponseTemplate::new(307).insert_header("location", "http://127.0.0.1:9/")).await;
-    let e = Jev::new(s.uri(), "KEY".into()).arriscado(&json!({}), "p", T).await.unwrap_err();
+    let e = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", T).await.unwrap_err();
     assert_eq!(e, format!("RuntimeError: HTTP 307 em {}: ", s.uri()));
 }
 
@@ -129,20 +129,20 @@ async fn llm_answer_shape_errors_name_the_python_exception() {
 #[tokio::test]
 async fn empty_probabilities_is_an_error_not_a_panic() {
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"answers": {"action": {"probabilities": {}}}}))).await;
-    let e = Jev::new(s.uri(), "KEY".into()).decidir(&json!({}), &[], T).await.unwrap_err();
+    let e = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).decidir(&json!({}), &[], T).await.unwrap_err();
     assert_eq!(e, "ValueError: max() iterable argument is empty");
 }
 
 #[tokio::test]
 async fn unknown_choice_is_an_error_not_a_panic() {
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"answers": {"action": {"probabilities": {"7": 0.9}}}}))).await;
-    let e = Jev::new(s.uri(), "KEY".into()).decidir(&json!({}), &[], T).await.unwrap_err();
+    let e = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).decidir(&json!({}), &[], T).await.unwrap_err();
     assert_eq!(e, "IndexError: list index out of range");
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"answers": {}}))).await;
-    let p = Jev::new(s.uri(), "KEY".into()).arriscado(&json!({}), "p", T).await.unwrap();
+    let p = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", T).await.unwrap();
     assert_eq!(p, 0.0);
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"sem": 1}))).await;
-    let e = Jev::new(s.uri(), "KEY".into()).arriscado(&json!({}), "p", T).await.unwrap_err();
+    let e = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", T).await.unwrap_err();
     assert_eq!(e, "KeyError: 'answers'");
 }
 
@@ -167,7 +167,7 @@ async fn secret_never_reaches_jev_or_llm() {
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({
         "answers": {"action": {"probabilities": {"0": 0.9}}, "risky": {"noul": 0.1}},
         "choices": [{"message": {"content": "{\"interpretacao\": \"ok\"}"}}]}))).await;
-    let jev = Jev::new(s.uri(), "KEY".into());
+    let jev = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into());
     jev.decidir(&estado, &cands, T).await.unwrap();
     jev.arriscado(&estado, &cands[0].descricao, T).await.unwrap();
     llm(&s, Some("KEY")).ajudar(&estado, PNG, T).await;
@@ -186,4 +186,13 @@ async fn fenced_json_answer_accepted() {
     assert_eq!(a.acoes.len(), 1);
     let corpo: Value = serde_json::from_slice(&s.received_requests().await.unwrap()[0].body).unwrap();
     assert_eq!(corpo["messages"][1]["content"], json!([{"type": "text", "text": "{}"}]));
+}
+
+#[tokio::test]
+async fn model_from_config_goes_in_body() {
+    let s = responde(ResponseTemplate::new(200).set_body_json(json!({"answers": {"risky": {"noul": 0.1}}}))).await;
+    Jev::new(s.uri(), "KEY".into(), "~typesafe/jev-latest".into()).arriscado(&json!({}), "p", T).await.unwrap();
+    let pedidos = s.received_requests().await.unwrap();
+    let corpo: Value = serde_json::from_slice(&pedidos[0].body).unwrap();
+    assert_eq!(corpo["model"], "~typesafe/jev-latest");
 }

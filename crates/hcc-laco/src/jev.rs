@@ -9,12 +9,14 @@ use crate::prompts::{DESFECHOS, REGRAS, REGRAS_LOTE, risco_pergunta};
 use crate::tipos::{Candidato, Decisao, Escolha, Intencao};
 
 pub const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
+pub const JEV_MODEL: &str = "jev-latest";
 /// TypeSafe refuses more than 255 options per question; 4 are left for DONE/WAIT/BLOCKED.
 pub const LOTE: usize = 251;
 
 pub struct Jev {
     pub url: String,
     pub key: String,
+    pub model: String,
     http: reqwest::Client,
 }
 
@@ -68,12 +70,12 @@ fn arredonda(p: f64) -> f64 {
 }
 
 impl Jev {
-    pub fn new(url: String, key: String) -> Jev {
-        Jev { url, key, http: http::cliente() }
+    pub fn new(url: String, key: String, model: String) -> Jev {
+        Jev { url, key, model, http: http::cliente() }
     }
 
     async fn perguntar(&self, state: &Value, questions: Value, timeout: Duration) -> Result<Map<String, Value>, String> {
-        let corpo = json!({"model": "jev-latest", "state": state, "questions": questions});
+        let corpo = json!({"model": self.model, "state": state, "questions": questions});
         let mut r = http::post(&self.http, &self.url, &corpo, &self.key, timeout).await.map_err(|f| f.to_string())?;
         match r.get_mut("answers").map(Value::take) {
             Some(Value::Object(a)) => Ok(a),
