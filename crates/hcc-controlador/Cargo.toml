@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+test-fake = []
+
 [dependencies]
 hcc-protocolo.workspace = true
 serde.workspace = true
