@@ -21,3 +21,5 @@ base64.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 axum.workspace = true
+# The runtime tests drive FakeDesktop; plain `cargo test -p hcc-agente` must run them too.
+hcc-agente = { workspace = true, features = ["fake"] }
