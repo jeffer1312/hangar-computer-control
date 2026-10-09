@@ -61,7 +61,7 @@ impl Llm {
         })
     }
 
-    async fn pedir(&self, estado: &Value, png: &[u8], timeout: Duration) -> Result<Ajuda, Falha> {
+    pub(crate) async fn pedir(&self, estado: &Value, png: &[u8], timeout: Duration) -> Result<Ajuda, Falha> {
         let chave = self.key.as_deref().filter(|k| !k.is_empty()).ok_or_else(|| {
             Falha::new("RuntimeError", "falta LLM_PROXY_KEY no ambiente para o fallback de interpretação")
         })?;
