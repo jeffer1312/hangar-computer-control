@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use hcc_laco::barreiras::{Barreiras, aviso, objetivo_pede_fechar};
+use hcc_laco::barreiras::{Barreiras, aviso, objetivo_pede_fechar, pendente};
 use hcc_laco::candidatos::{candidatos, segredos};
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
 use hcc_laco::geometria::para_tela;
@@ -67,6 +67,133 @@ fn candidato(acao: Action) -> hcc_laco::tipos::Candidato {
     let d = hcc_laco::descrever::descrever(&acao, &o, &HashSet::new(), true);
     let i = hcc_laco::descrever::intencao(&acao, &o);
     hcc_laco::tipos::Candidato { acao, descricao: d, intencao: i }
+}
+
+#[test]
+fn pendente_texto_ausente() {
+    let o = obs(vec![el("e0", "Nome", "Edit", &[], Some("outro texto"), None)]);
+    for goal in ["digitar 'ação, coração e pé'", "digitar \"ação, coração e pé\"", "digitar “ação, coração e pé”"] {
+        assert_eq!(pendente(goal, &o, &[], &HashSet::new()).as_deref(),
+            Some("ainda falta: o texto 'ação, coração e pé' não aparece na tela"));
+    }
+    assert_eq!(pendente("digitar 'Ana' e 'Bia'", &o, &[], &HashSet::new()).as_deref(),
+        Some("ainda falta: o texto 'Ana' não aparece na tela"));
+}
+
+#[test]
+fn pendente_texto_presente() {
+    let o = obs(vec![el("e0", "Nome de Ana", "Edit", &[], Some("antes ação, coração e pé depois"), None)]);
+    assert_eq!(pendente("escrever 'ação, coração e pé' para \"Ana\"", &o, &[], &HashSet::new()), None);
+    assert_eq!(pendente("digitar 'a'", &o, &[], &HashSet::new()), None);
+    assert_eq!(pendente("abrir editor", &o, &[], &HashSet::new()), None);
+    assert_eq!(pendente("digitar 'Ana' e 'Bia'", &o, &[], &HashSet::new()).as_deref(),
+        Some("ainda falta: o texto 'Bia' não aparece na tela"));
+}
+
+#[test]
+fn pendente_combo_ausente() {
+    let o = obs(vec![]);
+    for hist in [vec![], vec![reg("keys CTRL+X", Some(true))], vec![reg("text 'CTRL+F' no foco atual", Some(true))],
+        vec![Registro { executada: false, ..reg("keys CTRL+F", Some(false)) }],
+        vec![Registro { result: "{'ok': False}".into(), ..reg("keys CTRL+F", Some(false)) }]] {
+        assert_eq!(pendente("pressionar Ctrl+F", &o, &hist, &HashSet::new()).as_deref(),
+            Some("ainda falta: CTRL+F não foi pressionado"));
+    }
+}
+
+#[test]
+fn pendente_combo_presente() {
+    let o = obs(vec![]);
+    let hist = [reg("keys Control+f", Some(false)), reg("keys Shift+CTRL+s", Some(true)), reg("keys Win+r", Some(true))];
+    assert_eq!(pendente("Ctrl+F, control+SHIFT+S e Super+R", &o, &hist, &HashSet::new()), None);
+    assert_eq!(pendente("CTRL+F e ALT+F4", &o, &hist, &HashSet::new()).as_deref(),
+        Some("ainda falta: ALT+F4 não foi pressionado"));
+    assert_eq!(pendente("CTRL+F", &o, &[reg("keys CTRL+F+SHIFT", Some(true))], &HashSet::new()).as_deref(),
+        Some("ainda falta: CTRL+F não foi pressionado"));
+}
+
+#[test]
+fn pendente_combo_com_rotulo() {
+    let o = obs(vec![]);
+    let acao = Action { kind: ActionType::Keys, keys: Some(vec!["CTRL".into(), "F".into()]),
+        rotulo: Some("abrir busca".into()), ..Default::default() };
+    let descricao = hcc_laco::descrever::descrever(&acao, &o, &HashSet::new(), true);
+    assert_eq!(pendente("pressionar Ctrl+F", &o, &[reg(&descricao, Some(true))], &HashSet::new()), None);
+}
+
+#[test]
+fn pendente_segredo_mascarado() {
+    let secret = "sëgredo-123";
+    let secrets = HashSet::from([secret.to_string()]);
+    let mut o = obs(vec![el("e0", "Nome", "Edit", &[], Some(""), None)]);
+    for literal in [secret.to_string(), format!("antes {secret} depois")] {
+        let pending = pendente(&format!("digitar '{literal}'"), &o, &[], &secrets).unwrap();
+        assert!(!pending.contains(secret));
+        assert!(pending.contains("<senha>"));
+    }
+    o.elements[0].value = Some(secret.into());
+    assert_eq!(pendente(&format!("digitar '{secret}'"), &o, &[], &secrets), None);
+}
+
+#[test]
+fn pendente_arvore_vazia_ignora_texto() {
+    assert_eq!(pendente("escrever 'ação, coração e pé'", &obs(vec![]), &[], &HashSet::new()), None);
+    assert_eq!(pendente("escrever 'ação, coração e pé' e Ctrl+F", &obs(vec![]), &[], &HashSet::new()).as_deref(),
+        Some("ainda falta: CTRL+F não foi pressionado"));
+}
+
+#[test]
+fn pendente_fragmento_segredo_com_aspa_mascarado() {
+    let secret = "alpha'beta";
+    let o = obs(vec![el("e0", "Nome", "Edit", &[], Some(""), None)]);
+    assert_eq!(pendente(&format!("digitar '{secret}'"), &o, &[], &HashSet::from([secret.into()])).as_deref(),
+        Some("ainda falta: o texto '<senha>' não aparece na tela"));
+}
+
+#[test]
+fn pendente_fragmento_segredo_com_combo_mascarado() {
+    let secret = "Ctrl+abc-xyz";
+    assert_eq!(pendente(&format!("digitar '{secret}'"), &obs(vec![]), &[], &HashSet::from([secret.into()])).as_deref(),
+        Some("ainda falta: <senha> não foi pressionado"));
+}
+
+#[test]
+fn pendente_literal_curto_nao_desloca_aspas() {
+    let o = obs(vec![el("e0", "Nome e sobrenome", "Edit", &[], None, None)]);
+    assert_eq!(pendente("digitar 'a' e 'Bia'", &o, &[], &HashSet::new()).as_deref(),
+        Some("ainda falta: o texto 'Bia' não aparece na tela"));
+}
+
+#[test]
+fn pendente_combo_apos_oferta_de_reclique() {
+    let o = obs(vec![]);
+    let mut hist = [Registro { target_rect: Some(Rect(0, 0, 20, 20)), ..reg("keys CTRL+F", Some(false)) }];
+    Barreiras::reclique(&mut hist, &o).unwrap();
+    assert_eq!(pendente("pressionar Ctrl+F", &o, &hist, &HashSet::new()), None);
+}
+
+#[test]
+fn pendente_fragmento_cruza_segredo_literal() {
+    let o = obs(vec![el("e0", "Nome", "Edit", &[], Some(""), None)]);
+    assert_eq!(pendente("abc 'zzq12'xy", &o, &[], &HashSet::from(["q12'xy".into()])).as_deref(),
+        Some("ainda falta: o texto '<senha>' não aparece na tela"));
+}
+
+#[test]
+fn pendente_fragmento_cruza_segredo_combo() {
+    assert_eq!(pendente("digite -Ctrl+ab9z", &obs(vec![]), &[], &HashSet::from(["-Ctrl+ab9".into()])).as_deref(),
+        Some("ainda falta: <senha> não foi pressionado"));
+}
+
+#[test]
+fn pendente_apostrofo_nao_abre_literal() {
+    let o = obs(vec![el("e0", "Arquivo", "Edit", &[], Some("x"), None)]);
+    assert_eq!(pendente("pegar copo d'água e pingo d'ouro", &o, &[], &HashSet::new()), None);
+    assert_eq!(pendente("clicar em Don't Save e fechar o user's arquivo", &o, &[], &HashSet::new()), None);
+    assert_eq!(pendente("copo d'água e digitar 'Bia'", &o, &[], &HashSet::new()).as_deref(),
+        Some("ainda falta: o texto 'Bia' não aparece na tela"));
+    assert_eq!(pendente("'Ana' 'Bia'", &o, &[], &HashSet::new()).as_deref(),
+        Some("ainda falta: o texto 'Ana' não aparece na tela"));
 }
 
 #[test]

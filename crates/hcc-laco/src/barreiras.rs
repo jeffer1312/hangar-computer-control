@@ -19,6 +19,56 @@ static PEDE_FECHAR: LazyLock<Regex> = LazyLock::new(|| {
 
 const OFERTA: &str = "; a real mouse click on the same control is now offered";
 
+static LITERAIS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?:^|[^\p{L}\p{N}])'([^']*)'|"([^"]*)"|“([^”]*)”"#).unwrap());
+static COMBOS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(ctrl|control|alt|shift|super|win)(\+\w+)+").unwrap());
+
+fn normalizar_combo(teclas: &str) -> String {
+    let mut teclas: Vec<String> = teclas.split('+').map(|t| match t.to_ascii_uppercase().as_str() {
+        "CONTROL" => "CTRL".into(), "SUPER" | "META" => "WIN".into(), _ => t.to_ascii_uppercase(),
+    }).collect();
+    teclas.sort_by_key(|t| match t.as_str() { "CTRL" => 0, "ALT" => 1, "SHIFT" => 2, "WIN" => 3, _ => 4 });
+    teclas.join("+")
+}
+
+pub fn pendente(objetivo: &str, obs: &Observation, recentes: &[Registro], segredos: &HashSet<String>) -> Option<String> {
+    pendencia(objetivo, obs, recentes, segredos).map(|(_, texto)| texto)
+}
+
+pub(crate) fn pendencia(objetivo: &str, obs: &Observation, recentes: &[Registro], segredos: &HashSet<String>) -> Option<(usize, String)> {
+    let publico = |texto: &str| {
+        if segredos.iter().any(|s| s.contains(texto)) { return "<senha>".into(); }
+        crate::estado::padrao_segredos(segredos).map_or_else(
+            || if segredos.iter().any(|s| !s.is_empty()) { "<senha>".into() } else { texto.to_owned() },
+            |r| r.replace_all(texto, "<senha>").into_owned(),
+        )
+    };
+    let ocultos: Vec<std::ops::Range<usize>> = crate::estado::padrao_segredos(segredos)
+        .map(|r| r.find_iter(objetivo).map(|m| m.range()).collect()).unwrap_or_default();
+    let toca = |r: std::ops::Range<usize>| ocultos.iter().any(|o| o.start < r.end && r.start < o.end);
+    if !obs.elements.is_empty() {
+        for (indice, literal) in LITERAIS.captures_iter(objetivo).filter_map(|c| c.iter().skip(1).flatten().next()).enumerate() {
+            let texto = literal.as_str();
+            if texto.chars().count() < 2 { continue; }
+            if !obs.elements.iter().any(|e| e.name.contains(texto) || e.value.as_deref().is_some_and(|v| v.contains(texto))) {
+                let nome = if toca(literal.range()) { "<senha>".into() } else { publico(texto) };
+                return Some((indice, format!("ainda falta: o texto '{nome}' não aparece na tela")));
+            }
+        }
+    }
+    let inicio_combos = LITERAIS.find_iter(objetivo).count();
+    for (indice, combo) in COMBOS.find_iter(objetivo).enumerate() {
+        let teclas = normalizar_combo(combo.as_str());
+        if !recentes.iter().filter(|r| r.executada && (r.result == "ok" || r.result.strip_prefix("ok") == Some(OFERTA)))
+            .filter_map(|r| r.action.strip_prefix("keys ").and_then(|s| s.rsplit(' ').next()))
+            .any(|r| normalizar_combo(r) == teclas) {
+            let oculto = publico(combo.as_str());
+            let nome = if oculto == combo.as_str() && !toca(combo.range()) { teclas } else { "<senha>".into() };
+            return Some((inicio_combos + indice, format!("ainda falta: {nome} não foi pressionado")));
+        }
+    }
+    None
+}
+
 /// Alt+F4, or the Close button of the title bar: closes the whole window, not a tab.
 pub fn fecha_janela(acao: &Action, obs: &Observation) -> bool {
     if acao.kind == ActionType::Keys {
@@ -61,7 +111,7 @@ pub fn aviso(obs: &Observation) -> Option<String> {
 }
 
 fn executadas(hist: &[Registro]) -> impl Iterator<Item = &Registro> {
-    hist.iter().filter(|r| r.action != "WAIT")
+    hist.iter().filter(|r| r.action != "WAIT" && !r.action.starts_with("DONE recusado: "))
 }
 
 #[derive(Debug, Default)]
@@ -127,7 +177,7 @@ impl Barreiras {
 
     /// Accessibility action "ok" but the screen did not change (VCL menus ignore Invoke): offer the real click.
     pub fn reclique(hist: &mut [Registro], obs: &Observation) -> Option<Candidato> {
-        let ultima = hist.iter_mut().rev().find(|r| r.action != "WAIT")?;
+        let ultima = hist.iter_mut().rev().find(|r| r.action != "WAIT" && !r.action.starts_with("DONE recusado: "))?;
         let r = ultima.target_rect.filter(|_| ultima.screen_changed == Some(false))?;
         if !ultima.result.contains("real mouse click") {
             ultima.result.push_str(OFERTA);
