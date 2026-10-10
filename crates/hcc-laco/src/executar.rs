@@ -160,14 +160,16 @@ fn apps_fechados(em_foco: &[hcc_protocolo::Window], agora: &Observation) -> Vec<
 }
 
 /// After the loop closed an app, launching it again reopened it and Jev called that DONE.
-// ponytail: matched by window class vs launch name/executable; an app whose class names neither (TMainForm) can still be reopened.
+// ponytail: matched by window class inside the launch's executable or name; generic classes (TMainForm,
+// ApplicationFrameWindow) match nothing, so those apps can still be reopened.
 fn sem_reabrir(cands: Vec<Candidato>, fechados: &[String]) -> Vec<Candidato> {
     if fechados.is_empty() { return cands; }
     let reabre = |a: &Action| {
         let exe = a.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_lowercase();
         let exe = exe.strip_suffix(".exe").unwrap_or(&exe).to_owned();
         let rotulo = a.rotulo.as_deref().unwrap_or_default().to_lowercase();
-        fechados.iter().any(|c| exe.contains(c.as_str()) || (!exe.is_empty() && c.contains(&exe)) || rotulo.contains(c.as_str()))
+        // Never class-contains-exe: Chrome_WidgetWin_1 is shared by VS Code, Teams and Edge, and contains "chrome".
+        fechados.iter().any(|c| exe.contains(c.as_str()) || rotulo.contains(c.as_str()))
     };
     cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch || !reabre(&c.acao)).collect()
 }
