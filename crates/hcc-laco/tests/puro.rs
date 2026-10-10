@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use hcc_laco::barreiras::{Barreiras, aviso, objetivo_pede_fechar, pendente, segurar_segredos};
+use hcc_laco::barreiras::{Barreiras, aviso, itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
 use hcc_laco::candidatos::{candidatos, descrever_acao, segredos, texto_no_editavel};
 use hcc_laco::descrever::intencao;
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
@@ -79,6 +79,15 @@ fn pendente_texto_ausente() {
     }
     assert_eq!(pendente("digitar 'Ana' e 'Bia'", &o, &[], &HashSet::new()).as_deref(),
         Some("ainda falta: o texto 'Ana' não aparece na tela"));
+}
+
+#[test]
+fn pendente_conta_itens() {
+    let o = obs(vec![el("e0", "Busca", "Edit", &[], Some("x"), None)]);
+    assert_eq!(itens_pendentes("abrir editor", &o), 0);
+    assert_eq!(itens_pendentes("pressionar Ctrl+F e digitar 'segredo'", &o), 2);
+    assert_eq!(itens_pendentes("digitar 'a'", &o), 0, "literal de 1 caractere não é checado");
+    assert_eq!(itens_pendentes("pressionar Ctrl+F e digitar 'segredo'", &obs(vec![])), 1, "árvore vazia não checa literais");
 }
 
 #[test]
