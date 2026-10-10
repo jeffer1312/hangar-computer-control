@@ -110,8 +110,7 @@ async fn direct_path_types_text_then_presses_enter() {
     let con = FakeConnector::new(vec![empty("o1"), empty("o2"), tree("o3", "fim")]);
     let (op, server) = setup(vec![help(json!([
         {"type":"text","value":"https://x.com"}, {"type":"keys","keys":["Enter"]},
-    ])), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([{"type":"keys","keys":["Enter"]}])),
-        Answer::Choice("BLOCKED", 0.9, 0.05), done()]).await;
+    ])), Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Risk(0.05), done()]).await;
     let r = run(op, &con).await;
     let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, id, _)| (a.clone(), id.clone())).collect();
     assert_eq!(acts, vec![
@@ -119,11 +118,145 @@ async fn direct_path_types_text_then_presses_enter() {
         (action(json!({"type":"keys","keys":["Enter"]})), "o2".into()),
     ], "{}", r.resumo());
     assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().captures, 1, "uma ajuda só: as duas ações saem no mesmo ciclo");
     let requests = bodies(&server).await;
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 4);
     assert_eq!(requests[1]["state"]["proposedAction"], "text 'https://x.com' no foco atual");
-    assert_eq!(requests[3]["state"]["proposedAction"], "keys Enter");
-    for i in [1, 3] { assert_eq!(requests[i]["questions"].as_object().unwrap().len(), 1); }
+    assert_eq!(requests[2]["state"]["proposedAction"], "keys Enter");
+    for i in [1, 2] { assert_eq!(requests[i]["questions"].as_object().unwrap().len(), 1); }
+}
+
+fn jev_log(r: &Resultado) -> Vec<Value> {
+    std::fs::read_to_string(r.registro.as_ref().unwrap().join("jev.jsonl")).unwrap()
+        .lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn direct_sequence_runs_keys_text_keys_in_one_cycle() {
+    let con = FakeConnector::new(vec![titled("o1", "a"), titled("o2", "b"), titled("o3", "c"), tree("o4", "fim")]);
+    let (op, server) = setup(vec![help(json!([
+        {"type":"keys","keys":["CTRL","L"]}, {"type":"text","value":"x.com"}, {"type":"keys","keys":["Enter"]},
+    ])), Answer::Risk(0.05), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, id, _)| (a.clone(), id.clone())).collect();
+    assert_eq!(acts, vec![
+        (action(json!({"type":"keys","keys":["CTRL","L"]})), "o1".into()),
+        (action(json!({"type":"text","value":"x.com"})), "o2".into()),
+        (action(json!({"type":"keys","keys":["Enter"]})), "o3".into()),
+    ]);
+    assert_eq!(con.state.lock().unwrap().captures, 1);
+    let diretas: Vec<_> = jev_log(&r).into_iter().filter(|l| l.get("direta").is_some()).collect();
+    assert_eq!(diretas.iter().map(|l| l["direta"].as_str().unwrap()).collect::<Vec<_>>(),
+        vec!["keys CTRL+L", "text 'x.com' no foco atual", "keys Enter"]);
+    assert!(diretas.iter().all(|l| l["ciclo"] == 0), "{diretas:?}");
+    assert_eq!(r.passos.len(), 3);
+    let requests = bodies(&server).await;
+    let recentes = requests[4]["state"]["recentActions"].as_array().unwrap();
+    assert_eq!(recentes.len(), 3);
+    assert!(recentes.iter().all(|a| a["screenChanged"] == true), "{recentes:?}");
+}
+
+#[tokio::test]
+async fn direct_sequence_stops_at_mouse() {
+    let con = FakeConnector::new(vec![titled("o1", "a"), tree("o2", "fim")]);
+    let (op, server) = setup(vec![help(json!([
+        {"type":"keys","keys":["CTRL","L"]}, {"type":"mouse","x":10,"y":10,"button":"left","mode":"click"},
+    ])), Answer::Risk(0.05), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"keys","keys":["CTRL","L"]}))]);
+    assert_eq!(bodies(&server).await.len(), 3);
+}
+
+#[tokio::test]
+async fn direct_sequence_stops_at_first_failure() {
+    let con = FakeConnector::new(vec![titled("o1", "a")]);
+    con.state.lock().unwrap().act_errors.push_back(SessionError::Agent("tecla recusada".into()));
+    let (op, server) = setup(vec![help(json!([
+        {"type":"keys","keys":["CTRL","L"]}, {"type":"text","value":"x.com"},
+    ])), Answer::Risk(0.05),
+        Answer::Vision(json!({"interpretacao":"x", "acoes":[], "impedimento":"parou"}))]).await;
+    let r = run(op, &con).await;
+    assert_eq!(r.motivo, "parou");
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    assert_eq!(bodies(&server).await.len(), 3, "a segunda ação não passa nem pela checagem de risco");
+}
+
+#[tokio::test]
+async fn direct_sequence_respects_twice_guard() {
+    let con = FakeConnector::new(vec![titled("o1", "a"), titled("o2", "b"), titled("o3", "c"), tree("o4", "fim")]);
+    let (op, _server) = setup(vec![help(json!([
+        {"type":"keys","keys":["Down"]}, {"type":"keys","keys":["Down"]}, {"type":"keys","keys":["Down"]},
+    ])), Answer::Risk(0.05), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
+    let _r = run(op, &con).await;
+    assert_eq!(con.state.lock().unwrap().acts.len(), 2, "barrar deixa no máximo 2 ações iguais");
+}
+
+#[tokio::test]
+async fn direct_sequence_stops_after_no_effect() {
+    let con = FakeConnector::new(vec![titled("o1", "a"), titled("o2", "a"), titled("o3", "a"), tree("o4", "fim")]);
+    let (op, _server) = setup(vec![help(json!([
+        {"type":"keys","keys":["Enter"]}, {"type":"keys","keys":["Enter"]},
+    ])), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
+    let _r = run(op, &con).await;
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1, "o primeiro Enter não mudou a tela; o segundo é barrado");
+}
+
+#[tokio::test]
+async fn direct_sequence_stops_when_foreground_changes() {
+    let mut dialogo = tree("o2", "fim");
+    dialogo.foreground = "w2".into();
+    let con = FakeConnector::new(vec![titled("o1", "a"), dialogo]);
+    let (op, _server) = setup(vec![help(json!([
+        {"type":"keys","keys":["CTRL","L"]}, {"type":"text","value":"x.com"}, {"type":"keys","keys":["Enter"]},
+    ])), Answer::Risk(0.05), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"keys","keys":["CTRL","L"]}))]);
+}
+
+#[tokio::test]
+async fn direct_sequence_masks_secret_in_each_line() {
+    let secret = "sëgredo-fila-123";
+    let con = FakeConnector::new(vec![titled("o1", "a"), titled("o2", "b"), tree("o3", "fim")]);
+    let (mut op, server) = setup(vec![help(json!([
+        {"type":"keys","keys":["CTRL","L"]}, {"type":"text","value":secret},
+    ])), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
+    op.dados = json!({"senha":secret}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 2);
+    let diretas: Vec<_> = jev_log(&r).into_iter().filter_map(|l| l.get("direta").cloned()).collect();
+    assert_eq!(diretas, vec![json!("keys CTRL+L"), json!("text *** no foco atual")]);
+    for file in ["jev.jsonl", "observacao.json"] {
+        assert!(!std::fs::read_to_string(r.registro.as_ref().unwrap().join(file)).unwrap().contains(secret));
+    }
+    for body in bodies(&server).await { assert!(!body.to_string().contains(secret), "{body}"); }
+    assert!(!r.resumo().contains(secret));
+}
+
+#[tokio::test]
+async fn done_after_help_confirmed_by_goal_evidence() {
+    let con = FakeConnector::new(vec![tree("o1", "Ana")]);
+    let (mut op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+        Answer::Choice("DONE", 0.9, 0.05), Answer::Choice("DONE", 0.6, 0.05)]).await;
+    op.texto = "escrever 'Ana' no Nome".into();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(r.motivo, "objetivo confirmado (90%) na janela 'Editor'");
+}
+
+#[tokio::test]
+async fn done_after_help_refused_without_goal_items() {
+    let con = FakeConnector::new(vec![tree("o1", "Ana")]);
+    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+        Answer::Choice("DONE", 0.9, 0.05), Answer::Choice("DONE", 0.6, 0.05)]).await;
+    let r = run(op, &con).await;
+    assert!(!r.ok, "{}", r.resumo());
+    assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
 }
 
 #[tokio::test]

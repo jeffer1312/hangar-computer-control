@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use crate::barreiras::{Barreiras, aviso, fecha_janela, objetivo_pede_fechar, pendencia, segurar_segredos};
+use crate::barreiras::{Barreiras, aviso, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos};
 use crate::candidatos::{candidatos, descrever_acao, py_str, segredos, texto_no_editavel};
 use crate::descrever::{intencao, py_repr};
 use crate::estado::{assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
@@ -262,6 +262,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             acoes.push(clique);
         }
         let (mut dica, mut ajudou, mut direta) = (String::new(), false, None);
+        let mut fila: Vec<Candidato> = Vec::new();
         let mut falta_dica = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, &recentes, None);
@@ -273,8 +274,14 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 .map(|a| texto_no_editavel(a, &obs)).collect();
             // The first text fits several fields: Jev picks the field, no direct guess.
             let ambigua = grupos.first().is_some_and(|g| g.len() > 1);
+            let teclado: Vec<Action> = grupos.iter()
+                .take_while(|g| g.len() == 1 && matches!(g[0].kind, ActionType::Keys | ActionType::Text))
+                .take(3).map(|g| g[0].clone()).collect();
             let propostas = grupos.into_iter().flatten().map(|a| secretos.candidato(a, &obs)).collect();
-            let propostas = segurar_segredos(Barreiras::barrar(propostas, &recentes), &op.texto, &recentes, &secretos.valores);
+            let propostas: Vec<Candidato> = segurar_segredos(Barreiras::barrar(propostas, &recentes), &op.texto, &recentes, &secretos.valores);
+            // A proposal dropped by the guards breaks the run: the rest waits for the next cycle.
+            let seguidas = propostas.iter().zip(&teclado).take_while(|(p, a)| p.acao == **a && dentro(&p.acao, &obs)).count();
+            if seguidas >= 2 { fila = propostas[1..seguidas].to_vec(); }
             for proposta in propostas.iter().filter(|p| dentro(&p.acao, &obs)) {
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta.clone()); }
             }
@@ -310,6 +317,10 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                         "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco}), secretos)).await?;
                     controle.restante()?;
                     if d2.escolha == Escolha::Done && d2.p >= 0.75 { confirmado = Some(d2.p); }
+                    // The print reading plus every explicit item of the goal on screen is evidence enough.
+                    else if itens_pendentes(&op.texto, &obs) > 0 && pendencia(&op.texto, &obs, &recentes, &secretos.valores).is_none() {
+                        confirmado = Some(d.p);
+                    }
                 }
                 match confirmado {
                     Some(p) => {
@@ -359,47 +370,75 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             continue;
         }
         let Escolha::Indice(i) = decisao.escolha else { return Err("ValueError: opção inválida".into()); };
-        let candidato = acoes.get(i).ok_or("IndexError: list index out of range")?;
-        let acao = &candidato.acao;
-        let nome = &candidato.descricao;
-        if fecha_janela(acao, &obs) && !objetivo_pede_fechar(&op.texto) { decisao.risco = decisao.risco.max(1.0); }
-        if decisao.risco >= 0.5 {
-            r.motivo = format!("ação arriscada não executada: {nome} (risco {}). Autorize no objetivo.", percentual(decisao.risco));
-            return Ok(());
-        }
-        if ciclo == op.max_passos { break; }
-        let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let rotulo = secretos.descricao(acao, &obs, false);
-        let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),
-            async { Ok(s.act(&obs.observation_id, acao).await) }).await?;
-        match retorno {
-            Ok(ret) => {
-                let alvo = acao.target.as_ref().and_then(|id| obs.elements.iter().rev().find(|e| &e.id == id));
-                let clique = match (acao.kind, acao.mode, acao.x, acao.y) {
-                    (ActionType::Mouse, Some(m), Some(x), Some(y)) => Some((m, x, y)), _ => None,
-                };
-                recentes.push(Registro { action: nome.clone(), result: if ret.ok { "ok".into() } else { "{'ok': False}".into() },
-                    screen_changed: None, target_rect: alvo.and_then(|e| e.rect), clique, executada: true });
+        let mut candidato = acoes.get(i).ok_or("IndexError: list index out of range")?.clone();
+        let mut fila = fila.into_iter();
+        let primeiro_plano = obs.foreground.clone();
+        let mut vista = obs;
+        let mut atual = atual;
+        loop {
+            let acao = &candidato.acao;
+            let nome = &candidato.descricao;
+            if fecha_janela(acao, &vista) && !objetivo_pede_fechar(&op.texto) { decisao.risco = decisao.risco.max(1.0); }
+            if decisao.risco >= 0.5 {
+                r.motivo = format!("ação arriscada não executada: {nome} (risco {}). Autorize no objetivo.", percentual(decisao.risco));
+                return Ok(());
             }
-            Err(e) => {
-                recentes.push(Registro { action: nome.clone(), result: secretos.texto(&format!("NOT executed: {e}")),
-                    screen_changed: Some(false), target_rect: None, clique: None, executada: false });
-                if reconectavel(&e) && !controle.cancel.is_cancelled() { reconectar(conector, sessao, controle).await?; }
-            }
-        }
-        r.passos.push(format!("{}. {nome} [{}]", r.passos.len() + 1, percentual(decisao.p)));
-        let prazo = Instant::now() + Duration::from_secs(if acao.kind == ActionType::Launch { 45 } else { 3 });
-        controle.esperar(Duration::from_millis(800)).await?;
-        while Instant::now() < prazo {
+            if ciclo == op.max_passos { break; }
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-            match controle.rodar(async { Ok(observar(s).await) }).await? {
-                Ok(nova) if assinatura_tela(&nova) != atual => break,
-                Ok(_) => {}
-                Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
-                Err(e) if e.tipo() == "RuntimeError" => eprintln!("observação durante espera ignorada: {}", secretos.texto(&e.to_string())),
-                Err(e) => return Err(erro_sessao(e)),
+            let rotulo = secretos.descricao(acao, &vista, false);
+            let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),
+                async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
+            let falhou = match retorno {
+                Ok(ret) => {
+                    let alvo = acao.target.as_ref().and_then(|id| vista.elements.iter().rev().find(|e| &e.id == id));
+                    let clique = match (acao.kind, acao.mode, acao.x, acao.y) {
+                        (ActionType::Mouse, Some(m), Some(x), Some(y)) => Some((m, x, y)), _ => None,
+                    };
+                    recentes.push(Registro { action: nome.clone(), result: if ret.ok { "ok".into() } else { "{'ok': False}".into() },
+                        screen_changed: None, target_rect: alvo.and_then(|e| e.rect), clique, executada: true });
+                    !ret.ok
+                }
+                Err(e) => {
+                    recentes.push(Registro { action: nome.clone(), result: secretos.texto(&format!("NOT executed: {e}")),
+                        screen_changed: Some(false), target_rect: None, clique: None, executada: false });
+                    if reconectavel(&e) && !controle.cancel.is_cancelled() { reconectar(conector, sessao, controle).await?; }
+                    true
+                }
+            };
+            r.passos.push(format!("{}. {nome} [{}]", r.passos.len() + 1, percentual(decisao.p)));
+            let prazo = Instant::now() + Duration::from_secs(if acao.kind == ActionType::Launch { 45 } else { 3 });
+            controle.esperar(Duration::from_millis(800)).await?;
+            while Instant::now() < prazo {
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                match controle.rodar(async { Ok(observar(s).await) }).await? {
+                    Ok(nova) if assinatura_tela(&nova) != atual => break,
+                    Ok(_) => {}
+                    Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
+                    Err(e) if e.tipo() == "RuntimeError" => eprintln!("observação durante espera ignorada: {}", secretos.texto(&e.to_string())),
+                    Err(e) => return Err(erro_sessao(e)),
+                }
+                controle.esperar(Duration::from_secs(1)).await?;
             }
-            controle.esperar(Duration::from_secs(1)).await?;
+            let Some(proxima) = fila.next().filter(|_| !falhou) else { break };
+            // The agent consumes each observation id: the next key/text needs a fresh one.
+            let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+            vista = controle.medir("observacao", Progresso::Observacao,
+                async { observar(s).await.map_err(erro_sessao) }).await?;
+            let nova = assinatura_tela(&vista);
+            if let Some(ultima) = recentes.last_mut() { ultima.screen_changed = Some(nova != atual); }
+            atual = nova;
+            anterior = Some(atual.clone());
+            let mut gravada = serde_json::to_value(&vista).map_err(|e| format!("ValueError: {e}"))?;
+            secretos.valor(&mut gravada);
+            controle.rodar(async { tokio::fs::write(pasta.join("observacao.json"), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
+            // A new window or a message box takes the queued keys: the next cycle looks at it first.
+            if vista.foreground != primeiro_plano || aviso(&vista).is_some() { break; }
+            if Barreiras::tres_sem_efeito(&recentes).is_some() || Barreiras::barrar(vec![proxima.clone()], &recentes).is_empty() { break; }
+            let estado = secretos.estado(op, &vista, &recentes, None);
+            let limite = controle.restante()?.min(Duration::from_secs(30));
+            decisao.risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proxima.descricao, limite)).await?;
+            controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proxima.descricao, "risky":decisao.risco, "dica":dica}), secretos)).await?;
+            candidato = proxima;
         }
     }
     r.motivo = format!("limite de {} ciclos; objetivo não confirmado", op.max_passos);

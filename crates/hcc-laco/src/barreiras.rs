@@ -54,6 +54,15 @@ pub fn pendente(objetivo: &str, obs: &Observation, recentes: &[Registro], segred
     pendencia(objetivo, obs, recentes, segredos).map(|(_, texto)| texto)
 }
 
+/// How many explicit items `pendente` checks: quoted literals (only on a non-empty tree) plus named key combos.
+pub fn itens_pendentes(objetivo: &str, obs: &Observation) -> usize {
+    let literais = if obs.elements.is_empty() { 0 } else {
+        LITERAIS.captures_iter(objetivo).filter_map(|c| c.iter().skip(1).flatten().next())
+            .filter(|l| l.as_str().chars().count() >= 2).count()
+    };
+    literais + COMBOS.find_iter(objetivo).count()
+}
+
 pub(crate) fn pendencia(objetivo: &str, obs: &Observation, recentes: &[Registro], segredos: &HashSet<String>) -> Option<(usize, String)> {
     let publico = |texto: &str| {
         if segredos.iter().any(|s| s.contains(texto)) { return "<senha>".into(); }
