@@ -2,11 +2,12 @@
 
 use std::collections::HashSet;
 
-use hcc_laco::barreiras::{Barreiras, aviso, objetivo_pede_fechar, pendente};
-use hcc_laco::candidatos::{candidatos, segredos};
+use hcc_laco::barreiras::{Barreiras, aviso, objetivo_pede_fechar, pendente, segurar_segredos};
+use hcc_laco::candidatos::{candidatos, descrever_acao, segredos, texto_no_editavel};
+use hcc_laco::descrever::intencao;
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
 use hcc_laco::geometria::para_tela;
-use hcc_laco::tipos::Registro;
+use hcc_laco::tipos::{Candidato, Registro};
 use hcc_protocolo::{Action, ActionType, Button, Element, ElementAction, MouseMode, Observation, Rect, Screen, Window};
 use serde_json::{Map, Value, json};
 
@@ -484,4 +485,103 @@ fn signature_includes_foreground_title() {
     assert_ne!(assinatura_tela(&antes), assinatura_tela(&depois));
     depois.foreground = "w9".into();
     assert_eq!(assinatura_tela(&depois).1, "");
+}
+
+fn texto(v: &str) -> Action {
+    Action { kind: ActionType::Text, value: Some(v.into()), ..Default::default() }
+}
+
+fn aba() -> Element {
+    Element { focused: true, ..el("t1", "Documento", "TabItem", &[ElementAction::Select], None, None) }
+}
+
+#[test]
+fn texto_sem_alvo_vira_alvo_unico_editavel() {
+    let tela = obs(vec![aba(), el("e1", "Corpo", "Edit", &[ElementAction::Focus], None, None)]);
+    let acoes = texto_no_editavel(texto("ação"), &tela);
+    assert_eq!(acoes, vec![Action { target: Some("e1".into()), ..texto("ação") }]);
+    assert_eq!(descrever_acao(&acoes[0], &tela, &HashSet::new(), true), "text 'ação' em Edit 'Corpo'");
+    let segredo = HashSet::from(["ação".to_owned()]);
+    assert_eq!(descrever_acao(&acoes[0], &tela, &segredo, true), "text *** em Edit 'Corpo'");
+}
+
+#[test]
+fn texto_sem_alvo_varios_editaveis() {
+    let tela = obs(vec![
+        el("e1", "Nome", "Edit", &[ElementAction::SetValue], None, None),
+        aba(),
+        el("c1", "Cidade", "ComboBox", &[ElementAction::SetValue], None, None),
+        Element { enabled: false, ..el("e2", "Travado", "Edit", &[], None, None) },
+    ]);
+    let alvos: Vec<Option<String>> = texto_no_editavel(texto("x"), &tela).into_iter().map(|a| a.target).collect();
+    assert_eq!(alvos, vec![Some("e1".into()), Some("c1".into())]);
+}
+
+#[test]
+fn texto_sem_alvo_foco_editavel_inalterado() {
+    let foco = Element { focused: true, ..el("e1", "Nome", "Edit", &[ElementAction::SetValue], None, None) };
+    let tela = obs(vec![foco, el("e2", "Outro", "Edit", &[ElementAction::SetValue], None, None)]);
+    assert_eq!(texto_no_editavel(texto("x"), &tela), vec![texto("x")]);
+    let sem_editavel = obs(vec![aba()]);
+    assert_eq!(texto_no_editavel(texto("x"), &sem_editavel), vec![texto("x")]);
+    let com_alvo = Action { target: Some("e2".into()), ..texto("x") };
+    assert_eq!(texto_no_editavel(com_alvo.clone(), &obs(vec![aba(), el("e1", "N", "Edit", &[], None, None)])), vec![com_alvo]);
+}
+
+#[test]
+fn texto_sem_alvo_arvore_vazia_inalterado() {
+    let tela = obs(vec![]);
+    assert_eq!(texto_no_editavel(texto("x"), &tela), vec![texto("x")]);
+    assert_eq!(descrever_acao(&texto("x"), &tela, &HashSet::new(), true), "text 'x' no foco atual");
+}
+
+fn valor(kind: ActionType, v: &str) -> Candidato {
+    let acao = Action { kind, target: Some("e1".into()), value: Some(v.into()), ..Default::default() };
+    let tela = obs(vec![]);
+    Candidato { descricao: descrever_acao(&acao, &tela, &HashSet::new(), true), intencao: intencao(&acao, &tela), acao }
+}
+
+#[test]
+fn segredo_barrado_antes_do_combo() {
+    let segredos = HashSet::from(["s3nh4".to_owned()]);
+    let cands = vec![valor(ActionType::SetValue, "s3nh4"), valor(ActionType::Text, "x s3nh4 y"), valor(ActionType::SetValue, "Ana")];
+    let objetivo = "pressionar Ctrl+F e digitar a senha";
+    let ficou = segurar_segredos(cands.clone(), objetivo, &[], &segredos);
+    assert_eq!(ficou, vec![cands[2].clone()]);
+    let nao_executada = vec![Registro { executada: false, ..reg("keys CTRL+F", Some(false)) }];
+    assert_eq!(segurar_segredos(cands, objetivo, &nao_executada, &segredos).len(), 1);
+}
+
+#[test]
+fn segredo_liberado_depois_do_combo() {
+    let segredos = HashSet::from(["s3nh4".to_owned()]);
+    let cands = vec![valor(ActionType::SetValue, "s3nh4"), valor(ActionType::Text, "s3nh4")];
+    let feito = vec![reg("keys CTRL+F", Some(true))];
+    assert_eq!(segurar_segredos(cands.clone(), "pressionar Ctrl+F e digitar a senha", &feito, &segredos), cands);
+    assert_eq!(segurar_segredos(cands.clone(), "digitar a senha", &[], &segredos), cands);
+}
+
+#[test]
+fn valor_comum_nao_barrado() {
+    let cands = vec![valor(ActionType::SetValue, "Ana"), valor(ActionType::Text, "Ana")];
+    assert_eq!(segurar_segredos(cands.clone(), "pressionar Ctrl+F e digitar Ana", &[], &HashSet::new()), cands);
+    let vazio = HashSet::from([String::new()]);
+    assert_eq!(segurar_segredos(cands.clone(), "pressionar Ctrl+F e digitar Ana", &[], &vazio), cands);
+}
+
+#[test]
+fn texto_foco_desabilitado_e_campo_senha() {
+    let travado = Element { focused: true, enabled: false, ..el("e0", "Travado", "Edit", &[ElementAction::SetValue], None, None) };
+    let senha = Element { password: true, ..el("p1", "Senha", "Edit", &[ElementAction::SetValue], None, None) };
+    let tela = obs(vec![travado, senha]);
+    let acoes = texto_no_editavel(Action { rotulo: Some("rot".into()), ..texto("visivel") }, &tela);
+    assert_eq!(acoes.iter().map(|a| a.target.as_deref()).collect::<Vec<_>>(), vec![Some("p1")]);
+    assert_eq!(descrever_acao(&acoes[0], &tela, &HashSet::new(), true), "text *** em Edit 'Senha'");
+}
+
+#[test]
+fn combo_dentro_do_segredo_nao_segura() {
+    let segredos = HashSet::from(["Ctrl+Q1".to_owned()]);
+    let cands = vec![valor(ActionType::SetValue, "Ctrl+Q1")];
+    assert_eq!(segurar_segredos(cands.clone(), "digitar Ctrl+Q1 no campo", &[], &segredos), cands);
 }
