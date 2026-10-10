@@ -573,6 +573,109 @@ fn password_without_confirmed_focus_does_not_type() {
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "wtype"));
 }
 
+fn with_xdg_apps(test: &str, populate: impl FnOnce(&std::path::Path)) -> bool {
+    if std::env::var("HCC_APPS_TEST").as_deref() == Ok(test) { return false; }
+    let root = std::env::temp_dir().join(format!("hcc-apps-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir(&root).unwrap();
+    for dir in ["user", "system", "extra"] { std::fs::create_dir_all(root.join(dir).join("applications")).unwrap(); }
+    populate(&root);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"]).env("HCC_APPS_TEST", test)
+        .env("XDG_DATA_HOME", root.join("user"))
+        .env("XDG_DATA_DIRS", std::env::join_paths([root.join("system"), root.join("extra")]).unwrap())
+        .output().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "child test did not run: {}", String::from_utf8_lossy(&output.stdout));
+    true
+}
+
+#[test]
+fn installed_apps_from_xdg_are_cached_and_filtered() {
+    if with_xdg_apps("installed_apps_from_xdg_are_cached_and_filtered", |root| {
+        for (file, text) in [
+            ("user/applications/editor.desktop", "[Desktop Entry]\nName=Editor de Texto\nExec=gnome-text-editor %U\n[Desktop Action Other]\nName=Other\nExec=other\n"),
+            ("system/applications/files.desktop", "[Desktop Entry]\nName=Arquivos\nExec=\"/opt/My App/files\" %f\n"),
+            ("extra/applications/duplicate.desktop", "[Desktop Entry]\nName=Editor de Texto\nExec=gnome-text-editor %U\n"),
+            ("user/applications/nodisplay.desktop", "[Desktop Entry]\nName=Invisible\nExec=invisible\nNoDisplay=true\n"),
+            ("system/applications/hidden.desktop", "[Desktop Entry]\nName=Hidden\nExec=hidden\nHidden=true\n"),
+            ("user/applications/empty.desktop", "[Desktop Entry]\nName=Empty\nExec=%U\n"),
+            ("user/applications/not-desktop.txt", "[Desktop Entry]\nName=Not Desktop\nExec=not-desktop\n"),
+        ] { std::fs::write(root.join(file), text).unwrap(); }
+    }) { return; }
+    let (mut desktop, commands, _) = desktop(vec![]);
+    let expected = json!([r#"Arquivos => "/opt/My App/files""#, "Editor de Texto => gnome-text-editor"]);
+    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], expected);
+    let home = std::env::var_os("XDG_DATA_HOME").unwrap();
+    std::fs::write(std::path::PathBuf::from(home).join("applications/editor.desktop"), "[Desktop Entry]\nName=Changed\nExec=changed\n").unwrap();
+    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], expected);
+    assert!(!commands.calls.borrow().iter().any(|c| c.0[0] != "pgrep" && c.0 != ["hyprctl", "-j", "activewindow"] && c.0 != ["hyprctl", "-j", "monitors"] && c.0 != ["hyprctl", "-j", "clients"]));
+}
+
+#[test]
+fn installed_exec_preserves_arguments_and_quotes() {
+    if with_xdg_apps("installed_exec_preserves_arguments_and_quotes", |root| {
+        for (i, (name, exec)) in [
+            ("A Flatpak", "flatpak run org.x.App %U"),
+            ("B Env", "env VAR=x app %f"),
+            ("C Quote", r#""/opt/My App/files" %f"#),
+            ("Conversor => PDF", "app %F %u %U %i %c %k %d %D %n %N %v %m"),
+            ("D Escape", r#"app "a \\"b\\"""#),
+            ("E Percent", "app 100%%"),
+            ("F Arrowarg", r#"app "left => right""#),
+            ("Z Invalid", "VAR=x app"),
+            ("Z Unbalanced", "app \"unfinished"),
+        ].into_iter().enumerate() {
+            std::fs::write(root.join(format!("user/applications/{i}.desktop")), format!("[Desktop Entry]\nName={name}\nExec={exec}\n")).unwrap();
+        }
+    }) { return; }
+    let (mut desktop, _, _) = desktop(vec![]);
+    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], json!([
+        "A Flatpak => flatpak run org.x.App",
+        "B Env => env VAR=x app",
+        r#"C Quote => "/opt/My App/files""#,
+        "Conversor -> PDF => app",
+        r#"D Escape => app "a \"b\"""#,
+        "E Percent => app 100%",
+        r#"F Arrowarg => app "left => right""#,
+    ]));
+}
+
+#[test]
+#[should_panic(expected = "child test did not run")]
+fn xdg_fixture_refuses_missing_child_test() {
+    with_xdg_apps("missing_child_test_fixture", |_| {});
+}
+
+#[test]
+fn user_hidden_desktop_entry_overrides_system() {
+    if with_xdg_apps("user_hidden_desktop_entry_overrides_system", |root| {
+        std::fs::write(root.join("user/applications/editor.desktop"), "[Desktop Entry]\nHidden=true\n").unwrap();
+        std::fs::write(root.join("system/applications/editor.desktop"), "[Desktop Entry]\nName=Removed Editor\nExec=removed-editor\n").unwrap();
+        std::fs::write(root.join("user/applications/files.desktop"), "[Desktop Entry]\nName=Files\nExec=user-files\n").unwrap();
+        std::fs::write(root.join("system/applications/files.desktop"), "[Desktop Entry]\nName=System Files\nExec=system-files\n").unwrap();
+    }) { return; }
+    let (mut desktop, _, _) = desktop(vec![]);
+    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], json!(["Files => user-files"]));
+}
+
+#[test]
+fn installed_apps_are_sorted_deduplicated_and_capped() {
+    if with_xdg_apps("installed_apps_are_sorted_deduplicated_and_capped", |root| {
+        for i in (0..155).rev() {
+            std::fs::write(root.join(format!("user/applications/{i}.desktop")), format!("[Desktop Entry]\nName=App {i:03}\nExec=app{i:03} %f\n")).unwrap();
+        }
+        std::fs::write(root.join("system/applications/duplicate.desktop"), "[Desktop Entry]\nName=App 000\nExec=app000\n").unwrap();
+    }) { return; }
+    let (mut desktop, _, _) = desktop(vec![]);
+    let wire = serde_json::to_value(desktop.observe().unwrap()).unwrap();
+    let apps = wire["apps"].as_array().expect("installed apps missing");
+    assert_eq!(apps.len(), 150);
+    assert_eq!(apps[0], "App 000 => app000");
+    assert_eq!(apps[149], "App 149 => app149");
+    assert!(apps.windows(2).all(|pair| pair[0].as_str().unwrap() < pair[1].as_str().unwrap()));
+}
+
 #[test]
 #[ignore = "desktop real"]
 fn observe_real_desktop() {

@@ -32,6 +32,7 @@ fn obs(elements: Vec<Element>) -> Observation {
         foreground: "w1".into(),
         windows: vec![Window { id: "w1".into(), name: "Editor".into(), process_id: 1, class_name: "TMainForm".into(), rect: Rect(0, 0, 800, 600) }],
         elements,
+        apps: vec![],
         truncated: false,
         timestamp: 0.0,
         screen: Screen { width: 800, height: 600 },
@@ -66,6 +67,97 @@ fn candidato(acao: Action) -> hcc_laco::tipos::Candidato {
     let d = hcc_laco::descrever::descrever(&acao, &o, &HashSet::new(), true);
     let i = hcc_laco::descrever::intencao(&acao, &o);
     hcc_laco::tipos::Candidato { acao, descricao: d, intencao: i }
+}
+
+#[test]
+fn installed_apps_are_offered_to_jev_and_omitted_when_empty() {
+    let original = obs(vec![]);
+    let mut wire = serde_json::to_value(&original).unwrap();
+    assert!(wire.get("apps").is_none());
+    let without = estado_compacto("abrir editor", &Map::new(), &original, &[], None);
+    assert!(without.get("installedApps").is_none());
+    wire["apps"] = json!(["Editor de Texto => gnome-text-editor"]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let state = estado_compacto("abrir editor", &Map::new(), &installed, &[], None);
+    assert_eq!(state["installedApps"], json!(["Editor de Texto => gnome-text-editor"]));
+    let mut old_wire = serde_json::to_value(installed).unwrap();
+    old_wire.as_object_mut().unwrap().remove("apps");
+    let old_agent: Observation = serde_json::from_value(old_wire).unwrap();
+    assert_eq!(estado_compacto("abrir editor", &Map::new(), &old_agent, &[], None), without);
+    assert!(serde_json::to_value(old_agent).unwrap().get("apps").is_none());
+}
+
+#[test]
+fn installed_apps_generate_launch_candidates_with_names() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Editor de Texto => gnome-text-editor", r#"Arquivo => "/opt/My App/editor""#, "invalid", " => "]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let all = candidatos(&installed, &Map::new(), &HashSet::new());
+    let launches: Vec<_> = all.iter().filter(|c| c.acao.kind == ActionType::Launch).collect();
+    assert_eq!(launches.len(), 2);
+    assert_eq!(launches[0].acao.application.as_deref(), Some("gnome-text-editor"));
+    assert_eq!(launches[0].acao.rotulo.as_deref(), Some("Editor de Texto"));
+    assert!(launches[0].descricao.contains("Editor de Texto"));
+    assert!(launches[0].descricao.contains("gnome-text-editor"));
+    assert_eq!(launches[0].intencao.aplicacao.as_deref(), Some("gnome-text-editor"));
+    assert_eq!(launches[1].acao.application.as_deref(), Some("/opt/My App/editor"));
+    let original = candidatos(&obs(vec![]), &Map::new(), &HashSet::new());
+    let remaining: Vec<_> = all.iter().filter(|c| c.acao.kind != ActionType::Launch).map(|c| &c.acao).collect();
+    assert_eq!(remaining, original.iter().map(|c| &c.acao).collect::<Vec<_>>());
+}
+
+#[test]
+fn installed_name_with_separator_keeps_executable() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Conversor -> PDF => /usr/bin/editor"]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let all = candidatos(&installed, &Map::new(), &HashSet::new());
+    let launch = all.iter().find(|c| c.acao.kind == ActionType::Launch).unwrap();
+    assert_eq!(launch.acao.application.as_deref(), Some("/usr/bin/editor"));
+    assert_eq!(launch.acao.rotulo.as_deref(), Some("Conversor -> PDF"));
+}
+
+#[test]
+fn launch_candidates_keep_exec_arguments() {
+    for (entry, name, executable, args) in [
+        ("A Flatpak => flatpak run org.x.App", "A Flatpak", "flatpak", vec!["run", "org.x.App"]),
+        ("B Env => env VAR=x app", "B Env", "env", vec!["VAR=x", "app"]),
+        (r#"C Quote => "/opt/My App/files""#, "C Quote", "/opt/My App/files", vec![]),
+        ("Conversor -> PDF => app", "Conversor -> PDF", "app", vec![]),
+        (r#"D Escape => app "a \"b\"""#, "D Escape", "app", vec![r#"a "b""#]),
+        ("E Percent => app 100%", "E Percent", "app", vec!["100%"]),
+        (r#"F Arrowarg => app "left => right""#, "F Arrowarg", "app", vec!["left => right"]),
+    ] {
+        let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+        wire["apps"] = json!([entry]);
+        let installed: Observation = serde_json::from_value(wire).unwrap();
+        let all = candidatos(&installed, &Map::new(), &HashSet::new());
+        let launch = all.iter().find(|c| c.acao.kind == ActionType::Launch).unwrap();
+        assert_eq!(launch.acao.application.as_deref(), Some(executable), "{entry}");
+        assert_eq!(launch.acao.rotulo.as_deref(), Some(name), "{entry}");
+        let expected_args = (!args.is_empty()).then(|| args.iter().map(|a| a.to_string()).collect());
+        assert_eq!(launch.acao.args, expected_args, "{entry}");
+        assert!(launch.descricao.contains(name), "{}", launch.descricao);
+        for arg in args { assert!(launch.descricao.contains(arg), "{}", launch.descricao); }
+    }
+}
+
+#[test]
+fn malformed_installed_command_is_not_offered() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Broken => app \"unfinished", "Empty => \"\"", "Missing => "]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    assert!(!candidatos(&installed, &Map::new(), &HashSet::new()).iter().any(|c| c.acao.kind == ActionType::Launch));
+}
+
+#[test]
+fn installed_apps_do_not_expose_secrets_in_compact_state() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Editor private-value => editor-private-value"]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let state = estado_compacto("abrir editor", &dados(json!({"senha":"private-value"})), &installed, &[], None);
+    assert_eq!(state["installedApps"], json!(["Editor <senha> => editor-<senha>"]));
+    assert!(!state.to_string().contains("private-value"));
 }
 
 #[test]

@@ -74,6 +74,9 @@ pub fn estado_compacto(
         "elements": elementos,
         "recentActions": recentes,
     });
+    if !obs.apps.is_empty() {
+        estado["installedApps"] = json!(obs.apps);
+    }
     if let Some(h) = hint.filter(|h| !h.is_empty()) {
         estado["hint"] = json!(h);
     }

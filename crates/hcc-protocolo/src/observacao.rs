@@ -2,6 +2,33 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A mesma regra de aspas precisa valer no catálogo e na ação de abertura.
+pub fn dividir_comando(texto: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut chars = texto.chars();
+    let (mut quoted, mut started) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => { quoted = !quoted; started = true; }
+            '\\' if quoted => {
+                match chars.next()? {
+                    c @ ('"' | '`' | '$' | '\\') => token.push(c),
+                    _ => return None,
+                }
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started { tokens.push(std::mem::take(&mut token)); started = false; }
+            }
+            c => { token.push(c); started = true; }
+        }
+    }
+    if quoted { return None; }
+    if started { tokens.push(token); }
+    Some(tokens)
+}
+
 /// `[left, top, right, bottom]`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rect(pub i32, pub i32, pub i32, pub i32);
@@ -56,6 +83,8 @@ pub struct Observation {
     pub foreground: String,
     pub windows: Vec<Window>,
     pub elements: Vec<Element>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
     pub truncated: bool,
     pub timestamp: f64,
     pub screen: Screen,

@@ -7,9 +7,9 @@ pub mod hypr;
 
 use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, role_name, walk};
 use comandos::{Comandos, ComandosSistema};
-use hcc_protocolo::{Action, ActionType, Button, Desktop, DesktopError, ErrorKind, MouseMode, Observation, Rect, Screen, Window};
+use hcc_protocolo::{Action, ActionType, Button, Desktop, DesktopError, ErrorKind, MouseMode, Observation, Rect, Screen, Window, dividir_comando};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,6 +27,7 @@ pub struct LinuxDesktop<C: Comandos = ComandosSistema, T: Arvore = AtspiTree> {
     observed_at: Option<Instant>,
     foreground: String,
     area: Rect,
+    apps: Vec<String>,
 }
 
 impl LinuxDesktop {
@@ -83,10 +84,95 @@ fn python_repr(text: &str) -> String {
     result
 }
 
+fn desktop_value(value: &str) -> Option<String> {
+    let mut chars = value.chars();
+    let mut text = String::new();
+    while let Some(c) = chars.next() {
+        text.push(if c == '\\' {
+            match chars.next()? { 's' => ' ', 'n' => '\n', 't' => '\t', 'r' => '\r', '\\' => '\\', _ => return None }
+        } else { c });
+    }
+    Some(text)
+}
+
+fn exec_tokens(exec: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    for token in dividir_comando(exec)? {
+        let mut chars = token.chars();
+        let mut clean = String::new();
+        while let Some(c) = chars.next() {
+            if c == '%' { if chars.next()? == '%' { clean.push('%'); } }
+            else { clean.push(c); }
+        }
+        if !clean.is_empty() { tokens.push(clean); }
+    }
+    if tokens.first().is_none_or(|t| t.contains('=')) { return None; }
+    Some(tokens)
+}
+
+fn desktop_app(text: &str) -> Option<String> {
+    let (mut name, mut exec, mut entry, mut hidden) = (None, None, false, false);
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') { entry = line == "[Desktop Entry]"; continue; }
+        if !entry || line.starts_with('#') { continue; }
+        if let Some((key, value)) = line.split_once('=') {
+            match key.trim() {
+                "Name" => name = Some(value.trim()),
+                "Exec" => exec = Some(value.trim()),
+                "NoDisplay" | "Hidden" if value.trim() == "true" => hidden = true,
+                _ => {},
+            }
+        }
+    }
+    if hidden { return None; }
+    let name = desktop_value(name?)?.replace(" => ", " -> ");
+    if name.is_empty() { return None; }
+    let command = exec_tokens(&desktop_value(exec?)?)?.into_iter().map(|token| {
+        if token == "=>" || token.chars().any(|c| c.is_whitespace() || matches!(c, '"' | '`' | '$' | '\\')) {
+            let mut escaped = String::new();
+            for c in token.chars() {
+                if matches!(c, '"' | '`' | '$' | '\\') { escaped.push('\\'); }
+                escaped.push(c);
+            }
+            format!("\"{escaped}\"")
+        } else { token }
+    }).collect::<Vec<_>>().join(" ");
+    Some(format!("{name} => {command}"))
+}
+
+fn installed_apps() -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("XDG_DATA_HOME").filter(|p| !p.is_empty()).map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/share"))) {
+        dirs.push(home);
+    }
+    let system = std::env::var_os("XDG_DATA_DIRS").filter(|p| !p.is_empty()).unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    dirs.extend(std::env::split_paths(&system));
+    let mut apps = BTreeSet::new();
+    let mut seen = HashSet::new();
+    for dir in dirs {
+        let entries = match std::fs::read_dir(dir.join("applications")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => { ignorado("installed_apps.directory", &error); continue; }
+        };
+        for entry in entries {
+            let entry = match entry { Ok(entry) => entry, Err(error) => { ignorado("installed_apps.entry", &error); continue; } };
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "desktop") || !seen.insert(entry.file_name()) { continue; }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text, Err(error) => { ignorado("installed_apps.file", &error); continue; }
+            };
+            if let Some(app) = desktop_app(&text) { apps.insert(app); }
+        }
+    }
+    apps.into_iter().take(150).collect()
+}
+
 impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
     pub fn with_backends(commands: C, tree: T, session_id: u32) -> Self {
         Self { commands, tree, session_id, _lock: None, elements: HashMap::new(), windows: HashMap::new(),
-            observed_at: None, foreground: String::new(), area: Rect(0, 0, 0, 0) }
+            observed_at: None, foreground: String::new(), area: Rect(0, 0, 0, 0), apps: installed_apps() }
     }
 
     fn current(&self) -> Result<(Value, Rect, Value), DesktopError> {
@@ -288,7 +374,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         if self.foreground()? != self.foreground { return Err(runtime("a janela ativa mudou durante a observação; tente novamente")); }
         self.observed_at = Some(Instant::now());
         Ok(Observation { observation_id: String::new(), connected: true, session_id: self.session_id,
-            foreground: self.foreground.clone(), windows, elements, truncated,
+            foreground: self.foreground.clone(), windows, elements, apps: self.apps.clone(), truncated,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| runtime(e.to_string()))?.as_secs_f64(), screen })
     }
 

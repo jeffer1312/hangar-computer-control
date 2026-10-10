@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use hcc_protocolo::{Action, ActionType, Amount, Button, Direction, ElementAction, MouseMode, Observation, Rect};
+use hcc_protocolo::{Action, ActionType, Amount, Button, Direction, ElementAction, MouseMode, Observation, Rect, dividir_comando};
 use regex::Regex;
 use serde_json::{Map, Value};
 
@@ -91,6 +91,14 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
         .filter(|w| w.id != obs.foreground)
         .map(|w| Action { kind: ActionType::Activate, target: Some(w.id.clone()), ..Default::default() })
         .collect();
+    acoes.extend(obs.apps.iter().filter_map(|app| {
+        let (name, command) = app.split_once(" => ")?;
+        if name.is_empty() { return None; }
+        let mut tokens = dividir_comando(command)?.into_iter();
+        let executable = tokens.next().filter(|t| !t.is_empty())?;
+        let args: Vec<String> = tokens.collect();
+        Some(Action { kind: ActionType::Launch, application: Some(executable), args: (!args.is_empty()).then_some(args), rotulo: Some(name.into()), ..Default::default() })
+    }));
     let valores: Vec<String> =
         dados.values().filter(|v| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_))).map(py_str).collect();
     for e in obs.elements.iter().filter(|e| e.enabled) {
