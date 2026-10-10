@@ -380,6 +380,7 @@ mod desktop {
                 foreground: lido.foreground,
                 windows: lido.windows,
                 elements: lido.elements,
+                apps: vec![],
                 truncated: lido.truncated,
                 timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
                 screen: Screen { width: w.max(0) as u32, height: h.max(0) as u32 },

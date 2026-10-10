@@ -74,6 +74,7 @@ mod tests {
                 foreground: self.foreground.clone(),
                 windows: vec![],
                 elements: vec![],
+                apps: vec![],
                 truncated: false,
                 timestamp: 0.0,
                 screen: Screen { width: 1, height: 1 },
