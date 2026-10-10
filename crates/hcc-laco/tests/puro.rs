@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use hcc_laco::barreiras::{Barreiras, aviso, objetivo_pede_fechar};
 use hcc_laco::candidatos::{candidatos, segredos};
-use hcc_laco::estado::estado_compacto;
+use hcc_laco::estado::{assinatura_tela, estado_compacto};
 use hcc_laco::geometria::para_tela;
 use hcc_laco::tipos::Registro;
 use hcc_protocolo::{Action, ActionType, Button, Element, ElementAction, MouseMode, Observation, Rect, Screen, Window};
@@ -346,4 +346,15 @@ fn scaling_rounds_half_to_even() {
     assert_eq!(para_tela(&mouse(697, 3, MouseMode::Click), &tela, ""), mouse(1046, 4, MouseMode::Click));
     let pequena = Screen { width: 1024, height: 768 };
     assert_eq!(para_tela(&mouse(695, 1, MouseMode::Click), &pequena, ""), mouse(695, 1, MouseMode::Click));
+}
+
+#[test]
+fn signature_includes_foreground_title() {
+    let antes = obs(vec![]);
+    let mut depois = antes.clone();
+    assert_eq!(assinatura_tela(&antes), assinatura_tela(&depois));
+    depois.windows[0].name = "Example Domain - Google Chrome".into();
+    assert_ne!(assinatura_tela(&antes), assinatura_tela(&depois));
+    depois.foreground = "w9".into();
+    assert_eq!(assinatura_tela(&depois).1, "");
 }

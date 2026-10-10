@@ -195,10 +195,64 @@ async fn window_close_requires_matching_goal() {
 #[tokio::test]
 async fn done_after_visual_help_is_unconfirmed() {
     let con = FakeConnector::new(vec![tree("o1", "")]);
-    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), done()]).await;
+    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), done(),
+        Answer::Choice("WAIT", 0.9, 0.05)]).await;
     let r = run(op, &con).await;
     assert!(!r.ok);
     assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
+}
+
+fn titled(id: &str, title: &str) -> Observation {
+    let mut obs = empty(id);
+    obs.windows[0].name = title.into();
+    obs
+}
+
+#[tokio::test]
+async fn title_change_counts_as_screen_change() {
+    let con = FakeConnector::new(vec![titled("o1", "A"), titled("o2", "B"), titled("o3", "C"), titled("o4", "D")]);
+    let (op, server) = setup(vec![
+        help(json!([{"type":"keys","keys":["F6"]}])), Answer::Risk(0.05),
+        help(json!([{"type":"text","value":"https://example.com"}])), Answer::Risk(0.05),
+        help(json!([{"type":"keys","keys":["Enter"]}])), Answer::Risk(0.05),
+        help(json!([])), Answer::Choice("BLOCKED", 0.9, 0.05),
+    ]).await;
+    let r = run(op, &con).await;
+    assert_eq!(con.state.lock().unwrap().acts.len(), 3, "{}", r.resumo());
+    assert_eq!(r.motivo, "sem ação segura: Jev escolheu BLOCKED com 90%. tela vista");
+    let requests = bodies(&server).await;
+    let recentes = requests.last().unwrap()["state"]["recentActions"].as_array().unwrap().clone();
+    assert_eq!(recentes.len(), 3);
+    assert!(recentes.iter().all(|a| a["screenChanged"] == true), "{recentes:?}");
+}
+
+#[tokio::test]
+async fn done_after_help_confirmed_without_hint() {
+    let con = FakeConnector::new(vec![empty("o1")]);
+    let (op, server) = setup(vec![help(json!([])), Answer::Choice("DONE", 0.9, 0.05),
+        Answer::Choice("DONE", 0.9, 0.05)]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(r.motivo, "objetivo confirmado (90%) na janela 'Editor'");
+    let requests = bodies(&server).await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1]["state"]["hint"], "tela vista");
+    assert!(requests[2]["state"].get("hint").is_none(), "{}", requests[2]);
+    let log = std::fs::read_to_string(r.registro.as_ref().unwrap().join("jev.jsonl")).unwrap();
+    let ultima: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!((ultima["sem_dica"].clone(), ultima["choice"].clone()), (json!(true), json!("DONE")));
+}
+
+#[tokio::test]
+async fn done_after_help_refused_when_jev_without_hint_disagrees() {
+    let con = FakeConnector::new(vec![empty("o1")]);
+    let (op, server) = setup(vec![help(json!([])), Answer::Choice("DONE", 0.9, 0.05),
+        Answer::Choice("WAIT", 0.9, 0.05)]).await;
+    let r = run(op, &con).await;
+    assert!(!r.ok);
+    assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
+    assert!(bodies(&server).await[2]["state"].get("hint").is_none());
+    assert!(con.state.lock().unwrap().acts.is_empty());
 }
 
 #[test]
@@ -523,12 +577,14 @@ async fn echoed_readback_with_backslash_is_masked() {
         let con = FakeConnector::new(vec![obs]);
         con.state.lock().unwrap().act_errors.push_back(SessionError::Agent(erro));
         let (mut op, server) = setup(vec![select("set_value"), Answer::Choice("BLOCKED", 0.9, 0.05),
-            Answer::Vision(json!({"interpretacao":format!("campo ficou com {lido}"), "acoes":[]})), done()]).await;
+            Answer::Vision(json!({"interpretacao":format!("campo ficou com {lido}"), "acoes":[]})), done(),
+            Answer::Choice("WAIT", 0.9, 0.05)]).await;
         op.dados = json!({"senha":senha}).as_object().unwrap().clone();
         let progress = Mutex::new(vec![]);
         let r = executar(op, &con, CancellationToken::new(), &|p| progress.lock().unwrap().push(p)).await;
         let requests = bodies(&server).await;
-        assert_eq!(requests.len(), 4, "{}", r.resumo());
+        assert_eq!(requests.len(), 5, "{}", r.resumo());
+        assert!(requests[4]["state"].get("hint").is_none());
         assert_eq!(requests[1]["state"]["recentActions"][0]["result"],
             format!("NOT executed: valor digitado não confirmado; campo ficou com {}x<senha>{}",
                 &lido[..1], &lido[lido.len() - 1..]));
@@ -712,7 +768,7 @@ async fn slow_cleanup_keeps_lock_without_delaying_result() {
 async fn secret_llm_error_is_masked_before_truncating() {
     let secret = "XYZ".repeat(35);
     let con = FakeConnector::new(vec![tree("o1", "")]);
-    let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), done()]).await;
+    let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), done(), Answer::Choice("WAIT", 0.9, 0.05)]).await;
     let url = format!("{}/bad", server.uri());
     let prefix = format!("HTTP 500 em {url}: ");
     let detail = format!("{}{secret}", "a".repeat(280 - prefix.chars().count()));
