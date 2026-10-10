@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use crate::barreiras::{Barreiras, aviso, fecha_janela, objetivo_pede_fechar};
+use crate::barreiras::{Barreiras, aviso, fecha_janela, objetivo_pede_fechar, pendencia};
 use crate::candidatos::{candidatos, py_str, segredos};
 use crate::descrever::{descrever, intencao, py_repr};
 use crate::estado::{assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
@@ -233,6 +233,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut recentes: Vec<Registro> = Vec::new();
     let mut anterior = None;
     let mut barreiras = Barreiras::default();
+    let mut recusas = HashSet::new();
     for ciclo in 0..=op.max_passos {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let obs = controle.medir("observacao", Progresso::Observacao,
@@ -261,6 +262,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             acoes.push(clique);
         }
         let (mut dica, mut ajudou, mut direta) = (String::new(), false, None);
+        let mut falta_dica = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, &recentes, None);
             let ajuda = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
@@ -307,6 +309,17 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 }
                 match confirmado {
                     Some(p) => {
+                        if let Some((indice, falta)) = pendencia(&op.texto, &obs, &recentes, &secretos.valores) {
+                            recentes.push(Registro { action: format!("DONE recusado: {falta}"), result: "não confirmado".into(),
+                                screen_changed: Some(false), target_rect: None, clique: None, executada: false });
+                            if !recusas.insert(indice) {
+                                r.motivo = format!("não confirmado: {falta}");
+                                return Ok(());
+                            }
+                            dica = if dica.is_empty() { falta.clone() } else { format!("{falta}\n{dica}") };
+                            falta_dica = Some(falta);
+                            continue;
+                        }
                         r.ok = true;
                         let janela = estado["window"].as_str().map_or_else(|| "None".into(), py_repr);
                         r.motivo = format!("objetivo confirmado ({}) na janela {janela}", percentual(p));
@@ -315,7 +328,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 }
                 return Ok(());
             }
-            let esperando = recentes.iter().rev().take(3).filter(|r| r.action == "WAIT").count() >= 3;
+            let esperando = recentes.iter().rev().filter(|r| !r.action.starts_with("DONE recusado: "))
+                .take(3).filter(|r| r.action == "WAIT").count() >= 3;
             let fraco = d.escolha == Escolha::Blocked || d.p < if d.escolha == Escolha::Done { 0.75 } else { 0.25 }
                 || (d.escolha == Escolha::Wait && esperando);
             if !fraco && (!obs.elements.is_empty() && !obs.truncated || ajudou) { break d; }
@@ -325,7 +339,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             }
             ajudou = true;
             let ajuda = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
-            dica = ajuda.interpretacao;
+            dica = falta_dica.as_ref().map_or_else(|| ajuda.interpretacao.clone(), |f| format!("{f}\n{}", ajuda.interpretacao));
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))

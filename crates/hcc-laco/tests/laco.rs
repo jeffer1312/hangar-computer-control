@@ -202,6 +202,95 @@ async fn done_after_visual_help_is_unconfirmed() {
     assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
 }
 
+#[tokio::test]
+async fn done_refused_until_typed_text_appears() {
+    let con = FakeConnector::new(vec![tree("o1", "outro texto"), tree("o2", "ação, coração e pé")]);
+    let (mut op, server) = setup(vec![done(), select("set_value"), done()]).await;
+    op.texto = "escrever 'ação, coração e pé'".into();
+    op.dados = json!({"texto":"ação, coração e pé"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(r.passos.len(), 1, "DONE não pode confirmar antes de escrever");
+    let requests = bodies(&server).await;
+    assert_eq!(requests[1]["state"]["hint"], "ainda falta: o texto 'ação, coração e pé' não aparece na tela");
+    assert_eq!(requests[1]["state"]["recentActions"][0]["action"], "DONE recusado: ainda falta: o texto 'ação, coração e pé' não aparece na tela");
+    assert_eq!(requests[2]["state"]["elements"][0]["value"], "ação, coração e pé");
+}
+
+#[tokio::test]
+async fn done_refused_twice_stops_not_confirmed() {
+    let con = FakeConnector::new(vec![tree("o1", "outro texto")]);
+    let (mut op, server) = setup(vec![done(), done()]).await;
+    op.texto = "escrever 'ação, coração e pé'".into();
+    let r = run(op, &con).await;
+    assert!(!r.ok, "{}", r.resumo());
+    assert_eq!(r.motivo, "não confirmado: ainda falta: o texto 'ação, coração e pé' não aparece na tela");
+    assert_eq!(bodies(&server).await.len(), 2);
+    assert!(r.passos.is_empty());
+}
+
+#[tokio::test]
+async fn done_refused_until_named_combo_pressed() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "busca")]);
+    let (mut op, server) = setup(vec![done(), Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"keys","keys":["CTRL","F"]}])), select("keys CTRL+F"), done()]).await;
+    op.texto = "pressionar Ctrl+F".into();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(r.passos, vec!["1. keys CTRL+F [90%]"]);
+    let requests = bodies(&server).await;
+    assert_eq!(requests[1]["state"]["hint"], "ainda falta: CTRL+F não foi pressionado");
+    assert_eq!(requests[3]["state"]["hint"], "ainda falta: CTRL+F não foi pressionado\ntela vista");
+}
+
+#[tokio::test]
+async fn done_refused_secret_never_reaches_model_or_log() {
+    let secret = "sëgredo-pendente-123";
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (mut op, server) = setup(vec![done(), done()]).await;
+    op.texto = format!("digitar '{secret}'");
+    op.dados = json!({"senha":secret}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(!r.ok, "{}", r.resumo());
+    assert_eq!(r.motivo, "não confirmado: ainda falta: o texto '<senha>' não aparece na tela");
+    for body in bodies(&server).await { assert!(!body.to_string().contains(secret), "{body}"); }
+    for file in ["jev.jsonl", "observacao.json"] {
+        let contents = std::fs::read_to_string(r.registro.as_ref().unwrap().join(file)).unwrap();
+        assert!(!contents.contains(secret), "{contents}");
+    }
+}
+
+#[tokio::test]
+async fn done_refused_distinct_secret_requirements_are_not_repeats() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "alpha"), tree("o3", "alpha beta")]);
+    let (mut op, server) = setup(vec![done(), Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"text","value":"alpha","rotulo":"primeiro"}])), select("text 'primeiro'"),
+        done(), Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"text","value":"beta","rotulo":"segundo"}])), select("text 'segundo'"), done()]).await;
+    op.texto = "digitar 'alpha' e 'beta'".into();
+    op.dados = json!({"senha_a":"alpha","senha_b":"beta"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(r.passos.len(), 2);
+    for body in bodies(&server).await {
+        assert!(!body.to_string().contains("alpha"));
+        assert!(!body.to_string().contains("beta"));
+    }
+}
+
+#[tokio::test]
+async fn done_refused_does_not_reset_wait_limit() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let wait = || Answer::Choice("WAIT", 0.9, 0.05);
+    let (mut op, server) = setup(vec![wait(), wait(), wait(), done(), wait(), help(json!([])),
+        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    op.texto = "digitar 'Bia'".into();
+    op.max_passos = 5;
+    let r = run(op, &con).await;
+    assert_eq!(r.motivo, "sem ação segura: Jev escolheu BLOCKED com 90%. ainda falta: o texto 'Bia' não aparece na tela\ntela vista");
+    assert!(bodies(&server).await[5].get("messages").is_some());
+}
+
 fn titled(id: &str, title: &str) -> Observation {
     let mut obs = empty(id);
     obs.windows[0].name = title.into();
