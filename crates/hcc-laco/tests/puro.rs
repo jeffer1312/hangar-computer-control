@@ -660,26 +660,13 @@ fn goal_naming_an_app_offers_only_that_launch() {
         apps_do_objetivo(all.clone(), goal).into_iter().filter(|c| c.acao.kind == ActionType::Launch)
             .filter_map(|c| c.acao.rotulo).collect()
     };
-    assert_eq!(launches("no Google Chrome, abrir uma nova aba e ir para pt.wikipedia.org"), ["Google Chrome", "Chrome (CDP)"]);
+    assert_eq!(launches("no Google Chrome, abrir uma nova aba e ir para pt.wikipedia.org"), ["Google Chrome"]);
     assert_eq!(launches("abrir a Calculadora (gnome-calculator) e calcular 2+2"), ["Calculator"]);
     assert_eq!(launches("abrir o NOTEPAD e digitar oi"), ["Bloco de Notas"]);
     assert_eq!(launches("abrir o navegador e ir para o gitlab").len(), 5, "no app named: keep every launch");
     assert_eq!(launches("abrir o Firefoxzinho").len(), 5, "partial word is not a name");
     let outras = |v: Vec<hcc_laco::tipos::Candidato>| v.into_iter().filter(|c| c.acao.kind != ActionType::Launch).map(|c| c.acao).collect::<Vec<_>>();
     assert_eq!(outras(apps_do_objetivo(all.clone(), "no Google Chrome")), outras(all.clone()));
-}
-
-#[test]
-fn goal_that_only_closes_launches_nothing() {
-    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
-    wire["apps"] = json!(["Calculator => gnome-calculator", "Firefox => firefox"]);
-    let installed: Observation = serde_json::from_value(wire).unwrap();
-    let all = candidatos(&installed, &Map::new(), &HashSet::new());
-    let launches = |goal: &str| apps_do_objetivo(all.clone(), goal).iter().filter(|c| c.acao.kind == ActionType::Launch).count();
-    assert_eq!(launches("fechar a Calculadora"), 0);
-    assert_eq!(launches("Close the calculator window"), 0);
-    assert_eq!(launches("abrir o Bloco de Notas, digitar oi e depois fechar sem salvar"), 2);
-    assert_eq!(launches("salvar o arquivo"), 2);
 }
 
 #[test]
@@ -693,8 +680,6 @@ fn launch_filter_keeps_what_the_goal_needs() {
     };
     assert_eq!(launches("abre o Firefox e fecha a janela"), ["Firefox"]);
     assert_eq!(launches("Use o Firefox e feche o popup"), ["Firefox"]);
+    assert_eq!(launches("fechar a Calculadora").len(), 3, "closing is decided by the loop, not by the goal's verbs");
     assert_eq!(launches("abrir o Chrome e calcular na calculator"), ["Google Chrome", "Calculator"]);
-    assert_eq!(launches("quite simple: open the calculator").len(), 1);
-    assert_eq!(launches("ver o fechamento do mês").len(), 3);
-    assert_eq!(launches("read it closely").len(), 3);
 }

@@ -150,6 +150,18 @@ fn validar(op: &Opcoes) -> Result<&Jev, String> {
         .ok_or_else(|| "ValueError: faltam TYPESAFE_API_KEY ou HCC_AGENT_CONFIG".into())
 }
 
+/// An app closed: a window gone with no other window of its process left (a dialog closing leaves its main window).
+fn fechou_app(antes: &[hcc_protocolo::Window], agora: &Observation) -> bool {
+    antes.iter().any(|w| !agora.windows.iter().any(|a| a.id == w.id || a.process_id == w.process_id))
+}
+
+/// After the loop closed an app, launching anything reopened it and Jev called that DONE.
+// ponytail: drops every launch, not just the closed app; a goal "fechar X e abrir Y" would need Y's launch kept.
+fn sem_reabrir(cands: Vec<Candidato>, app_fechado: bool) -> Vec<Candidato> {
+    if !app_fechado { return cands; }
+    cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch).collect()
+}
+
 fn erro_sessao(e: SessionError) -> String { format!("{}: {e}", e.tipo()) }
 fn erro_io(e: io::Error) -> String { format!("OSError: {e}") }
 fn erro_trava(e: io::Error) -> String {
@@ -235,6 +247,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut barreiras = Barreiras::default();
     let mut recusas = HashSet::new();
     let mut foco_escolhido = false;
+    let mut janelas_da_acao: Option<Vec<hcc_protocolo::Window>> = None;
+    let mut app_fechado = false;
     for ciclo in 0..=op.max_passos {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let obs = controle.medir("observacao", Progresso::Observacao,
@@ -244,6 +258,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             ultima.screen_changed = Some(anterior.as_ref() != Some(&atual));
         }
         anterior = Some(atual.clone());
+        app_fechado |= janelas_da_acao.take().is_some_and(|antes| fechou_app(&antes, &obs));
         let mut gravada = serde_json::to_value(&obs).map_err(|e| format!("ValueError: {e}"))?;
         secretos.valor(&mut gravada);
         controle.rodar(async { tokio::fs::write(pasta.join("observacao.json"), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
@@ -251,7 +266,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let texto: String = secretos.texto(&aviso(&obs).unwrap_or_default()).chars().take(400).collect();
             r.motivo = format!("o aplicativo respondeu duas vezes com o mesmo aviso: {texto}"); return Ok(());
         }
-        let cands = apps_do_objetivo(candidatos(&obs, &op.dados, &secretos.valores), &op.texto).into_iter().map(|mut c| {
+        let cands = sem_reabrir(apps_do_objetivo(candidatos(&obs, &op.dados, &secretos.valores), &op.texto), app_fechado).into_iter().map(|mut c| {
             c.descricao = secretos.descricao(&c.acao, &obs, true); c
         }).collect();
         if let Some(motivo) = Barreiras::tres_sem_efeito(&recentes) {
@@ -375,7 +390,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
                 .flat_map(|a| texto_no_editavel(a, &obs)).map(|a| secretos.candidato(a, &obs)).collect();
-            for proposta in segurar_segredos(Barreiras::barrar(apps_do_objetivo(propostas, &op.texto), &recentes), &op.texto, &recentes, &secretos.valores)
+            for proposta in segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), app_fechado), &recentes), &op.texto, &recentes, &secretos.valores)
                 .into_iter().filter(|p| !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta); }
             }
@@ -405,6 +420,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let rotulo = secretos.descricao(acao, &vista, false);
             let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),
                 async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
+            janelas_da_acao = Some(vista.windows.clone());
             let falhou = match retorno {
                 Ok(ret) => {
                     if ret.ok { foco_escolhido |= escolhe_foco(acao); }

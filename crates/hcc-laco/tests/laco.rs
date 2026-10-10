@@ -1348,3 +1348,39 @@ async fn drawn_screen_text_with_two_fields_is_jev_choice() {
     assert!(r.ok, "{}", r.resumo());
     assert!(bodies(&server).await[1]["questions"].get("action").is_some(), "no direct guess between fields");
 }
+
+#[tokio::test]
+async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
+    let mut aberto = tree("o1", "");
+    aberto.apps = vec!["Calculator => gnome-calculator".into()];
+    let mut fechado = aberto.clone();
+    fechado.observation_id = "o2".into();
+    fechado.windows[0].id = "w2".into();
+    fechado.windows[0].process_id = 20;
+    fechado.foreground = "w2".into();
+    let con = FakeConnector::new(vec![aberto.clone(), fechado]);
+    let (mut op, server) = setup(vec![select("Salvar"), done()]).await;
+    op.texto = "fechar a Calculadora".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
+    let tem_launch = |b: &Value| b["questions"]["action"]["criteria"].as_object().unwrap().values().any(|v| v.as_str().unwrap().starts_with("launch"));
+    assert!(tem_launch(&decisoes[0]), "before closing, launching is still an option");
+    assert!(!tem_launch(&decisoes[1]), "the app the loop just closed must not be reopened");
+
+    // A dialog closing leaves its app's main window: launching stays available.
+    let mut com_dialogo = aberto.clone();
+    com_dialogo.windows.push(hcc_protocolo::Window { id: "w9".into(), name: "Salvar como".into(), process_id: 10,
+        class_name: "dialog".into(), rect: Rect(0, 0, 100, 100) });
+    com_dialogo.foreground = "w9".into();
+    let mut sem_dialogo = aberto.clone();
+    sem_dialogo.observation_id = "o2".into();
+    let con = FakeConnector::new(vec![com_dialogo, sem_dialogo]);
+    let (mut op, server) = setup(vec![select("Salvar"), done()]).await;
+    op.texto = "fechar a Calculadora".into();
+    op.dados = Map::new();
+    run(op, &con).await;
+    let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
+    assert!(tem_launch(&decisoes[1]));
+}
