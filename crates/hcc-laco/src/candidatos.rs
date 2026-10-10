@@ -11,6 +11,8 @@ use crate::descrever::{Alvo, alvo, descrever, intencao};
 use crate::tipos::Candidato;
 
 static CHAVE_SECRETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)senha|password|passwd|pin|token").unwrap());
+static FECHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(fech|encerr|close|quit|exit)\w*").unwrap());
+static ABRIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(abr[ia]|inici|execut|lan[cç]|open|start|launch|run)\w*").unwrap());
 
 /// Roles whose real click is offered when UIA has no pattern for them (laco_uia.py:159).
 const CLICAVEIS: [&str; 7] = ["ListItem", "TreeItem", "Hyperlink", "Button", "MenuItem", "TabItem", "Image"];
@@ -150,6 +152,10 @@ fn nomeado(texto: &str, termo: &str) -> bool {
 
 /// A goal that names installed apps may only launch those: the full installed list lets Jev open another browser.
 pub fn apps_do_objetivo(cands: Vec<Candidato>, goal: &str) -> Vec<Candidato> {
+    // A goal that only closes has nothing to launch: reopening the app made Jev declare DONE with it open again.
+    if FECHAR.is_match(goal) && !ABRIR.is_match(goal) {
+        return cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch).collect();
+    }
     let goal = goal.to_lowercase();
     let citado = |a: &Action| {
         let executavel = a.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default();

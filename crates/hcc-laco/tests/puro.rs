@@ -668,3 +668,16 @@ fn goal_naming_an_app_offers_only_that_launch() {
     let outras = |v: Vec<hcc_laco::tipos::Candidato>| v.into_iter().filter(|c| c.acao.kind != ActionType::Launch).map(|c| c.acao).collect::<Vec<_>>();
     assert_eq!(outras(apps_do_objetivo(all.clone(), "no Google Chrome")), outras(all.clone()));
 }
+
+#[test]
+fn goal_that_only_closes_launches_nothing() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Calculator => gnome-calculator", "Firefox => firefox"]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let all = candidatos(&installed, &Map::new(), &HashSet::new());
+    let launches = |goal: &str| apps_do_objetivo(all.clone(), goal).iter().filter(|c| c.acao.kind == ActionType::Launch).count();
+    assert_eq!(launches("fechar a Calculadora"), 0);
+    assert_eq!(launches("Close the calculator window"), 0);
+    assert_eq!(launches("abrir o Bloco de Notas, digitar oi e depois fechar sem salvar"), 2);
+    assert_eq!(launches("salvar o arquivo"), 2);
+}
