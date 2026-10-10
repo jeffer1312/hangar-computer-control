@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use hcc_laco::barreiras::{Barreiras, aviso, itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
-use hcc_laco::candidatos::{candidatos, descrever_acao, segredos, texto_no_editavel};
+use hcc_laco::candidatos::{apps_do_objetivo, candidatos, descrever_acao, segredos, texto_no_editavel};
 use hcc_laco::descrever::intencao;
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
 use hcc_laco::geometria::para_tela;
@@ -647,4 +647,24 @@ fn combo_dentro_do_segredo_nao_segura() {
     let segredos = HashSet::from(["Ctrl+Q1".to_owned()]);
     let cands = vec![valor(ActionType::SetValue, "Ctrl+Q1")];
     assert_eq!(segurar_segredos(cands.clone(), "digitar Ctrl+Q1 no campo", &[], &segredos), cands);
+}
+
+#[test]
+fn goal_naming_an_app_offers_only_that_launch() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Firefox => /usr/lib/firefox/firefox", "Google Chrome => /usr/bin/google-chrome-stable",
+        "Chrome (CDP) => /home/x/chrome-cdp", "Calculator => gnome-calculator", "Bloco de Notas => C:\\Windows\\notepad.exe"]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let all = candidatos(&installed, &Map::new(), &HashSet::new());
+    let launches = |goal: &str| -> Vec<String> {
+        apps_do_objetivo(all.clone(), goal).into_iter().filter(|c| c.acao.kind == ActionType::Launch)
+            .filter_map(|c| c.acao.rotulo).collect()
+    };
+    assert_eq!(launches("no Google Chrome, abrir uma nova aba e ir para pt.wikipedia.org"), ["Google Chrome"]);
+    assert_eq!(launches("abrir a Calculadora (gnome-calculator) e calcular 2+2"), ["Calculator"]);
+    assert_eq!(launches("abrir o NOTEPAD e digitar oi"), ["Bloco de Notas"]);
+    assert_eq!(launches("abrir o navegador e ir para o gitlab").len(), 5, "no app named: keep every launch");
+    assert_eq!(launches("abrir o Firefoxzinho").len(), 5, "partial word is not a name");
+    let outras = |v: Vec<hcc_laco::tipos::Candidato>| v.into_iter().filter(|c| c.acao.kind != ActionType::Launch).map(|c| c.acao).collect::<Vec<_>>();
+    assert_eq!(outras(apps_do_objetivo(all.clone(), "no Google Chrome")), outras(all.clone()));
 }

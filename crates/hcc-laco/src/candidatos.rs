@@ -139,6 +139,29 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
         .collect()
 }
 
+/// `termo` appears in `texto` as whole words, ignoring case.
+fn nomeado(texto: &str, termo: &str) -> bool {
+    let termo = termo.trim().to_lowercase();
+    !termo.is_empty() && texto.match_indices(&termo).any(|(i, _)| {
+        let fora = |c: Option<char>| !c.is_some_and(char::is_alphanumeric);
+        fora(texto[..i].chars().next_back()) && fora(texto[i + termo.len()..].chars().next())
+    })
+}
+
+/// A goal that names installed apps may only launch those: the full installed list lets Jev open another browser.
+pub fn apps_do_objetivo(cands: Vec<Candidato>, goal: &str) -> Vec<Candidato> {
+    let goal = goal.to_lowercase();
+    let citado = |a: &Action| {
+        let executavel = a.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default();
+        let executavel = executavel.strip_suffix(".exe").or_else(|| executavel.strip_suffix(".EXE")).unwrap_or(executavel);
+        nomeado(&goal, a.rotulo.as_deref().unwrap_or_default()) || nomeado(&goal, executavel)
+    };
+    if !cands.iter().any(|c| c.acao.kind == ActionType::Launch && citado(&c.acao)) {
+        return cands;
+    }
+    cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch || citado(&c.acao)).collect()
+}
+
 fn editavel(e: &Element) -> bool {
     e.enabled && (e.role == "Edit" || e.actions.contains(&ElementAction::SetValue))
 }

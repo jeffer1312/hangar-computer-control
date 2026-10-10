@@ -13,7 +13,7 @@ use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use crate::barreiras::{Barreiras, aviso, escolhe_foco, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
-use crate::candidatos::{candidatos, descrever_acao, py_str, segredos, texto_no_editavel};
+use crate::candidatos::{apps_do_objetivo, candidatos,descrever_acao, py_str, segredos, texto_no_editavel};
 use crate::descrever::{intencao, py_repr};
 use crate::estado::{assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
 use crate::geometria::{dentro, para_tela};
@@ -251,7 +251,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let texto: String = secretos.texto(&aviso(&obs).unwrap_or_default()).chars().take(400).collect();
             r.motivo = format!("o aplicativo respondeu duas vezes com o mesmo aviso: {texto}"); return Ok(());
         }
-        let cands = candidatos(&obs, &op.dados, &secretos.valores).into_iter().map(|mut c| {
+        let cands = apps_do_objetivo(candidatos(&obs, &op.dados, &secretos.valores), &op.texto).into_iter().map(|mut c| {
             c.descricao = secretos.descricao(&c.acao, &obs, true); c
         }).collect();
         if let Some(motivo) = Barreiras::tres_sem_efeito(&recentes) {
