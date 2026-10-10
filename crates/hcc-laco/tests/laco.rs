@@ -1352,7 +1352,8 @@ async fn drawn_screen_text_with_two_fields_is_jev_choice() {
 #[tokio::test]
 async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     let mut aberto = tree("o1", "");
-    aberto.apps = vec!["Calculator => gnome-calculator".into()];
+    aberto.apps = vec!["Calculator => gnome-calculator".into(), "Firefox => firefox".into()];
+    aberto.windows[0].class_name = "org.gnome.Calculator".into();
     let mut fechado = aberto.clone();
     fechado.observation_id = "o2".into();
     fechado.windows[0].id = "w2".into();
@@ -1365,9 +1366,12 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
-    let tem_launch = |b: &Value| b["questions"]["action"]["criteria"].as_object().unwrap().values().any(|v| v.as_str().unwrap().starts_with("launch"));
+    let lanca = |b: &Value, app: &str| b["questions"]["action"]["criteria"].as_object().unwrap().values()
+        .any(|v| v.as_str().unwrap().starts_with(&format!("launch '{app}'")));
+    let tem_launch = |b: &Value| lanca(b, "Calculator");
     assert!(tem_launch(&decisoes[0]), "before closing, launching is still an option");
     assert!(!tem_launch(&decisoes[1]), "the app the loop just closed must not be reopened");
+    assert!(lanca(&decisoes[1], "Firefox"), "other apps can still be launched");
 
     // A dialog closing leaves its app's main window: launching stays available.
     let mut com_dialogo = aberto.clone();
@@ -1398,4 +1402,19 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     run(op, &con).await;
     let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
     assert!(tem_launch(&decisoes[1]), "the desktop pseudo-window disappearing is not an app closing");
+
+    // A dialog of another process (file portal) closing blocks nothing it does not name.
+    let mut portal = aberto.clone();
+    portal.windows.push(hcc_protocolo::Window { id: "w8".into(), name: "Salvar arquivo".into(), process_id: 30,
+        class_name: "xdg-desktop-portal-gtk".into(), rect: Rect(0, 0, 100, 100) });
+    portal.foreground = "w8".into();
+    let mut sem_portal = aberto.clone();
+    sem_portal.observation_id = "o2".into();
+    let con = FakeConnector::new(vec![portal, sem_portal]);
+    let (mut op, server) = setup(vec![select("Salvar"), done()]).await;
+    op.texto = "salvar o arquivo e abrir a Calculadora".into();
+    op.dados = Map::new();
+    run(op, &con).await;
+    let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
+    assert!(tem_launch(&decisoes[1]), "a portal dialog closing is not the Calculator closing");
 }

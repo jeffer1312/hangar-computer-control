@@ -150,17 +150,26 @@ fn validar(op: &Opcoes) -> Result<&Jev, String> {
         .ok_or_else(|| "ValueError: faltam TYPESAFE_API_KEY ou HCC_AGENT_CONFIG".into())
 }
 
-/// The app in front when an action ran closed: its window and every other window of its process are gone.
-/// A dialog closing leaves its main window; pid 0 is the agent's pseudo-window for the bare desktop.
-fn fechou_app(em_foco: &[hcc_protocolo::Window], agora: &Observation) -> bool {
-    em_foco.iter().any(|w| w.process_id != 0 && !agora.windows.iter().any(|a| a.id == w.id || a.process_id == w.process_id))
+/// Classes of the apps in front when an action ran that are now closed: the window and every other window of
+/// its process are gone. A dialog closing leaves its main window; pid 0 is the agent's pseudo-window for the desktop.
+fn apps_fechados(em_foco: &[hcc_protocolo::Window], agora: &Observation) -> Vec<String> {
+    em_foco.iter()
+        .filter(|w| w.process_id != 0 && !agora.windows.iter().any(|a| a.id == w.id || a.process_id == w.process_id))
+        .filter_map(|w| w.class_name.rsplit('.').next().map(str::to_lowercase).filter(|c| c.chars().count() >= 3))
+        .collect()
 }
 
-/// After the loop closed an app, launching anything reopened it and Jev called that DONE.
-// ponytail: drops every launch, not just the closed app; a goal "fechar X e abrir Y" would need Y's launch kept.
-fn sem_reabrir(cands: Vec<Candidato>, app_fechado: bool) -> Vec<Candidato> {
-    if !app_fechado { return cands; }
-    cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch).collect()
+/// After the loop closed an app, launching it again reopened it and Jev called that DONE.
+// ponytail: matched by window class vs launch name/executable; an app whose class names neither (TMainForm) can still be reopened.
+fn sem_reabrir(cands: Vec<Candidato>, fechados: &[String]) -> Vec<Candidato> {
+    if fechados.is_empty() { return cands; }
+    let reabre = |a: &Action| {
+        let exe = a.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_lowercase();
+        let exe = exe.strip_suffix(".exe").unwrap_or(&exe).to_owned();
+        let rotulo = a.rotulo.as_deref().unwrap_or_default().to_lowercase();
+        fechados.iter().any(|c| exe.contains(c.as_str()) || (!exe.is_empty() && c.contains(&exe)) || rotulo.contains(c.as_str()))
+    };
+    cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch || !reabre(&c.acao)).collect()
 }
 
 fn erro_sessao(e: SessionError) -> String { format!("{}: {e}", e.tipo()) }
@@ -249,7 +258,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut recusas = HashSet::new();
     let mut foco_escolhido = false;
     let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
-    let mut app_fechado = false;
+    let mut fechados: Vec<String> = Vec::new();
     for ciclo in 0..=op.max_passos {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let obs = controle.medir("observacao", Progresso::Observacao,
@@ -259,7 +268,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             ultima.screen_changed = Some(anterior.as_ref() != Some(&atual));
         }
         anterior = Some(atual.clone());
-        app_fechado |= fechou_app(&std::mem::take(&mut em_foco_nas_acoes), &obs);
+        fechados.extend(apps_fechados(&std::mem::take(&mut em_foco_nas_acoes), &obs));
         let mut gravada = serde_json::to_value(&obs).map_err(|e| format!("ValueError: {e}"))?;
         secretos.valor(&mut gravada);
         controle.rodar(async { tokio::fs::write(pasta.join("observacao.json"), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
@@ -267,7 +276,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let texto: String = secretos.texto(&aviso(&obs).unwrap_or_default()).chars().take(400).collect();
             r.motivo = format!("o aplicativo respondeu duas vezes com o mesmo aviso: {texto}"); return Ok(());
         }
-        let cands = sem_reabrir(apps_do_objetivo(candidatos(&obs, &op.dados, &secretos.valores), &op.texto), app_fechado).into_iter().map(|mut c| {
+        let cands = sem_reabrir(apps_do_objetivo(candidatos(&obs, &op.dados, &secretos.valores), &op.texto), &fechados).into_iter().map(|mut c| {
             c.descricao = secretos.descricao(&c.acao, &obs, true); c
         }).collect();
         if let Some(motivo) = Barreiras::tres_sem_efeito(&recentes) {
@@ -391,7 +400,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
                 .flat_map(|a| texto_no_editavel(a, &obs)).map(|a| secretos.candidato(a, &obs)).collect();
-            for proposta in segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), app_fechado), &recentes), &op.texto, &recentes, &secretos.valores)
+            for proposta in segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), &fechados), &recentes), &op.texto, &recentes, &secretos.valores)
                 .into_iter().filter(|p| !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta); }
             }
