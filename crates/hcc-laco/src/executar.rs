@@ -12,9 +12,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use crate::barreiras::{Barreiras, aviso, fecha_janela, objetivo_pede_fechar, pendencia};
-use crate::candidatos::{candidatos, py_str, segredos};
-use crate::descrever::{descrever, intencao, py_repr};
+use crate::barreiras::{Barreiras, aviso, fecha_janela, objetivo_pede_fechar, pendencia, segurar_segredos};
+use crate::candidatos::{candidatos, descrever_acao, py_str, segredos, texto_no_editavel};
+use crate::descrever::{intencao, py_repr};
 use crate::estado::{assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
 use crate::geometria::{dentro, para_tela};
 use crate::http::py_dumps;
@@ -130,7 +130,7 @@ impl Segredos {
         let mut arvore = obs.clone();
         for w in &mut arvore.windows { w.name = self.texto(&w.name); }
         for e in &mut arvore.elements { e.name = self.texto(&e.name); }
-        descrever(&publica, &arvore, &self.valores, com_valor)
+        descrever_acao(&publica, &arvore, &self.valores, com_valor)
     }
 
     fn candidato(&self, acao: Action, obs: &Observation) -> Candidato {
@@ -256,7 +256,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
         if let Some(motivo) = Barreiras::tres_sem_efeito(&recentes) {
             r.motivo = motivo; return Ok(());
         }
-        let mut acoes = Barreiras::barrar(cands, &recentes);
+        let mut acoes = segurar_segredos(Barreiras::barrar(cands, &recentes), &op.texto, &recentes, &secretos.valores);
         if let Some(mut clique) = Barreiras::reclique(&mut recentes, &obs) {
             clique.descricao = secretos.texto(&clique.descricao);
             acoes.push(clique);
@@ -268,13 +268,17 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let ajuda = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
             dica = ajuda.interpretacao; ajudou = true;
-            let propostas = ajuda.acoes.into_iter().filter(|a| matches!(a.kind, ActionType::Mouse | ActionType::Keys | ActionType::Text))
-                .map(|a| secretos.candidato(a, &obs)).collect();
-            let propostas = Barreiras::barrar(propostas, &recentes);
+            let grupos: Vec<Vec<Action>> = ajuda.acoes.into_iter()
+                .filter(|a| matches!(a.kind, ActionType::Mouse | ActionType::Keys | ActionType::Text))
+                .map(|a| texto_no_editavel(a, &obs)).collect();
+            // The first text fits several fields: Jev picks the field, no direct guess.
+            let ambigua = grupos.first().is_some_and(|g| g.len() > 1);
+            let propostas = grupos.into_iter().flatten().map(|a| secretos.candidato(a, &obs)).collect();
+            let propostas = segurar_segredos(Barreiras::barrar(propostas, &recentes), &op.texto, &recentes, &secretos.valores);
             for proposta in propostas.iter().filter(|p| dentro(&p.acao, &obs)) {
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta.clone()); }
             }
-            if let Some(proposta) = propostas.first().filter(|p| dentro(&p.acao, &obs)) {
+            if let Some(proposta) = propostas.first().filter(|p| !ambigua && dentro(&p.acao, &obs)) {
                 let limite = controle.restante()?.min(Duration::from_secs(30));
                 let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, limite)).await?;
                 controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
@@ -343,8 +347,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
-                .map(|a| secretos.candidato(a, &obs)).collect();
-            for proposta in Barreiras::barrar(propostas, &recentes) {
+                .flat_map(|a| texto_no_editavel(a, &obs)).map(|a| secretos.candidato(a, &obs)).collect();
+            for proposta in segurar_segredos(Barreiras::barrar(propostas, &recentes), &op.texto, &recentes, &secretos.valores) {
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta); }
             }
         };

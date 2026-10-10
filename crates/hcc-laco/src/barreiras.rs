@@ -30,6 +30,26 @@ fn normalizar_combo(teclas: &str) -> String {
     teclas.join("+")
 }
 
+fn pressionado(teclas: &str, recentes: &[Registro]) -> bool {
+    recentes.iter().filter(|r| r.executada && (r.result == "ok" || r.result.strip_prefix("ok") == Some(OFERTA)))
+        .filter_map(|r| r.action.strip_prefix("keys ").and_then(|s| s.rsplit(' ').next()))
+        .any(|r| normalizar_combo(r) == teclas)
+}
+
+/// A secret typed before the goal's keys (Ctrl+F) lands in the wrong field, in plain sight: hold it.
+pub fn segurar_segredos(cands: Vec<Candidato>, objetivo: &str, recentes: &[Registro], segredos: &HashSet<String>) -> Vec<Candidato> {
+    let ocultos: Vec<std::ops::Range<usize>> = crate::estado::padrao_segredos(segredos)
+        .map(|r| r.find_iter(objetivo).map(|m| m.range()).collect()).unwrap_or_default();
+    let falta = COMBOS.find_iter(objetivo)
+        .filter(|c| !ocultos.iter().any(|o| o.start < c.end() && c.start() < o.end))
+        .any(|c| !pressionado(&normalizar_combo(c.as_str()), recentes));
+    if !falta { return cands; }
+    cands.into_iter().filter(|c| {
+        !matches!(c.acao.kind, ActionType::SetValue | ActionType::Text)
+            || !c.acao.value.as_deref().is_some_and(|v| segredos.iter().any(|s| !s.is_empty() && v.contains(s.as_str())))
+    }).collect()
+}
+
 pub fn pendente(objetivo: &str, obs: &Observation, recentes: &[Registro], segredos: &HashSet<String>) -> Option<String> {
     pendencia(objetivo, obs, recentes, segredos).map(|(_, texto)| texto)
 }
@@ -58,9 +78,7 @@ pub(crate) fn pendencia(objetivo: &str, obs: &Observation, recentes: &[Registro]
     let inicio_combos = LITERAIS.find_iter(objetivo).count();
     for (indice, combo) in COMBOS.find_iter(objetivo).enumerate() {
         let teclas = normalizar_combo(combo.as_str());
-        if !recentes.iter().filter(|r| r.executada && (r.result == "ok" || r.result.strip_prefix("ok") == Some(OFERTA)))
-            .filter_map(|r| r.action.strip_prefix("keys ").and_then(|s| s.rsplit(' ').next()))
-            .any(|r| normalizar_combo(r) == teclas) {
+        if !pressionado(&teclas, recentes) {
             let oculto = publico(combo.as_str());
             let nome = if oculto == combo.as_str() && !toca(combo.range()) { teclas } else { "<senha>".into() };
             return Some((inicio_combos + indice, format!("ainda falta: {nome} não foi pressionado")));

@@ -1004,3 +1004,76 @@ async fn budget_exhausted_with_slow_close_keeps_python_message() {
     let r = run(op, &con).await;
     assert_eq!(r.motivo, "TimeoutError: limite de duração atingido; objetivo não confirmado");
 }
+
+fn tab_and_body(id: &str, text: &str) -> Observation {
+    serde_json::from_value(json!({
+        "observation_id": id, "connected": true, "session_id": 1, "foreground": "w1",
+        "windows": [{"id": "w1", "name": "Editor", "process_id": 10, "class_name": "gedit", "rect": [0,0,800,600]}],
+        "elements": [
+            {"id":"t1", "name":"Sem título", "role":"TabItem", "value":null, "enabled":true,
+             "rect":null, "focused":true, "actions":["select"]},
+            {"id":"e1", "name":"Corpo", "role":"Edit", "value":text, "enabled":true,
+             "rect":null, "focused":false, "actions":["focus"]},
+        ],
+        "truncated":false, "timestamp":1.0, "screen":{"width":800,"height":600},
+    })).unwrap()
+}
+
+#[tokio::test]
+async fn vision_text_goes_to_the_edit_not_the_focus() {
+    let con = FakeConnector::new(vec![tab_and_body("o1", ""), tab_and_body("o2", "ação")]);
+    let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([{"type":"text","value":"ação"}])),
+        select("text 'ação' em Edit 'Corpo'"), done()]).await;
+    op.texto = "escrever ação no editor".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"text","target":"e1","value":"ação"}))], "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(r.passos, vec!["1. text 'ação' em Edit 'Corpo' [90%]"]);
+    let criteria = bodies(&server).await[2]["questions"]["action"]["criteria"].to_string();
+    assert!(!criteria.contains("no foco atual"), "{criteria}");
+}
+
+#[tokio::test]
+async fn secret_waits_for_named_combo() {
+    let secret = "sëgredo-combo-123";
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "busca"), tree("o3", secret)]);
+    let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"set_value","target":"e0","value":secret}, {"type":"keys","keys":["CTRL","F"]}])),
+        select("keys CTRL+F"), select("set_value Edit 'Nome' = ***"), done()]).await;
+    op.texto = "pressionar Ctrl+F e digitar a senha".into();
+    op.dados = json!({"senha":secret}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![
+        action(json!({"type":"keys","keys":["CTRL","F"]})),
+        action(json!({"type":"set_value","target":"e0","value":secret})),
+    ], "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    let requests = bodies(&server).await;
+    for i in [0, 2] {
+        let criteria = requests[i]["questions"]["action"]["criteria"].to_string();
+        assert!(!criteria.contains("= ***"), "request {i}: {criteria}");
+    }
+    assert!(requests[3]["questions"]["action"]["criteria"].to_string().contains("set_value Edit 'Nome' = ***"));
+    for body in requests { assert!(!body.to_string().contains(secret), "{body}"); }
+}
+
+#[tokio::test]
+async fn drawn_screen_text_with_two_fields_is_jev_choice() {
+    let mut o1 = tab_and_body("o1", "");
+    o1.elements[0].actions = vec![hcc_protocolo::ElementAction::Focus];
+    let mut segundo = o1.elements[1].clone();
+    (segundo.id, segundo.name) = ("e2".into(), "Rodapé".into());
+    o1.elements.push(segundo);
+    let con = FakeConnector::new(vec![o1, tree("o2", "x")]);
+    let (mut op, server) = setup(vec![help(json!([{"type":"text","value":"x"}])), select("text 'x' em Edit 'Rodapé'"), done()]).await;
+    op.texto = "escrever x".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"text","target":"e2","value":"x"}))], "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    assert!(bodies(&server).await[1]["questions"].get("action").is_some(), "no direct guess between fields");
+}

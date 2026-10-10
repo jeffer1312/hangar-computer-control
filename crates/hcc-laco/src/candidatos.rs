@@ -3,11 +3,11 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use hcc_protocolo::{Action, ActionType, Amount, Button, Direction, ElementAction, MouseMode, Observation, Rect, dividir_comando};
+use hcc_protocolo::{Action, ActionType, Amount, Button, Direction, Element, ElementAction, MouseMode, Observation, Rect, dividir_comando};
 use regex::Regex;
 use serde_json::{Map, Value};
 
-use crate::descrever::{descrever, intencao};
+use crate::descrever::{Alvo, alvo, descrever, intencao};
 use crate::tipos::Candidato;
 
 static CHAVE_SECRETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)senha|password|passwd|pin|token").unwrap());
@@ -137,4 +137,27 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
             acao,
         })
         .collect()
+}
+
+fn editavel(e: &Element) -> bool {
+    e.enabled && (e.role == "Edit" || e.actions.contains(&ElementAction::SetValue))
+}
+
+/// Untargeted text goes where the focus is, often a tab or a banner: aim it at the editable field instead.
+pub fn texto_no_editavel(acao: Action, obs: &Observation) -> Vec<Action> {
+    if acao.kind != ActionType::Text || acao.target.is_some() || obs.elements.iter().any(|e| e.focused && editavel(e)) {
+        return vec![acao];
+    }
+    let alvos: Vec<Action> =
+        obs.elements.iter().filter(|e| editavel(e)).map(|e| Action { target: Some(e.id.clone()), ..acao.clone() }).collect();
+    if alvos.is_empty() { vec![acao] } else { alvos }
+}
+
+/// `descrever`, except that text aimed at a field names the field instead of "no foco atual".
+pub fn descrever_acao(acao: &Action, obs: &Observation, segredos: &HashSet<String>, com_valor: bool) -> String {
+    let Some(Alvo::Elemento(e)) = alvo(acao, obs).filter(|_| acao.kind == ActionType::Text) else {
+        return descrever(acao, obs, segredos, com_valor);
+    };
+    let texto = descrever(&Action { target: None, rotulo: None, ..acao.clone() }, obs, segredos, com_valor && !e.password);
+    format!("{} em {} '{}'", texto.strip_suffix(" no foco atual").unwrap_or(&texto), e.role, e.name)
 }
