@@ -79,7 +79,7 @@ async fn tree_action_then_done() {
 async fn visual_hint_action_requires_selection() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
     let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
-        help(json!([{"type":"text","value":"Ana"}])), select("text 'Ana'"), done()]).await;
+        help(json!([{"type":"text","target":"e0","value":"Ana"}])), select("text 'Ana'"), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     assert_eq!(con.state.lock().unwrap().captures, 1);
@@ -107,23 +107,147 @@ async fn drawn_dialog_click_checks_risk_only() {
 
 #[tokio::test]
 async fn direct_path_types_text_then_presses_enter() {
-    let con = FakeConnector::new(vec![empty("o1"), empty("o2"), tree("o3", "fim")]);
+    let con = FakeConnector::new(vec![titled("o1", "A"), titled("o2", "B"), titled("o3", "C"), tree("o4", "fim")]);
     let (op, server) = setup(vec![help(json!([
-        {"type":"text","value":"https://x.com"}, {"type":"keys","keys":["Enter"]},
-    ])), Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Risk(0.05), done()]).await;
+        {"type":"keys","keys":["CTRL","L"]}, {"type":"text","value":"https://x.com"}, {"type":"keys","keys":["Enter"]},
+    ])), Answer::Risk(0.05), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
     let r = run(op, &con).await;
     let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, id, _)| (a.clone(), id.clone())).collect();
     assert_eq!(acts, vec![
-        (action(json!({"type":"text","value":"https://x.com"})), "o1".into()),
-        (action(json!({"type":"keys","keys":["Enter"]})), "o2".into()),
+        (action(json!({"type":"keys","keys":["CTRL","L"]})), "o1".into()),
+        (action(json!({"type":"text","value":"https://x.com"})), "o2".into()),
+        (action(json!({"type":"keys","keys":["Enter"]})), "o3".into()),
     ], "{}", r.resumo());
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().captures, 1, "uma ajuda só: as duas ações saem no mesmo ciclo");
+    assert_eq!(con.state.lock().unwrap().captures, 1, "uma ajuda só: as três ações saem no mesmo ciclo");
     let requests = bodies(&server).await;
-    assert_eq!(requests.len(), 4);
-    assert_eq!(requests[1]["state"]["proposedAction"], "text 'https://x.com' no foco atual");
-    assert_eq!(requests[2]["state"]["proposedAction"], "keys Enter");
-    for i in [1, 2] { assert_eq!(requests[i]["questions"].as_object().unwrap().len(), 1); }
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[1]["state"]["proposedAction"], "keys CTRL+L");
+    assert_eq!(requests[2]["state"]["proposedAction"], "text 'https://x.com' no foco atual");
+    assert_eq!(requests[3]["state"]["proposedAction"], "keys Enter");
+    for i in [1, 2, 3] { assert_eq!(requests[i]["questions"].as_object().unwrap().len(), 1); }
+}
+
+#[tokio::test]
+async fn first_act_never_untargeted_text() {
+    let mut before = empty("o1");
+    before.windows[0].name = "Messenger".into();
+    let mut editor = before.windows[0].clone();
+    editor.id = "w2".into();
+    editor.name = "Editor".into();
+    before.windows.push(editor);
+    let con = FakeConnector::new(vec![before, tree("o2", "Ana")]);
+    let (op, server) = setup(vec![Answer::Vision(json!({
+        "interpretacao":"o editor de texto ainda precisa ser aberto",
+        "acoes":[{"type":"text","value":"ação, coração e pé"}],
+    })), Answer::Choice("0", 0.9, 0.05), done()]).await;
+    let r = run(op, &con).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"activate","target":"w2"}))], "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    let requests = bodies(&server).await;
+    let criteria = requests[1]["questions"]["action"]["criteria"].as_object().unwrap();
+    assert!(!criteria.values().any(|v| v.as_str().is_some_and(|v| v.contains("text 'ação"))));
+}
+
+#[tokio::test]
+async fn direct_sequence_ctrl_l_text_enter_still_runs() {
+    let con = FakeConnector::new(vec![titled("o1", "a"), titled("o2", "b"), titled("o3", "c"), tree("o4", "fim")]);
+    let (op, _server) = setup(vec![help(json!([
+        {"type":"keys","keys":["CTRL","L"]}, {"type":"text","value":"ação"}, {"type":"keys","keys":["Enter"]},
+    ])), Answer::Risk(0.05), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
+    let r = run(op, &con).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"keys","keys":["CTRL","L"]})),
+        action(json!({"type":"text","value":"ação"})), action(json!({"type":"keys","keys":["Enter"]}))], "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    assert!(jev_log(&r).iter().filter(|l| l.get("direta").is_some()).all(|l| l["ciclo"] == 0));
+}
+
+#[tokio::test]
+async fn done_after_help_strong_reading_confirmed() {
+    for (p, choice, p2) in [(0.99, "WAIT", 0.5), (0.95, "DONE", 0.64), (1.0, "DONE", 0.8)] {
+        let con = FakeConnector::new(vec![empty("o1")]);
+        let (op, server) = setup(vec![help(json!([])), Answer::Choice("DONE", p, 0.05),
+            Answer::Choice(choice, p2, 0.05)]).await;
+        let r = run(op, &con).await;
+        assert!(r.ok, "{}", r.resumo());
+        assert_eq!(r.motivo, format!("objetivo confirmado pela leitura da tela ({:.0}%) na janela 'Editor'", p * 100.0));
+        assert!(bodies(&server).await[2]["state"].get("hint").is_none());
+        assert!(con.state.lock().unwrap().acts.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn done_after_help_weak_reading_refused() {
+    for p in [0.9, 0.94] {
+        let con = FakeConnector::new(vec![empty("o1")]);
+        let (op, _server) = setup(vec![help(json!([])), Answer::Choice("DONE", p, 0.05),
+            Answer::Choice("WAIT", 0.5, 0.05)]).await;
+        let r = run(op, &con).await;
+        assert!(!r.ok);
+        assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
+    }
+}
+
+#[tokio::test]
+async fn done_after_help_blocked_recheck_refused() {
+    for choice in ["BLOCKED", "0"] {
+        let con = FakeConnector::new(vec![empty("o1")]);
+        let (op, _server) = setup(vec![help(json!([])), Answer::Choice("DONE", 0.99, 0.05),
+            Answer::Choice(choice, 0.9, 0.05)]).await;
+        let r = run(op, &con).await;
+        assert!(!r.ok);
+        assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
+        assert!(con.state.lock().unwrap().acts.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn done_after_failed_visual_help_is_not_confirmed() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
+        Answer::Choice("DONE", 0.99, 0.05), Answer::Choice("WAIT", 0.5, 0.05)]).await;
+    Mock::given(path("/bad")).respond_with(ResponseTemplate::new(500).set_body_string("erro visual"))
+        .with_priority(1).mount(&server).await;
+    op.llm = Llm::new(format!("{}/bad", server.uri()), "fake-model".into(), None, Some("fake-key".into()));
+    let r = run(op, &con).await;
+    assert!(!r.ok, "{}", r.resumo());
+    assert!(r.motivo.starts_with("não confirmado: só a leitura do print indica que terminou. ajuda visual indisponível: RuntimeError: HTTP 500"), "{}", r.resumo());
+    assert!(con.state.lock().unwrap().acts.is_empty());
+}
+
+#[tokio::test]
+async fn first_act_untargeted_text_in_focused_edit_is_not_offered() {
+    let mut before = tree("o1", "");
+    before.windows[0].name = "Messenger".into();
+    let mut editor = before.windows[0].clone();
+    editor.id = "w2".into();
+    editor.name = "Editor".into();
+    before.windows.push(editor);
+    let con = FakeConnector::new(vec![before, tree("o2", "Ana")]);
+    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"text","value":"ação"}])), select("activate window 'Editor'"), done()]).await;
+    let r = run(op, &con).await;
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"activate","target":"w2"}))], "{}", r.resumo());
+    let requests = bodies(&server).await;
+    assert!(!requests[2]["questions"]["action"]["criteria"].as_object().unwrap().values()
+        .any(|v| v.as_str().is_some_and(|v| v.contains("text 'ação"))));
+    assert!(r.ok, "{}", r.resumo());
+}
+
+#[tokio::test]
+async fn done_after_help_strong_reading_still_checks_pending_items() {
+    let con = FakeConnector::new(vec![tree("o1", "outro")]);
+    let (mut op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+        Answer::Choice("DONE", 0.99, 0.05), Answer::Choice("WAIT", 0.5, 0.05),
+        Answer::Choice("DONE", 0.99, 0.05), Answer::Choice("WAIT", 0.5, 0.05)]).await;
+    op.texto = "escrever 'Ana'".into();
+    let r = run(op, &con).await;
+    assert!(!r.ok);
+    assert_eq!(r.motivo, "não confirmado: ainda falta: o texto 'Ana' não aparece na tela");
+    assert!(con.state.lock().unwrap().acts.is_empty());
 }
 
 fn jev_log(r: &Resultado) -> Vec<Value> {
@@ -250,6 +374,19 @@ async fn done_after_help_confirmed_by_goal_evidence() {
 }
 
 #[tokio::test]
+async fn done_after_help_goal_evidence_ignores_recheck_choice() {
+    for choice in ["BLOCKED", "0"] {
+        let con = FakeConnector::new(vec![tree("o1", "Ana")]);
+        let (mut op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+            Answer::Choice("DONE", 0.9, 0.05), Answer::Choice(choice, 0.6, 0.05)]).await;
+        op.texto = "escrever 'Ana' no Nome".into();
+        let r = run(op, &con).await;
+        assert!(r.ok, "{choice}: {}", r.resumo());
+        assert_eq!(r.motivo, "objetivo confirmado (90%) na janela 'Editor'");
+    }
+}
+
+#[tokio::test]
 async fn done_after_help_refused_without_goal_items() {
     let con = FakeConnector::new(vec![tree("o1", "Ana")]);
     let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
@@ -262,26 +399,27 @@ async fn done_after_help_refused_without_goal_items() {
 #[tokio::test]
 async fn direct_text_secret_is_masked() {
     let secret = "sëgredo-direto-123";
-    let con = FakeConnector::new(vec![empty("o1"), tree("o2", "fim")]);
-    let (mut op, server) = setup(vec![help(json!([{"type":"text","value":secret}])),
-        Answer::Choice("BLOCKED", 0.9, 0.05), done()]).await;
+    let con = FakeConnector::new(vec![titled("o1", "A"), titled("o2", "B"), tree("o3", "fim")]);
+    let (mut op, server) = setup(vec![help(json!([{"type":"keys","keys":["CTRL","L"]}, {"type":"text","value":secret}])),
+        Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
     op.dados = json!({"senha":secret}).as_object().unwrap().clone();
     let progress = Mutex::new(vec![]);
     let r = executar(op, &con, CancellationToken::new(), &|p| progress.lock().unwrap().push(p)).await;
     let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
-    assert_eq!(acts, vec![action(json!({"type":"text","value":secret}))], "{}", r.resumo());
+    assert_eq!(acts, vec![action(json!({"type":"keys","keys":["CTRL","L"]})), action(json!({"type":"text","value":secret}))], "{}", r.resumo());
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(r.passos, vec!["1. text *** no foco atual [100%]"]);
+    assert_eq!(r.passos, vec!["1. keys CTRL+L [100%]", "2. text *** no foco atual [100%]"]);
     assert!(!r.resumo().contains(secret));
     assert!(!format!("{:?}", progress.lock().unwrap()).contains(secret));
     let requests = bodies(&server).await;
-    assert_eq!(requests[1]["state"]["proposedAction"], "text *** no foco atual");
+    assert_eq!(requests[2]["state"]["proposedAction"], "text *** no foco atual");
     for body in requests { assert!(!body.to_string().contains(secret), "{body}"); }
     let dir = r.registro.as_ref().unwrap();
     let log = std::fs::read_to_string(dir.join("jev.jsonl")).unwrap();
     assert!(!log.contains(secret));
-    let first: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
-    assert_eq!(first["direta"], "text *** no foco atual");
+    let text: Value = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|l| l["direta"] == "text *** no foco atual").unwrap();
+    assert_eq!(text["direta"], "text *** no foco atual");
     assert!(!std::fs::read_to_string(dir.join("observacao.json")).unwrap().contains(secret));
 }
 
@@ -328,7 +466,7 @@ async fn window_close_requires_matching_goal() {
 #[tokio::test]
 async fn done_after_visual_help_is_unconfirmed() {
     let con = FakeConnector::new(vec![tree("o1", "")]);
-    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), done(),
+    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), Answer::Choice("DONE", 0.94, 0.05),
         Answer::Choice("WAIT", 0.9, 0.05)]).await;
     let r = run(op, &con).await;
     assert!(!r.ok);
@@ -397,7 +535,7 @@ async fn done_refused_secret_never_reaches_model_or_log() {
 async fn done_refused_distinct_secret_requirements_are_not_repeats() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "alpha"), tree("o3", "alpha beta")]);
     let (mut op, server) = setup(vec![done(), Answer::Choice("BLOCKED", 0.9, 0.05),
-        help(json!([{"type":"text","value":"alpha","rotulo":"primeiro"}])), select("text 'primeiro'"),
+        help(json!([{"type":"text","target":"e0","value":"alpha","rotulo":"primeiro"}])), select("text *** em Edit 'Nome'"),
         done(), Answer::Choice("BLOCKED", 0.9, 0.05),
         help(json!([{"type":"text","value":"beta","rotulo":"segundo"}])), select("text 'segundo'"), done()]).await;
     op.texto = "digitar 'alpha' e 'beta'".into();
@@ -1020,11 +1158,11 @@ async fn numeric_secret_echo_is_masked_in_models() {
 async fn escaped_secret_in_proposal_never_reaches_descriptions() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "fim")]);
     let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
-        help(json!([{"type":"text","value":"prefixo ab\\cd"}])), select("text 'prefixo"), done()]).await;
+        help(json!([{"type":"text","target":"e0","value":"prefixo ab\\cd"}])), select("text 'prefixo"), done()]).await;
     op.dados = json!({"password":"ab\\cd"}).as_object().unwrap().clone();
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(r.passos[0], "1. text 'prefixo <senha>' no foco atual [90%]");
+    assert_eq!(r.passos[0], "1. text 'prefixo <senha>' em Edit 'Nome' [90%]");
     assert_eq!(con.state.lock().unwrap().acts[0].0.value.as_deref(), Some("prefixo ab\\cd"));
     assert!(!bodies(&server).await[2].to_string().contains("ab\\"));
     assert!(!std::fs::read_to_string(r.registro.unwrap().join("jev.jsonl")).unwrap().contains("ab\\"));

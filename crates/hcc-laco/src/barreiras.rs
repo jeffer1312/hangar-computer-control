@@ -50,6 +50,20 @@ pub fn segurar_segredos(cands: Vec<Candidato>, objetivo: &str, recentes: &[Regis
     }).collect()
 }
 
+pub fn texto_sem_alvo_barrado(acao: &Action, foco_escolhido: bool) -> bool {
+    acao.kind == ActionType::Text && acao.target.is_none() && !foco_escolhido
+}
+
+pub fn escolhe_foco(acao: &Action) -> bool {
+    match acao.kind {
+        ActionType::Activate | ActionType::Launch | ActionType::Focus => true,
+        ActionType::Text | ActionType::SetValue => acao.target.is_some(),
+        ActionType::Mouse => matches!(acao.mode, Some(hcc_protocolo::MouseMode::Click | hcc_protocolo::MouseMode::Double)),
+        ActionType::Keys => acao.keys.iter().flatten().any(|k| !matches!(k.to_ascii_uppercase().as_str(), "ENTER" | "ESCAPE" | "TAB")),
+        _ => false,
+    }
+}
+
 pub fn pendente(objetivo: &str, obs: &Observation, recentes: &[Registro], segredos: &HashSet<String>) -> Option<String> {
     pendencia(objetivo, obs, recentes, segredos).map(|(_, texto)| texto)
 }

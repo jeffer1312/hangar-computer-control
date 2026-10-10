@@ -71,6 +71,60 @@ fn candidato(acao: Action) -> hcc_laco::tipos::Candidato {
 }
 
 #[test]
+fn texto_sem_alvo_barrado_no_inicio() {
+    let text = texto("ação, coração e pé");
+    assert!(hcc_laco::barreiras::texto_sem_alvo_barrado(&text, false));
+}
+
+#[test]
+fn texto_sem_alvo_liberado_depois_de_launch() {
+    let launch = Action { kind: ActionType::Launch, application: Some("editor".into()), ..Default::default() };
+    assert!(hcc_laco::barreiras::escolhe_foco(&launch));
+    assert!(!hcc_laco::barreiras::texto_sem_alvo_barrado(&texto("ação"), hcc_laco::barreiras::escolhe_foco(&launch)));
+}
+
+#[test]
+fn texto_sem_alvo_liberado_depois_de_ctrl_l() {
+    let keys = Action { kind: ActionType::Keys, keys: Some(vec!["CTRL".into(), "L".into()]), ..Default::default() };
+    assert!(hcc_laco::barreiras::escolhe_foco(&keys));
+    assert!(!hcc_laco::barreiras::texto_sem_alvo_barrado(&texto("ação"), hcc_laco::barreiras::escolhe_foco(&keys)));
+}
+
+#[test]
+fn texto_sem_alvo_nao_liberado_por_enter() {
+    for keys in [vec!["Enter"], vec!["Escape"], vec!["Tab"], vec!["ENTER", "escape", "tab"], vec![]] {
+        let keys = Action { kind: ActionType::Keys, keys: Some(keys.into_iter().map(Into::into).collect()), ..Default::default() };
+        assert!(!hcc_laco::barreiras::escolhe_foco(&keys));
+        assert!(hcc_laco::barreiras::texto_sem_alvo_barrado(&texto("ação"), hcc_laco::barreiras::escolhe_foco(&keys)));
+    }
+}
+
+#[test]
+fn texto_com_alvo_nunca_barrado() {
+    for kind in [ActionType::Text, ActionType::SetValue] {
+        let text = Action { kind, target: Some("e0".into()), value: Some("ação".into()), ..Default::default() };
+        assert!(!hcc_laco::barreiras::texto_sem_alvo_barrado(&text, false));
+        assert!(hcc_laco::barreiras::escolhe_foco(&text));
+    }
+}
+
+#[test]
+fn apenas_acoes_que_escolhem_foco_liberam_texto() {
+    for kind in [ActionType::Activate, ActionType::Focus] {
+        assert!(hcc_laco::barreiras::escolhe_foco(&Action { kind, target: Some("e0".into()), ..Default::default() }));
+    }
+    for (mode, expected) in [(MouseMode::Click, true), (MouseMode::Double, true), (MouseMode::Move, false),
+        (MouseMode::Drag, false), (MouseMode::Scroll, false)] {
+        assert_eq!(hcc_laco::barreiras::escolhe_foco(&mouse(10, 10, mode)), expected);
+    }
+    for kind in [ActionType::Invoke, ActionType::Select, ActionType::Scroll, ActionType::Toggle,
+        ActionType::Expand, ActionType::Collapse] {
+        assert!(!hcc_laco::barreiras::escolhe_foco(&Action { kind, target: Some("e0".into()), ..Default::default() }));
+    }
+    assert!(!hcc_laco::barreiras::escolhe_foco(&texto("ação")));
+}
+
+#[test]
 fn pendente_texto_ausente() {
     let o = obs(vec![el("e0", "Nome", "Edit", &[], Some("outro texto"), None)]);
     for goal in ["digitar 'ação, coração e pé'", "digitar \"ação, coração e pé\"", "digitar “ação, coração e pé”"] {
