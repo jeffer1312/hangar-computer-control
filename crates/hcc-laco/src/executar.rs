@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::barreiras::{Barreiras, aviso, fecha_janela, objetivo_pede_fechar};
 use crate::candidatos::{candidatos, py_str, segredos};
 use crate::descrever::{descrever, intencao, py_repr};
-use crate::estado::{assinatura, estado_compacto, padrao_segredos, sem_controles};
+use crate::estado::{assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
 use crate::geometria::{dentro, para_tela};
 use crate::http::py_dumps;
 use crate::jev::Jev;
@@ -237,7 +237,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let obs = controle.medir("observacao", Progresso::Observacao,
             async { observar(s).await.map_err(erro_sessao) }).await?;
-        let atual = assinatura(&obs);
+        let atual = assinatura_tela(&obs);
         if let Some(ultima) = recentes.last_mut().filter(|r| r.screen_changed.is_none()) {
             ultima.screen_changed = Some(anterior.as_ref() != Some(&atual));
         }
@@ -294,11 +294,24 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             controle.rodar(registrar(&pasta, log, secretos)).await?;
             controle.restante()?;
             if d.escolha == Escolha::Done && d.p >= 0.75 {
-                if ajudou { r.motivo = format!("não confirmado: só a leitura do print indica que terminou. {dica}"); }
-                else {
-                    r.ok = true;
-                    let janela = estado["window"].as_str().map_or_else(|| "None".into(), py_repr);
-                    r.motivo = format!("objetivo confirmado ({}) na janela {janela}", percentual(d.p));
+                let mut confirmado = (!ajudou).then_some(d.p);
+                if ajudou {
+                    // Titles and recentActions alone must agree; the print reading cannot confirm by itself.
+                    let sem_dica = secretos.estado(op, &obs, &recentes, None);
+                    let limite = controle.restante()?.min(Duration::from_secs(30));
+                    let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, limite)).await?;
+                    controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "sem_dica":true,
+                        "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco}), secretos)).await?;
+                    controle.restante()?;
+                    if d2.escolha == Escolha::Done && d2.p >= 0.75 { confirmado = Some(d2.p); }
+                }
+                match confirmado {
+                    Some(p) => {
+                        r.ok = true;
+                        let janela = estado["window"].as_str().map_or_else(|| "None".into(), py_repr);
+                        r.motivo = format!("objetivo confirmado ({}) na janela {janela}", percentual(p));
+                    }
+                    None => r.motivo = format!("não confirmado: só a leitura do print indica que terminou. {dica}"),
                 }
                 return Ok(());
             }
@@ -362,7 +375,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
         while Instant::now() < prazo {
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             match controle.rodar(async { Ok(observar(s).await) }).await? {
-                Ok(nova) if assinatura(&nova) != atual => break,
+                Ok(nova) if assinatura_tela(&nova) != atual => break,
                 Ok(_) => {}
                 Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
                 Err(e) if e.tipo() == "RuntimeError" => eprintln!("observação durante espera ignorada: {}", secretos.texto(&e.to_string())),

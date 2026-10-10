@@ -28,6 +28,13 @@ pub fn assinatura(obs: &Observation) -> (String, Vec<(String, String, String)>) 
     (obs.foreground.clone(), itens)
 }
 
+/// `assinatura` plus the foreground title: with an empty tree the title is the only visible change.
+pub fn assinatura_tela(obs: &Observation) -> (String, String, Vec<(String, String, String)>) {
+    let titulo = obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| w.name.clone()).unwrap_or_default();
+    let (janela, itens) = assinatura(obs);
+    (janela, titulo, itens)
+}
+
 pub fn estado_compacto(
     goal: &str,
     dados: &Map<String, Value>,
