@@ -150,9 +150,10 @@ fn validar(op: &Opcoes) -> Result<&Jev, String> {
         .ok_or_else(|| "ValueError: faltam TYPESAFE_API_KEY ou HCC_AGENT_CONFIG".into())
 }
 
-/// An app closed: a window gone with no other window of its process left (a dialog closing leaves its main window).
-fn fechou_app(antes: &[hcc_protocolo::Window], agora: &Observation) -> bool {
-    antes.iter().any(|w| !agora.windows.iter().any(|a| a.id == w.id || a.process_id == w.process_id))
+/// The app in front when an action ran closed: its window and every other window of its process are gone.
+/// A dialog closing leaves its main window; pid 0 is the agent's pseudo-window for the bare desktop.
+fn fechou_app(em_foco: &[hcc_protocolo::Window], agora: &Observation) -> bool {
+    em_foco.iter().any(|w| w.process_id != 0 && !agora.windows.iter().any(|a| a.id == w.id || a.process_id == w.process_id))
 }
 
 /// After the loop closed an app, launching anything reopened it and Jev called that DONE.
@@ -247,7 +248,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut barreiras = Barreiras::default();
     let mut recusas = HashSet::new();
     let mut foco_escolhido = false;
-    let mut janelas_da_acao: Option<Vec<hcc_protocolo::Window>> = None;
+    let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
     let mut app_fechado = false;
     for ciclo in 0..=op.max_passos {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
@@ -258,7 +259,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             ultima.screen_changed = Some(anterior.as_ref() != Some(&atual));
         }
         anterior = Some(atual.clone());
-        app_fechado |= janelas_da_acao.take().is_some_and(|antes| fechou_app(&antes, &obs));
+        app_fechado |= fechou_app(&std::mem::take(&mut em_foco_nas_acoes), &obs);
         let mut gravada = serde_json::to_value(&obs).map_err(|e| format!("ValueError: {e}"))?;
         secretos.valor(&mut gravada);
         controle.rodar(async { tokio::fs::write(pasta.join("observacao.json"), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
@@ -420,10 +421,12 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let rotulo = secretos.descricao(acao, &vista, false);
             let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),
                 async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
-            janelas_da_acao = Some(vista.windows.clone());
             let falhou = match retorno {
                 Ok(ret) => {
-                    if ret.ok { foco_escolhido |= escolhe_foco(acao); }
+                    if ret.ok {
+                        foco_escolhido |= escolhe_foco(acao);
+                        em_foco_nas_acoes.extend(vista.windows.iter().find(|w| w.id == vista.foreground).cloned());
+                    }
                     let alvo = acao.target.as_ref().and_then(|id| vista.elements.iter().rev().find(|e| &e.id == id));
                     let clique = match (acao.kind, acao.mode, acao.x, acao.y) {
                         (ActionType::Mouse, Some(m), Some(x), Some(y)) => Some((m, x, y)), _ => None,

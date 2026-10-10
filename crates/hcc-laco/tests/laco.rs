@@ -1383,4 +1383,19 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     run(op, &con).await;
     let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
     assert!(tem_launch(&decisoes[1]));
+
+    // From the bare desktop (pid 0 pseudo-window), opening an app is not "an app closed".
+    let mut mesa = aberto.clone();
+    mesa.windows = vec![hcc_protocolo::Window { id: "desktop".into(), name: "Área de trabalho".into(), process_id: 0,
+        class_name: "desktop".into(), rect: Rect(0, 0, 800, 600) }];
+    mesa.foreground = "desktop".into();
+    let mut app = aberto.clone();
+    app.observation_id = "o2".into();
+    let con = FakeConnector::new(vec![mesa, app]);
+    let (mut op, server) = setup(vec![select("Salvar"), done()]).await;
+    op.texto = "abrir a Calculadora".into();
+    op.dados = Map::new();
+    run(op, &con).await;
+    let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
+    assert!(tem_launch(&decisoes[1]), "the desktop pseudo-window disappearing is not an app closing");
 }
