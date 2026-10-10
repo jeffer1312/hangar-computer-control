@@ -660,7 +660,7 @@ fn goal_naming_an_app_offers_only_that_launch() {
         apps_do_objetivo(all.clone(), goal).into_iter().filter(|c| c.acao.kind == ActionType::Launch)
             .filter_map(|c| c.acao.rotulo).collect()
     };
-    assert_eq!(launches("no Google Chrome, abrir uma nova aba e ir para pt.wikipedia.org"), ["Google Chrome"]);
+    assert_eq!(launches("no Google Chrome, abrir uma nova aba e ir para pt.wikipedia.org"), ["Google Chrome", "Chrome (CDP)"]);
     assert_eq!(launches("abrir a Calculadora (gnome-calculator) e calcular 2+2"), ["Calculator"]);
     assert_eq!(launches("abrir o NOTEPAD e digitar oi"), ["Bloco de Notas"]);
     assert_eq!(launches("abrir o navegador e ir para o gitlab").len(), 5, "no app named: keep every launch");
@@ -680,4 +680,21 @@ fn goal_that_only_closes_launches_nothing() {
     assert_eq!(launches("Close the calculator window"), 0);
     assert_eq!(launches("abrir o Bloco de Notas, digitar oi e depois fechar sem salvar"), 2);
     assert_eq!(launches("salvar o arquivo"), 2);
+}
+
+#[test]
+fn launch_filter_keeps_what_the_goal_needs() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Firefox => firefox", "Google Chrome => google-chrome-stable", "Calculator => gnome-calculator"]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let all = candidatos(&installed, &Map::new(), &HashSet::new());
+    let launches = |goal: &str| -> Vec<String> {
+        apps_do_objetivo(all.clone(), goal).into_iter().filter(|c| c.acao.kind == ActionType::Launch).filter_map(|c| c.acao.rotulo).collect()
+    };
+    assert_eq!(launches("abre o Firefox e fecha a janela"), ["Firefox"]);
+    assert_eq!(launches("Use o Firefox e feche o popup"), ["Firefox"]);
+    assert_eq!(launches("abrir o Chrome e calcular na calculator"), ["Google Chrome", "Calculator"]);
+    assert_eq!(launches("quite simple: open the calculator").len(), 1);
+    assert_eq!(launches("ver o fechamento do mês").len(), 3);
+    assert_eq!(launches("read it closely").len(), 3);
 }

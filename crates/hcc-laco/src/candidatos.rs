@@ -11,8 +11,12 @@ use crate::descrever::{Alvo, alvo, descrever, intencao};
 use crate::tipos::Candidato;
 
 static CHAVE_SECRETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)senha|password|passwd|pin|token").unwrap());
-static FECHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(fech|encerr|close|quit|exit)\w*").unwrap());
-static ABRIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(abr[ia]|inici|execut|lan[cç]|open|start|launch|run)\w*").unwrap());
+static FECHAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(fech[aeo]r?|encerr\w*|close[sd]?|closing|quit|exit)\b").unwrap());
+// Any verb that may need the app running counts: "use o Firefox e feche o popup" still launches.
+static ABRIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(abr\w*|aber\w*|inici\w*|execut\w*|lan[cç]\w*|open\w*|start\w*|launch\w*|run|us[aeo]\w*|acess\w*|ir|v[aá]|go|visit\w*|naveg\w*)\b").unwrap()
+});
 
 /// Roles whose real click is offered when UIA has no pattern for them (laco_uia.py:159).
 const CLICAVEIS: [&str; 7] = ["ListItem", "TreeItem", "Hyperlink", "Button", "MenuItem", "TabItem", "Image"];
@@ -160,7 +164,10 @@ pub fn apps_do_objetivo(cands: Vec<Candidato>, goal: &str) -> Vec<Candidato> {
     let citado = |a: &Action| {
         let executavel = a.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default();
         let executavel = executavel.strip_suffix(".exe").or_else(|| executavel.strip_suffix(".EXE")).unwrap_or(executavel);
-        nomeado(&goal, a.rotulo.as_deref().unwrap_or_default()) || nomeado(&goal, executavel)
+        let rotulo = a.rotulo.as_deref().unwrap_or_default();
+        // A distinctive word of the name counts too ("Chrome" for "Google Chrome"): keeping extra launches is the safe side.
+        nomeado(&goal, rotulo) || nomeado(&goal, executavel)
+            || rotulo.split(|c: char| !c.is_alphanumeric()).any(|w| w.chars().count() >= 5 && nomeado(&goal, w))
     };
     if !cands.iter().any(|c| c.acao.kind == ActionType::Launch && citado(&c.acao)) {
         return cands;
