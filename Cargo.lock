@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "hangar-computer-control"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hcc-agente",
  "hcc-agente-linux",
@@ -874,7 +874,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hcc-agente"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "hcc-agente-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atspi",
  "hcc-protocolo",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "hcc-agente-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hcc-protocolo",
  "image",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "hcc-controlador"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "hcc-laco"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "hcc-protocolo",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "hcc-protocolo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
