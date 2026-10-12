@@ -7,13 +7,15 @@ pub(crate) fn query(commands: &impl Comandos, name: &str) -> Result<Value, Strin
     serde_json::from_str(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string())
 }
 
-pub fn dispatch(commands: &impl Comandos, lua: &str) -> Result<(), String> {
-    let bytes = commands.run(&["hyprctl", "dispatch", lua], None)?;
-    let output = String::from_utf8_lossy(&bytes);
-    if output.trim() != "ok" {
-        return Err(format!("hyprctl dispatch falhou: {}", output.trim().chars().take(300).collect::<String>()));
-    }
-    Ok(())
+/// A Lua config only takes `hl.dsp.*`; a hyprlang config only the classic dispatcher with its arguments.
+pub fn dispatch(commands: &impl Comandos, lua: &str, classico: &[&str]) -> Result<(), String> {
+    let tentar = |args: &[&str]| -> Result<(), String> {
+        let argv: Vec<&str> = ["hyprctl", "dispatch"].into_iter().chain(args.iter().copied()).collect();
+        let bytes = commands.run(&argv, None)?;
+        let output = String::from_utf8_lossy(&bytes);
+        if output.trim() == "ok" { Ok(()) } else { Err(output.trim().chars().take(300).collect()) }
+    };
+    tentar(&[lua]).or_else(|lua_erro| tentar(classico).map_err(|erro| format!("hyprctl dispatch falhou: {lua_erro} | {erro}")))
 }
 
 pub(crate) fn integer(value: &Value, key: &str) -> Result<i32, String> {

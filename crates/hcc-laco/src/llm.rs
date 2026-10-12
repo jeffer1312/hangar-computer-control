@@ -101,7 +101,10 @@ impl Llm {
             }
             None => bruto,
         };
-        let ajuda: Ajuda = serde_json::from_str(bruto).map_err(|e| Falha::new("ValidationError", e.to_string()))?;
+        // Models add a sentence after the object; only the first JSON value is the answer.
+        let ajuda: Ajuda = serde_json::Deserializer::from_str(bruto).into_iter().next()
+            .unwrap_or_else(|| serde_json::from_str(bruto))
+            .map_err(|e| Falha::new("ValidationError", e.to_string()))?;
         validar(&ajuda).map_err(|e| Falha::new("ValidationError", e))?;
         Ok(ajuda)
     }

@@ -104,6 +104,7 @@ struct FakeCommands {
     fail_press: Rc<RefCell<bool>>,
     active_error: Rc<RefCell<Option<String>>>,
     fail_release: Rc<RefCell<bool>>,
+    classico: Rc<RefCell<bool>>,
 }
 
 impl Default for FakeCommands {
@@ -114,7 +115,7 @@ impl Default for FakeCommands {
             monitors: Rc::new(RefCell::new(json!([{"id":0,"name":"DP-1","focused":true,"x":0,"y":0,"width":1920,"height":1080,"scale":1.25}, {"id":1,"name":"DP-2","focused":false,"x":1536,"y":0,"width":1920,"height":1080,"scale":1}]))),
             clients: Rc::new(RefCell::new(json!([{"address":"0xa","title":"Editor","pid":7,"class":"editor","at":[1542,51],"size":[800,600],"mapped":true,"hidden":false}]))),
             dispatch_output: Rc::new(RefCell::new(b"ok\n".to_vec())),
-            locked: Rc::default(), fail_keys: Rc::default(), fail_press: Rc::default(), active_error: Rc::default(), fail_release: Rc::default(),
+            locked: Rc::default(), fail_keys: Rc::default(), fail_press: Rc::default(), active_error: Rc::default(), fail_release: Rc::default(), classico: Rc::default(),
         }
     }
 }
@@ -127,7 +128,8 @@ impl Comandos for FakeCommands {
             ["hyprctl", "-j", "activewindow"] => match &*self.active_error.borrow() { Some(error) => Err(error.clone()), None => Ok(serde_json::to_vec(&*self.active.borrow()).unwrap()) },
             ["hyprctl", "-j", "monitors"] => Ok(serde_json::to_vec(&*self.monitors.borrow()).unwrap()),
             ["hyprctl", "-j", "clients"] => Ok(serde_json::to_vec(&*self.clients.borrow()).unwrap()),
-            ["hyprctl", "dispatch", _] => Ok(self.dispatch_output.borrow().clone()),
+            ["hyprctl", "dispatch", lua] if *self.classico.borrow() && lua.starts_with("hl.") => Ok(b"Invalid dispatcher".to_vec()),
+            ["hyprctl", "dispatch", ..] => Ok(self.dispatch_output.borrow().clone()),
             ["ydotool", "key", events @ ..] if events.iter().all(|e| e.ends_with(":0")) && self.fail_release.replace(false) => Err("ydotool falhou (3): release falhou".into()),
             ["ydotool", "click", "0x80"] if self.fail_release.replace(false) => Err("ydotool falhou (3): release falhou".into()),
             ["ydotool", "key", ..] if self.fail_keys.replace(false) => Err("ydotool falhou (2): falhou".into()),
@@ -298,7 +300,26 @@ fn exec_cmd_refuses_missing_program_before_dispatch() {
 #[test]
 fn dispatch_exit_0_with_error_text_is_failure() {
     let commands = FakeCommands::default(); *commands.dispatch_output.borrow_mut() = b"error: invalid dispatcher\n".to_vec();
-    assert_eq!(dispatch(&commands,"x").unwrap_err(),"hyprctl dispatch falhou: error: invalid dispatcher");
+    assert_eq!(dispatch(&commands,"x",&["y"]).unwrap_err(),"hyprctl dispatch falhou: error: invalid dispatcher | error: invalid dispatcher");
+}
+
+#[test]
+fn config_classica_do_hyprland_recebe_o_dispatcher_classico() {
+    let (mut desktop, commands, _) = desktop(vec![]); *commands.classico.borrow_mut() = true;
+    let observed = desktop.observe().unwrap();
+    let click: Action = serde_json::from_value(json!({"type":"mouse","x":10,"y":20,"button":"left","mode":"click"})).unwrap();
+    desktop.act(&observed,&click).unwrap();
+    let observed = desktop.observe().unwrap();
+    desktop.act(&observed,&action(ActionType::Activate,Some("w0xa"))).unwrap();
+    let observed = desktop.observe().unwrap();
+    let mut launch = action(ActionType::Launch,None); launch.application = Some("editor".into());
+    desktop.act(&observed,&launch).unwrap();
+    let calls = commands.calls.borrow();
+    for esperado in [vec!["hyprctl","dispatch","movecursor","1546","20"], vec!["hyprctl","dispatch","focuswindow","address:0xa"], vec!["hyprctl","dispatch","exec","editor"]] {
+        assert!(calls.iter().any(|c| c.0 == esperado), "faltou {esperado:?}");
+    }
+    let clique = calls.iter().position(|c| c.0 == vec!["ydotool","click","0xc0"]).unwrap();
+    assert!(calls[..clique].iter().any(|c| c.0[..3] == ["hyprctl","dispatch","movecursor"]));
 }
 
 #[test]

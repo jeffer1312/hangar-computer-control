@@ -189,6 +189,14 @@ async fn fenced_json_answer_accepted() {
 }
 
 #[tokio::test]
+async fn text_after_json_answer_is_ignored() {
+    let s = responde(conteudo("{\"interpretacao\": \"tela\", \"acoes\": [{\"type\": \"keys\", \"keys\": [\"Enter\"]}]}\n\nO botão Enviar está no canto.")).await;
+    let a = llm(&s, Some("KEY")).ajudar(&json!({}), &[], T).await;
+    assert_eq!(a.interpretacao, "tela");
+    assert_eq!(a.acoes.len(), 1);
+}
+
+#[tokio::test]
 async fn model_from_config_goes_in_body() {
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"answers": {"risky": {"noul": 0.1}}}))).await;
     Jev::new(s.uri(), "KEY".into(), "~typesafe/jev-latest".into()).arriscado(&json!({}), "p", T).await.unwrap();

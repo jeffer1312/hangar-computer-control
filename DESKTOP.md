@@ -60,7 +60,8 @@ ativo) e `wtype`; o que faltar aparece no erro da conexão. O alvo `linux` é au
 `linux-agent.json` é o modelo para apontar outro binário.
 
 - Janelas e foco: `hyprctl` (`clients`, `activewindow`, `monitors`; `dispatch` na sintaxe
-  Lua `hl.dsp.*` do Hyprland 0.56). Programas abrem por `hl.dsp.exec_cmd`.
+  Lua `hl.dsp.*` do Hyprland 0.56; com config hyprlang, que responde `Invalid dispatcher`, repete no formato
+  clássico `movecursor`/`focuswindow`/`exec`). Programas abrem por `hl.dsp.exec_cmd` ou `exec`.
 - Controles: AT-SPI, com os papéis traduzidos para os nomes da UIA (Button, Edit, MenuItem...).
   No Wayland o AT-SPI só dá posição dentro da janela; a da janela vem do `hyprctl`.
 - Coordenadas: lógicas, relativas ao monitor da janela ativa (escala do monitor já aplicada).
