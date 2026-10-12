@@ -1591,3 +1591,49 @@ async fn record_keeps_raw_vision_actions_and_result() {
     assert_eq!(fim["resultado"]["motivo"], r.motivo.as_str());
     assert!(log.iter().all(|l| l.get("t").is_some()), "{log:?}");
 }
+
+// An action whose effect could not be seen (empty tree) is never offered again: a second Enter may send twice.
+#[tokio::test]
+async fn blind_action_is_not_offered_again_in_a_later_cycle() {
+    let con = FakeConnector::new(vec![titled("o1", "Chat"), titled("o2", "Chat"), titled("o3", "Chat")]);
+    let (op, server) = setup(vec![
+        help(json!([{"type":"keys","keys":["Enter"],"rotulo":"enviar"}])), Answer::Risk(0.05),
+        help(json!([{"type":"keys","keys":["Enter"],"rotulo":"enviar"}])), Answer::Choice("BLOCKED", 0.9, 0.05),
+    ]).await;
+    let r = run(op, &con).await;
+    assert_eq!(acts(&con).len(), 1, "{}", r.resumo());
+    let pedidos = bodies(&server).await;
+    assert!(!criterios(&pedidos[3]).iter().any(|c| c.contains("'enviar' ENTER")), "{:?}", criterios(&pedidos[3]));
+}
+
+// "diga oi" asks to say something, not to read: no 75% confirmation from the screen reading alone.
+#[test]
+fn reading_goal_excludes_directed_actions() {
+    use hcc_laco::objetivo::pede_leitura;
+    assert!(pede_leitura("entre na conversa do Junior e leia a resposta"));
+    assert!(!pede_leitura("abra o chat e diga oi"));
+    assert!(!pede_leitura("leia a mensagem e responda ok"));
+}
+
+// A name read as another one is reported back, so the caller can tell the user which record was opened.
+#[tokio::test]
+async fn misheard_name_used_is_reported_in_the_result() {
+    let mut obs = tree("o1", "");
+    obs.elements.push(serde_json::from_value(json!({"id":"e2","name":"Junior (ativo)","role":"TreeItem",
+        "value":null,"enabled":true,"rect":null,"focused":false,"actions":["invoke"]})).unwrap());
+    let con = FakeConnector::new(vec![obs]);
+    let (mut op, _server) = setup(vec![done()]).await;
+    op.texto = "entre na conversa do Juno e leia a resposta".into();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(r.motivo.contains("'Juno'") && r.motivo.contains("'Junior'"), "{}", r.resumo());
+}
+
+// The verb opening the goal is capitalised too: it is not a misheard name.
+#[test]
+fn sentence_opening_verb_is_not_a_misheard_name() {
+    use hcc_laco::objetivo::nome_parecido;
+    let mut obs = tree("o1", "");
+    obs.elements[1].name = "Abre".into();
+    assert_eq!(nome_parecido("Abra o menu", &obs), None);
+}

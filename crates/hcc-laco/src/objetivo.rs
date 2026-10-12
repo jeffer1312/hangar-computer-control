@@ -10,11 +10,12 @@ use crate::barreiras::LITERAIS;
 
 static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s'"“”<>]+"#).unwrap());
 static LEITURA: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(ler|leia|leiam|lê|lendo|read|mostre|mostra|diga|resuma|resumir)\b").unwrap()
+    Regex::new(r"(?i)\b(ler|leia|leiam|lê|lendo|read|mostre|mostra|resuma|resumir)\b").unwrap()
 });
-// Sending, deleting, following or buying aims at someone/something exact: never resolve a misheard name for it.
+// Sending, deleting, scheduling, prescribing or buying aims at someone/something exact: never resolve a misheard
+// name for it, and such a goal is not a plain reading either.
 static ACAO_DIRIGIDA: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(envi|mand|respond|escrev|digit|apag|exclu|delet|remov|send|post|publi|compr|pag|curt|segu|bloque|denunc)\w*").unwrap()
+    Regex::new(r"(?i)\b(envi|mand|respond|escrev|digit|apag|exclu|delet|remov|send|post|publi|compr|pag|curt|segu|bloque|denunc|agend|cancel|marc|transf|lig|cham|prescrev|assin|aprov|autoriz)\w*").unwrap()
 });
 static NOME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\p{Lu}\p{L}{3,}\b").unwrap());
 static PALAVRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\p{L}{3,}").unwrap());
@@ -28,7 +29,7 @@ pub fn literais(goal: &str) -> Vec<String> {
 }
 
 pub fn pede_leitura(goal: &str) -> bool {
-    LEITURA.is_match(goal)
+    LEITURA.is_match(goal) && !ACAO_DIRIGIDA.is_match(goal)
 }
 
 /// Visible text of the front window, in tree order, once each: what a reading goal returns.
@@ -74,13 +75,15 @@ fn distancia(a: &[char], b: &[char]) -> usize {
 /// ("Juno" from speech, "Junior" on screen): the hint names it so navigation and reading go on.
 // ponytail: same first two letters and at most a third of the longer word changed; a second close name means
 // real ambiguity, so no hint and the loop asks.
-pub fn nome_parecido(goal: &str, obs: &Observation) -> Option<String> {
+pub fn nome_parecido(goal: &str, obs: &Observation) -> Option<(String, String)> {
     if ACAO_DIRIGIDA.is_match(goal) { return None; }
     let nomes: Vec<&str> = obs.elements.iter().map(|e| e.name.as_str())
         .chain(obs.windows.iter().map(|w| w.name.as_str())).collect();
     let palavras: HashSet<String> = nomes.iter().flat_map(|n| PALAVRA.find_iter(n).map(|m| m.as_str().to_owned())).collect();
     let presentes: HashSet<String> = palavras.iter().map(|p| normal(p)).collect();
-    for dita in NOME.find_iter(goal).map(|m| m.as_str()) {
+    // A capitalised word opening a sentence is a verb ("Abra o menu"), not a name.
+    let inicio = |i: usize| goal[..i].trim_end().is_empty() || goal[..i].trim_end().ends_with(['.', '!', '?', ':']);
+    for dita in NOME.find_iter(goal).filter(|m| !inicio(m.start())).map(|m| m.as_str()) {
         let alvo: Vec<char> = normal(dita).chars().collect();
         if presentes.contains(&alvo.iter().collect::<String>()) { continue; }
         let mut perto: Vec<&String> = palavras.iter().filter(|p| {
@@ -91,7 +94,7 @@ pub fn nome_parecido(goal: &str, obs: &Observation) -> Option<String> {
         perto.sort_by_key(|p| normal(p));
         perto.dedup_by_key(|p| normal(p));
         if let [unico] = perto[..] {
-            return Some(format!("'{dita}' in the goal is likely a speech transcription of '{unico}', the only similar name on screen; treat it as '{unico}'."));
+            return Some((dita.to_owned(), unico.clone()));
         }
     }
     None

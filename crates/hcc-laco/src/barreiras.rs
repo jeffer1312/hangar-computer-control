@@ -186,12 +186,13 @@ impl Barreiras {
         })
     }
 
-    /// Drops what ran without effect in the last 3, what ran twice, and a third click on the same spot.
+    /// Drops what ran without effect in the last 3 (or with an effect nobody could see), what ran twice, and a
+    /// third click on the same spot.
     pub fn barrar(cands: Vec<Candidato>, hist: &[Registro]) -> Vec<Candidato> {
         let feitas: Vec<&Registro> = executadas(hist).collect();
         let sem_efeito: HashSet<&str> = feitas[feitas.len().saturating_sub(3)..]
             .iter()
-            .filter(|r| r.screen_changed == Some(false))
+            .filter(|r| r.screen_changed != Some(true))
             .map(|r| r.action.as_str())
             .collect();
         let vezes = |a: &str| feitas.iter().filter(|r| r.action == a).count();

@@ -326,7 +326,9 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             clique.descricao = secretos.texto(&clique.descricao);
             acoes.push(clique);
         }
-        let nome = nome_parecido(&op.texto, &obs);
+        let parecido = nome_parecido(&op.texto, &obs);
+        let nome = parecido.as_ref().map(|(dita, tela)| format!(
+            "'{dita}' in the goal is likely a speech transcription of '{tela}', the only similar name on screen; treat it as '{tela}'."));
         let (mut dica, mut ajudou, mut direta) = (com_dica(&nome, String::new()), false, None);
         let mut leitura_valida = false;
         let mut leitura = String::new();
@@ -423,6 +425,9 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                         r.motivo = if leitura_forte {
                             format!("objetivo confirmado pela leitura da tela ({}) na janela {janela}. Leitura: {leitura}", percentual(p))
                         } else { format!("objetivo confirmado ({}) na janela {janela}", percentual(p)) };
+                        if let Some((dita, tela)) = &parecido {
+                            r.motivo.push_str(&format!(". Nome '{dita}' do pedido tratado como '{tela}', o único parecido na tela"));
+                        }
                         if pede_leitura(&op.texto) {
                             if !leitura_forte && !leitura.is_empty() { r.motivo.push_str(&format!(". Leitura: {leitura}")); }
                             let texto = texto_janela(&obs);
@@ -503,7 +508,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 }
             };
             r.passos.push(format!("{}. {nome} [{}]", r.passos.len() + 1, percentual(decisao.p)));
-            // Blind (empty tree): only the title can change, one look after the pause is all polling would give.
+            // Blind (empty tree): only the title could change; no polling, the next observation looks.
             let prazo = Instant::now() + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
                 else if vista.elements.is_empty() { Duration::from_millis(800) } else { Duration::from_secs(3) };
             controle.esperar(Duration::from_millis(800)).await?;
