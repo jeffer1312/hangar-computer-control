@@ -429,7 +429,7 @@ fn progress_file_lines_in_order() {
         .map(|n| n["params"]["message"].as_str().unwrap().to_owned())
         .collect();
     let arquivo = amb.progresso("toolu_e2e");    assert_eq!(arquivo, notificados);
-    assert_eq!(&arquivo[..3], ["conectando ao Windows", "lendo a tela", "decidindo o próximo passo"], "{arquivo:?}");
+    assert_eq!(&arquivo[..3], ["conectando ao computador", "lendo a tela", "decidindo o próximo passo"], "{arquivo:?}");
     assert_eq!(arquivo.iter().filter(|m| *m == "decidindo o próximo passo").count(), 2, "{arquivo:?}");
     assert_eq!(arquivo.last().unwrap(), "decidindo o próximo passo", "{arquivo:?}");
 }

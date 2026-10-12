@@ -28,11 +28,15 @@ pub fn assinatura(obs: &Observation) -> (String, Vec<(String, String, String)>) 
     (obs.foreground.clone(), itens)
 }
 
-/// `assinatura` plus the foreground title: with an empty tree the title is the only visible change.
-pub fn assinatura_tela(obs: &Observation) -> (String, String, Vec<(String, String, String)>) {
+pub type AssinaturaTela = (String, String, Vec<(String, String, String)>, Vec<(String, String)>);
+
+/// `assinatura` plus the foreground title (with an empty tree the only visible change) and the focused
+/// controls: Ctrl+L or a click on a field only moves the focus.
+pub fn assinatura_tela(obs: &Observation) -> AssinaturaTela {
     let titulo = obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| w.name.clone()).unwrap_or_default();
     let (janela, itens) = assinatura(obs);
-    (janela, titulo, itens)
+    let foco = obs.elements.iter().filter(|e| e.focused).map(|e| (e.role.clone(), e.name.clone())).collect();
+    (janela, titulo, itens, foco)
 }
 
 pub fn estado_compacto(

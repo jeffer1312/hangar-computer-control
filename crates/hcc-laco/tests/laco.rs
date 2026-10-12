@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fakes::{Answer, FakeConnector, Script, help, seconds, tree};
-use hcc_laco::candidatos::{candidatos, segredos};
+use hcc_laco::candidatos::{candidatos, segredos, sem_app_aberto};
 use hcc_laco::descrever::descrever;
 use hcc_laco::executar::{Opcoes, executar};
 use hcc_laco::geometria::{dentro, para_tela};
@@ -172,21 +172,34 @@ async fn done_after_help_strong_reading_confirmed() {
             Answer::Choice(choice, p2, 0.05)]).await;
         let r = run(op, &con).await;
         assert!(r.ok, "{}", r.resumo());
-        assert_eq!(r.motivo, format!("objetivo confirmado pela leitura da tela ({:.0}%) na janela 'Editor'", p * 100.0));
+        assert_eq!(r.motivo, format!("objetivo confirmado pela leitura da tela ({:.0}%) na janela 'Editor'. Leitura: tela vista", p * 100.0));
         assert!(bodies(&server).await[2]["state"].get("hint").is_none());
         assert!(con.state.lock().unwrap().acts.is_empty());
     }
 }
 
 #[tokio::test]
-async fn done_after_help_weak_reading_refused() {
+async fn done_after_help_weak_reading_refused_when_tree_could_confirm() {
     for p in [0.9, 0.94] {
-        let con = FakeConnector::new(vec![empty("o1")]);
-        let (op, _server) = setup(vec![help(json!([])), Answer::Choice("DONE", p, 0.05),
+        let con = FakeConnector::new(vec![tree("o1", "")]);
+        let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), Answer::Choice("DONE", p, 0.05),
             Answer::Choice("WAIT", 0.5, 0.05)]).await;
         let r = run(op, &con).await;
         assert!(!r.ok);
         assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
+    }
+}
+
+// With an empty tree the reading is the only evidence there will ever be.
+#[tokio::test]
+async fn done_after_help_blind_tree_reading_confirmed() {
+    for p in [0.75, 0.9] {
+        let con = FakeConnector::new(vec![empty("o1")]);
+        let (op, _server) = setup(vec![help(json!([])), Answer::Choice("DONE", p, 0.05),
+            Answer::Choice("WAIT", 0.5, 0.05)]).await;
+        let r = run(op, &con).await;
+        assert!(r.ok, "{}", r.resumo());
+        assert!(r.motivo.starts_with("objetivo confirmado pela leitura da tela"), "{}", r.resumo());
     }
 }
 
@@ -593,25 +606,25 @@ async fn done_after_help_confirmed_without_hint() {
         Answer::Choice("DONE", 0.9, 0.05)]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(r.motivo, "objetivo confirmado (90%) na janela 'Editor'");
+    assert_eq!(r.motivo, "objetivo confirmado pela leitura da tela (90%) na janela 'Editor'. Leitura: tela vista");
     let requests = bodies(&server).await;
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[1]["state"]["hint"], "tela vista");
     assert!(requests[2]["state"].get("hint").is_none(), "{}", requests[2]);
     let log = std::fs::read_to_string(r.registro.as_ref().unwrap().join("jev.jsonl")).unwrap();
-    let ultima: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    let ultima: Value = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).rfind(|l| l.get("sem_dica").is_some()).unwrap();
     assert_eq!((ultima["sem_dica"].clone(), ultima["choice"].clone()), (json!(true), json!("DONE")));
 }
 
 #[tokio::test]
 async fn done_after_help_refused_when_jev_without_hint_disagrees() {
-    let con = FakeConnector::new(vec![empty("o1")]);
-    let (op, server) = setup(vec![help(json!([])), Answer::Choice("DONE", 0.9, 0.05),
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), Answer::Choice("DONE", 0.9, 0.05),
         Answer::Choice("WAIT", 0.9, 0.05)]).await;
     let r = run(op, &con).await;
     assert!(!r.ok);
     assert_eq!(r.motivo, "não confirmado: só a leitura do print indica que terminou. tela vista");
-    assert!(bodies(&server).await[2]["state"].get("hint").is_none());
+    assert!(bodies(&server).await[3]["state"].get("hint").is_none());
     assert!(con.state.lock().unwrap().acts.is_empty());
 }
 
@@ -1417,4 +1430,164 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     run(op, &con).await;
     let decisoes: Vec<Value> = bodies(&server).await.into_iter().filter(|b| b["questions"].get("action").is_some()).collect();
     assert!(tem_launch(&decisoes[1]), "a portal dialog closing is not the Calculator closing");
+}
+
+fn acts(con: &FakeConnector) -> Vec<Action> { con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect() }
+fn criterios(body: &Value) -> Vec<String> {
+    body["questions"]["action"]["criteria"].as_object().unwrap().values().filter_map(|v| v.as_str().map(String::from)).collect()
+}
+
+// The vision model named a target that is not in the (empty) tree; the agent refused the text.
+#[tokio::test]
+async fn vision_target_missing_from_tree_is_dropped() {
+    let con = FakeConnector::new(vec![titled("o1", "A"), titled("o2", "B"), titled("o3", "C")]);
+    let (op, _server) = setup(vec![
+        help(json!([{"type":"mouse","x":100,"y":100,"button":"left","mode":"click","rotulo":"campo"}])), Answer::Risk(0.05),
+        help(json!([{"type":"text","target":"campo de mensagem","value":"oi","rotulo":"campo de mensagem"}])), Answer::Risk(0.05),
+        help(json!([])), Answer::Choice("DONE", 0.99, 0.05), Answer::Choice("WAIT", 0.5, 0.05),
+    ]).await;
+    let r = run(op, &con).await;
+    let feitas = acts(&con);
+    assert_eq!(feitas.len(), 2, "{}", r.resumo());
+    assert_eq!(feitas[1].target, None, "{}", r.resumo());
+    assert_eq!(feitas[1].value.as_deref(), Some("oi"));
+}
+
+// Empty tree and a title that never changes: the message was sent but the loop reported
+// "três ações seguidas sem efeito" without looking at the screen again.
+#[tokio::test]
+async fn blind_tree_does_not_count_actions_as_without_effect() {
+    let con = FakeConnector::new(vec![titled("o1", "Slack"), titled("o2", "Slack"), titled("o3", "Slack"), titled("o4", "Slack")]);
+    let (op, _server) = setup(vec![
+        help(json!([{"type":"mouse","x":100,"y":100,"button":"left","mode":"click","rotulo":"campo"}])), Answer::Risk(0.05),
+        help(json!([{"type":"text","value":"Teste"}, {"type":"keys","keys":["Enter"]}])), Answer::Risk(0.05), Answer::Risk(0.05),
+        Answer::Vision(json!({"interpretacao":"a mensagem Teste aparece enviada na conversa", "acoes": []})),
+        Answer::Choice("DONE", 0.9, 0.05), Answer::Choice("WAIT", 0.5, 0.05),
+    ]).await;
+    let r = run(op, &con).await;
+    assert_eq!(acts(&con).len(), 3, "{}", r.resumo());
+    assert!(r.ok, "{}", r.resumo());
+    assert!(r.motivo.contains("a mensagem Teste aparece enviada"), "{}", r.resumo());
+    let s = con.state.lock().unwrap();
+    let gap = s.acts[2].2 - s.acts[1].2;
+    assert!(gap < Duration::from_millis(2500), "espera cega de {gap:?} entre texto e Enter");
+}
+
+// Ctrl+L and invoke on the address bar only move the focus; that is a visible change.
+#[tokio::test]
+async fn focus_move_counts_as_screen_change() {
+    let mut antes = tree("o1", "");
+    antes.elements[0].focused = false;
+    let con = FakeConnector::new(vec![antes, tree("o2", "")]);
+    let (op, server) = setup(vec![select("invoke"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["screenChanged"], true);
+}
+
+// The goal spells the URL out, the address bar is in the tree, but only focus/Enter were offered.
+#[tokio::test]
+async fn goal_literal_and_url_become_fill_options() {
+    let mut obs = tree("o1", "");
+    obs.elements[0].name = "Address and search bar".into();
+    let con = FakeConnector::new(vec![obs]);
+    let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    op.texto = "pressione Ctrl+L, digite literalmente https://x.com e depois 'olá mundo'.".into();
+    op.dados = Map::new();
+    run(op, &con).await;
+    let opcoes = criterios(&bodies(&server).await[0]);
+    assert!(opcoes.contains(&"set_value Edit 'Address and search bar' = 'https://x.com'".to_string()), "{opcoes:?}");
+    assert!(opcoes.contains(&"set_value Edit 'Address and search bar' = 'olá mundo'".to_string()), "{opcoes:?}");
+}
+
+// Invoke on the address bar chose the focus, so the vision model's untargeted text must be offered.
+#[tokio::test]
+async fn invoke_on_edit_chooses_focus_for_untargeted_text() {
+    let mut obs = tree("o1", "");
+    obs.elements[0].actions = vec![hcc_protocolo::ElementAction::Invoke, hcc_protocolo::ElementAction::SetValue];
+    obs.elements[0].focused = false;
+    let mut focado = obs.clone();
+    focado.observation_id = "o2".into();
+    focado.elements[0].focused = true;
+    let con = FakeConnector::new(vec![obs, focado.clone(), tree("o3", "https://x.com")]);
+    let (op, _server) = setup(vec![select("invoke Edit 'Nome'"), Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"text","value":"https://x.com"}])), select("text 'https://x.com'"), done()]).await;
+    let r = run(op, &con).await;
+    let feitas = acts(&con);
+    assert_eq!(feitas.len(), 2, "{}", r.resumo());
+    assert_eq!(feitas[1].kind.to_string(), "text");
+}
+
+// The conversation was open and the vision model read the reply; the blind recheck said WAIT.
+#[tokio::test]
+async fn read_goal_confirmed_by_reading_returns_the_reading() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (mut op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
+        Answer::Vision(json!({"interpretacao":"Junior respondeu às 9h10: mensagem de exemplo.", "acoes": []})),
+        Answer::Choice("DONE", 0.78, 0.05), Answer::Choice("WAIT", 0.36, 0.05)]).await;
+    op.texto = "entre na conversa do Junior e leia a resposta".into();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(r.motivo.contains("Junior respondeu às 9h10: mensagem de exemplo."), "{}", r.resumo());
+}
+
+// Reading from the tree needs no vision: the visible text goes back with the result.
+#[tokio::test]
+async fn read_goal_done_from_tree_returns_window_text() {
+    let mut obs = tree("o1", "");
+    obs.elements.push(serde_json::from_value(json!({"id":"e2","name":"","role":"Group","value":"Resposta de exemplo na conversa",
+        "enabled":true,"rect":null,"focused":false,"actions":[]})).unwrap());
+    let con = FakeConnector::new(vec![obs]);
+    let (mut op, _server) = setup(vec![done()]).await;
+    op.texto = "abra a conversa do Junior e leia a resposta".into();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(r.motivo.contains("Resposta de exemplo na conversa"), "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().captures, 0);
+}
+
+// Speech turned "Júnior" into "Juno"; one similar name on screen is the plausible target.
+#[tokio::test]
+async fn transcribed_name_close_to_one_visible_name_becomes_hint() {
+    let mut obs = tree("o1", "");
+    obs.elements.push(serde_json::from_value(json!({"id":"e2","name":"Junior (ativo) (tem 1 notificação)","role":"TreeItem",
+        "value":null,"enabled":true,"rect":null,"focused":false,"actions":["invoke"]})).unwrap());
+    for (goal, espera) in [("entre na conversa do Juno e leia a resposta", true), ("envie oi para o Juno", false)] {
+        let con = FakeConnector::new(vec![obs.clone()]);
+        let (mut op, server) = setup(vec![done()]).await;
+        op.texto = goal.into();
+        run(op, &con).await;
+        let hint = bodies(&server).await[0]["state"]["hint"].as_str().unwrap_or_default().to_owned();
+        assert_eq!(hint.contains("'Juno'") && hint.contains("'Junior'"), espera, "{goal}: {hint}");
+    }
+}
+
+// Slack was open and "launch 'Slack'" still drew votes; the open app is reached by activate.
+#[test]
+fn launch_of_app_already_open_is_not_offered() {
+    let mut obs = tree("o1", "");
+    obs.windows[0].class_name = "slack".into();
+    obs.apps = vec!["Slack => /usr/bin/slack --gtk-version=3 -s".into(), "Firefox => /usr/lib/firefox/firefox".into()];
+    let cands = || candidatos(&obs, &Map::new(), &HashSet::new());
+    let todos: Vec<String> = sem_app_aberto(cands(), &obs, "abra o Slack").into_iter().map(|c| c.descricao).collect();
+    assert!(!todos.iter().any(|d| d.starts_with("launch 'Slack'")), "{todos:?}");
+    assert!(todos.iter().any(|d| d.starts_with("launch 'Firefox'")), "{todos:?}");
+    let nova: Vec<String> = sem_app_aberto(cands(), &obs, "abra outra janela do Slack").into_iter().map(|c| c.descricao).collect();
+    assert!(nova.iter().any(|d| d.starts_with("launch 'Slack'")), "{nova:?}");
+}
+
+// The run record keeps what the vision model really proposed (target included) and how it ended.
+#[tokio::test]
+async fn record_keeps_raw_vision_actions_and_result() {
+    let con = FakeConnector::new(vec![titled("o1", "A")]);
+    let (op, _server) = setup(vec![help(json!([{"type":"text","target":"campo","value":"oi"}])),
+        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    let r = run(op, &con).await;
+    let log = jev_log(&r);
+    let llm = log.iter().find(|l| l.get("llm").is_some()).expect("linha da ajuda visual");
+    assert_eq!(llm["llm"][0]["target"], "campo");
+    let fim = log.last().unwrap();
+    assert_eq!(fim["resultado"]["ok"], false);
+    assert_eq!(fim["resultado"]["motivo"], r.motivo.as_str());
+    assert!(log.iter().all(|l| l.get("t").is_some()), "{log:?}");
 }

@@ -13,13 +13,14 @@ use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use crate::barreiras::{Barreiras, aviso, escolhe_foco, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
-use crate::candidatos::{apps_do_objetivo, candidatos,descrever_acao, py_str, segredos, texto_no_editavel};
+use crate::candidatos::{apps_do_objetivo, candidatos, descrever_acao, py_str, segredos, sem_app_aberto, texto_no_editavel};
 use crate::descrever::{intencao, py_repr};
-use crate::estado::{assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
+use crate::estado::{AssinaturaTela, assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
 use crate::geometria::{dentro, para_tela};
 use crate::http::py_dumps;
 use crate::jev::Jev;
 use crate::llm::Llm;
+use crate::objetivo::{literais, nome_parecido, pede_leitura, texto_janela};
 use crate::resultado::Resultado;
 use crate::tipos::{Ajuda, Candidato, Decisao, Escolha, Progresso, Registro};
 
@@ -174,6 +175,29 @@ fn sem_reabrir(cands: Vec<Candidato>, fechados: &[String]) -> Vec<Candidato> {
     cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch || !reabre(&c.acao)).collect()
 }
 
+/// `None` when the tree is empty on both sides: an unchanged title then proves nothing either way.
+fn mudou(antes: &AssinaturaTela, depois: &AssinaturaTela) -> Option<bool> {
+    if antes != depois { Some(true) } else if depois.2.is_empty() { None } else { Some(false) }
+}
+
+/// The vision model sometimes names a control that is not in the tree (or the tree is empty): aim at the focus.
+fn alvo_observado(mut acao: Action, obs: &Observation) -> Action {
+    if acao.target.as_ref().is_some_and(|id| !obs.windows.iter().any(|w| &w.id == id) && !obs.elements.iter().any(|e| &e.id == id)) {
+        acao.target = None;
+    }
+    acao
+}
+
+/// Invoke on an editable field puts the caret there, like a click.
+fn invoca_editavel(acao: &Action, obs: &Observation) -> bool {
+    acao.kind == ActionType::Invoke && acao.target.as_ref().is_some_and(|id| obs.elements.iter()
+        .any(|e| &e.id == id && (e.role == "Edit" || e.actions.contains(&hcc_protocolo::ElementAction::SetValue))))
+}
+
+fn com_dica(nome: &Option<String>, texto: String) -> String {
+    match nome { Some(n) if texto.is_empty() => n.clone(), Some(n) => format!("{n}\n{texto}"), None => texto }
+}
+
 fn erro_sessao(e: SessionError) -> String { format!("{}: {e}", e.tipo()) }
 fn erro_io(e: io::Error) -> String { format!("OSError: {e}") }
 fn erro_trava(e: io::Error) -> String {
@@ -207,8 +231,14 @@ async fn observar<S: Session>(sessao: &mut S) -> Result<Observation, SessionErro
     unreachable!("três tentativas sempre retornam")
 }
 
+fn agora() -> f64 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+    (t * 1000.0).round() / 1000.0
+}
+
 async fn registrar(pasta: &Path, mut valor: Value, secretos: &Segredos) -> Result<(), String> {
     secretos.valor(&mut valor);
+    if let Value::Object(m) = &mut valor { m.insert("t".into(), json!(agora())); }
     let mut log = tokio::fs::OpenOptions::new().create(true).append(true).open(pasta.join("jev.jsonl")).await.map_err(erro_io)?;
     log.write_all(format!("{}\n", py_dumps(&valor)).as_bytes()).await.map_err(erro_io)?;
     log.flush().await.map_err(erro_io)
@@ -233,6 +263,10 @@ async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_
     }).await?;
     ajuda.interpretacao = secretos.texto(&ajuda.interpretacao);
     ajuda.impedimento = secretos.texto(&ajuda.impedimento);
+    if let Some(pasta) = r.registro.clone() {
+        let bruto = json!({"llm": ajuda.acoes, "interpretacao": ajuda.interpretacao, "impedimento": ajuda.impedimento});
+        controle.rodar(registrar(&pasta, bruto, secretos)).await?;
+    }
     ajuda.acoes = ajuda.acoes.iter().map(|a| para_tela(a, &obs.screen, &op.texto)).collect();
     Ok((ajuda, leitura_valida))
 }
@@ -267,7 +301,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             async { observar(s).await.map_err(erro_sessao) }).await?;
         let atual = assinatura_tela(&obs);
         if let Some(ultima) = recentes.last_mut().filter(|r| r.screen_changed.is_none()) {
-            ultima.screen_changed = Some(anterior.as_ref() != Some(&atual));
+            ultima.screen_changed = anterior.as_ref().map_or(Some(true), |a| mudou(a, &atual));
         }
         anterior = Some(atual.clone());
         fechados.extend(apps_fechados(&std::mem::take(&mut em_foco_nas_acoes), &obs));
@@ -278,7 +312,9 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let texto: String = secretos.texto(&aviso(&obs).unwrap_or_default()).chars().take(400).collect();
             r.motivo = format!("o aplicativo respondeu duas vezes com o mesmo aviso: {texto}"); return Ok(());
         }
-        let cands = sem_reabrir(apps_do_objetivo(candidatos(&obs, &op.dados, &secretos.valores), &op.texto), &fechados).into_iter().map(|mut c| {
+        let mut valores = op.dados.clone();
+        for (i, l) in literais(&op.texto).into_iter().enumerate() { valores.insert(format!("objetivo_{i}"), Value::String(l)); }
+        let cands = sem_reabrir(apps_do_objetivo(sem_app_aberto(candidatos(&obs, &valores, &secretos.valores), &obs, &op.texto), &op.texto), &fechados).into_iter().map(|mut c| {
             c.descricao = secretos.descricao(&c.acao, &obs, true); c
         }).collect();
         if let Some(motivo) = Barreiras::tres_sem_efeito(&recentes) {
@@ -290,19 +326,22 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             clique.descricao = secretos.texto(&clique.descricao);
             acoes.push(clique);
         }
-        let (mut dica, mut ajudou, mut direta) = (String::new(), false, None);
+        let nome = nome_parecido(&op.texto, &obs);
+        let (mut dica, mut ajudou, mut direta) = (com_dica(&nome, String::new()), false, None);
         let mut leitura_valida = false;
+        let mut leitura = String::new();
         let mut fila: Vec<Candidato> = Vec::new();
         let mut falta_dica = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, &recentes, None);
             let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
             leitura_valida = leu;
+            leitura = ajuda.interpretacao.clone();
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
-            dica = ajuda.interpretacao; ajudou = true;
+            dica = com_dica(&nome, ajuda.interpretacao); ajudou = true;
             let grupos: Vec<Vec<Action>> = ajuda.acoes.into_iter()
                 .filter(|a| matches!(a.kind, ActionType::Mouse | ActionType::Keys | ActionType::Text))
-                .map(|a| texto_no_editavel(a, &obs)).collect();
+                .map(|a| texto_no_editavel(alvo_observado(a, &obs), &obs)).collect();
             // The first text fits several fields: Jev picks the field, no direct guess.
             let ambigua = grupos.first().is_some_and(|g| g.len() > 1);
             let mut foco_na_fila = foco_escolhido;
@@ -353,7 +392,11 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "sem_dica":true,
                         "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco}), secretos)).await?;
                     controle.restante()?;
-                    if leitura_valida && d.p >= 0.95 && matches!(d2.escolha, Escolha::Done | Escolha::Wait) {
+                    // Without the hint Jev sees no reading at all: WAIT there is "cannot tell", not an objection.
+                    // Below 95% the reading counts only where nothing else could: an empty tree, or a goal whose
+                    // deliverable is the reading itself.
+                    let so_a_leitura = d.p >= 0.95 || obs.elements.is_empty() || pede_leitura(&op.texto);
+                    if leitura_valida && so_a_leitura && matches!(d2.escolha, Escolha::Done | Escolha::Wait) {
                         confirmado = Some(d.p);
                         leitura_forte = true;
                     } else if d2.escolha == Escolha::Done && d2.p >= 0.75 { confirmado = Some(d2.p); }
@@ -378,8 +421,13 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                         r.ok = true;
                         let janela = estado["window"].as_str().map_or_else(|| "None".into(), py_repr);
                         r.motivo = if leitura_forte {
-                            format!("objetivo confirmado pela leitura da tela ({}) na janela {janela}", percentual(p))
+                            format!("objetivo confirmado pela leitura da tela ({}) na janela {janela}. Leitura: {leitura}", percentual(p))
                         } else { format!("objetivo confirmado ({}) na janela {janela}", percentual(p)) };
+                        if pede_leitura(&op.texto) {
+                            if !leitura_forte && !leitura.is_empty() { r.motivo.push_str(&format!(". Leitura: {leitura}")); }
+                            let texto = texto_janela(&obs);
+                            if !texto.is_empty() { r.motivo.push_str(&format!(". Texto na janela: {texto}")); }
+                        }
                     }
                     None => r.motivo = format!("não confirmado: só a leitura do print indica que terminou. {dica}"),
                 }
@@ -397,7 +445,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             ajudou = true;
             let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
             leitura_valida = leu;
-            dica = falta_dica.as_ref().map_or_else(|| ajuda.interpretacao.clone(), |f| format!("{f}\n{}", ajuda.interpretacao));
+            leitura = ajuda.interpretacao.clone();
+            dica = com_dica(&nome, falta_dica.as_ref().map_or_else(|| ajuda.interpretacao.clone(), |f| format!("{f}\n{}", ajuda.interpretacao)));
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
@@ -435,7 +484,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let falhou = match retorno {
                 Ok(ret) => {
                     if ret.ok {
-                        foco_escolhido |= escolhe_foco(acao);
+                        foco_escolhido |= escolhe_foco(acao) || invoca_editavel(acao, &vista);
                         em_foco_nas_acoes.extend(vista.windows.iter().find(|w| w.id == vista.foreground).cloned());
                     }
                     let alvo = acao.target.as_ref().and_then(|id| vista.elements.iter().rev().find(|e| &e.id == id));
@@ -454,7 +503,9 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 }
             };
             r.passos.push(format!("{}. {nome} [{}]", r.passos.len() + 1, percentual(decisao.p)));
-            let prazo = Instant::now() + Duration::from_secs(if acao.kind == ActionType::Launch { 45 } else { 3 });
+            // Blind (empty tree): only the title can change, one look after the pause is all polling would give.
+            let prazo = Instant::now() + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
+                else if vista.elements.is_empty() { Duration::from_millis(800) } else { Duration::from_secs(3) };
             controle.esperar(Duration::from_millis(800)).await?;
             while Instant::now() < prazo {
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
@@ -473,7 +524,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             vista = controle.medir("observacao", Progresso::Observacao,
                 async { observar(s).await.map_err(erro_sessao) }).await?;
             let nova = assinatura_tela(&vista);
-            if let Some(ultima) = recentes.last_mut() { ultima.screen_changed = Some(nova != atual); }
+            if let Some(ultima) = recentes.last_mut() { ultima.screen_changed = mudou(&atual, &nova); }
             atual = nova;
             anterior = Some(atual.clone());
             let mut gravada = serde_json::to_value(&vista).map_err(|e| format!("ValueError: {e}"))?;
@@ -481,7 +532,9 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             controle.rodar(async { tokio::fs::write(pasta.join("observacao.json"), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
             // A new window or a message box takes the queued keys: the next cycle looks at it first.
             if vista.foreground != primeiro_plano || aviso(&vista).is_some() { break; }
-            if texto_sem_alvo_barrado(&proxima.acao, foco_escolhido)
+            // Same action again while the last one's effect is unknown (empty tree): look first, never resend.
+            let repete_cego = recentes.last().is_some_and(|u| u.action == proxima.descricao && u.screen_changed != Some(true));
+            if repete_cego || texto_sem_alvo_barrado(&proxima.acao, foco_escolhido)
                 || Barreiras::tres_sem_efeito(&recentes).is_some() || Barreiras::barrar(vec![proxima.clone()], &recentes).is_empty() { break; }
             let estado = secretos.estado(op, &vista, &recentes, None);
             let limite = controle.restante()?.min(Duration::from_secs(30));
@@ -556,8 +609,18 @@ where C::S: 'static {
         }
     }
     if let Some(secretos) = &secretos { r.motivo = secretos.texto(&r.motivo); }
-    r.tempos = controle.tempos;
+    r.tempos = std::mem::take(&mut controle.tempos);
     r.tempos.push(format!("total={:.2}s", inicio.elapsed().as_secs_f64()));
+    if let (Some(pasta), Some(secretos)) = (&r.registro, &secretos) {
+        let mut fim = json!({"resultado": {"ok": r.ok, "motivo": r.motivo, "tempos": r.tempos}, "t": agora()});
+        secretos.valor(&mut fim);
+        let linha = format!("{}\n", py_dumps(&fim));
+        // Best effort: the result already reached the caller; a full disk must not turn it into a failure.
+        if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(pasta.join("jev.jsonl"))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, linha.as_bytes())) {
+            eprintln!("registro final não gravado: {e}");
+        }
+    }
     r
 }
 

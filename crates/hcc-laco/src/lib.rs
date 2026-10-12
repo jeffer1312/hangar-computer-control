@@ -12,3 +12,4 @@ pub mod jev;
 pub mod llm;
 pub mod executar;
 pub mod resultado;
+pub mod objetivo;

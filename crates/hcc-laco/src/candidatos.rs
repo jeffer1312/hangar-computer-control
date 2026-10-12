@@ -139,6 +139,20 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
         .collect()
 }
 
+/// Launching an app whose window is already open only competes with activating it. A goal asking for a new or
+/// another window keeps the launch.
+pub fn sem_app_aberto(cands: Vec<Candidato>, obs: &Observation, goal: &str) -> Vec<Candidato> {
+    static NOVA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(nova|novo|outra|outro|new|another)\b").unwrap());
+    if NOVA.is_match(goal) { return cands; }
+    let abertos: HashSet<String> = obs.windows.iter()
+        .filter_map(|w| w.class_name.rsplit('.').next().map(str::to_lowercase)).collect();
+    cands.into_iter().filter(|c| {
+        let exe = c.acao.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_lowercase();
+        let exe = exe.strip_suffix(".exe").unwrap_or(&exe);
+        c.acao.kind != ActionType::Launch || !abertos.contains(exe)
+    }).collect()
+}
+
 /// `termo` appears in `texto` as whole words, ignoring case.
 fn nomeado(texto: &str, termo: &str) -> bool {
     let termo = termo.trim().to_lowercase();

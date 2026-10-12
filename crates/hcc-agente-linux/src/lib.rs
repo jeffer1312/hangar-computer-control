@@ -28,6 +28,7 @@ pub struct LinuxDesktop<C: Comandos = ComandosSistema, T: Arvore = AtspiTree> {
     foreground: String,
     area: Rect,
     apps: Vec<String>,
+    despertados: std::sync::Mutex<HashSet<u32>>,
 }
 
 impl LinuxDesktop {
@@ -172,7 +173,8 @@ fn installed_apps() -> Vec<String> {
 impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
     pub fn with_backends(commands: C, tree: T, session_id: u32) -> Self {
         Self { commands, tree, session_id, _lock: None, elements: HashMap::new(), windows: HashMap::new(),
-            observed_at: None, foreground: String::new(), area: Rect(0, 0, 0, 0), apps: installed_apps() }
+            observed_at: None, foreground: String::new(), area: Rect(0, 0, 0, 0), apps: installed_apps(),
+            despertados: std::sync::Mutex::default() }
     }
 
     fn current(&self) -> Result<(Value, Rect, Value), DesktopError> {
@@ -202,9 +204,24 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         }
         let descriptions: Vec<_> = frames.iter().map(|(_, info)| (info.name(), info.states.clone())).collect();
         let Some(chosen) = choose_frame(&descriptions, hypr::string(client, "title").map_err(runtime)?) else { return Ok(vec![]); };
-        let mut roots = vec![];
-        for top in std::iter::once(&frames[chosen].0).chain(popups.iter()) { roots.extend(self.tree.children(top).map_err(tree_error)?); }
+        let frame = &frames[chosen].0;
+        let mut roots = self.tree.children(frame).map_err(tree_error)?;
+        if roots.is_empty() { roots = self.despertar(frame, pid)?; }
+        for top in &popups { roots.extend(self.tree.children(top).map_err(tree_error)?); }
         Ok(roots)
+    }
+
+    /// Chromium/Electron opened without an assistive technology expose frame -> null; asking for attributes turns
+    /// their tree on for good. Only the first attempt per process waits for it.
+    fn despertar(&self, frame: &T::Node, pid: u32) -> Result<Vec<T::Node>, DesktopError> {
+        if let Err(error) = self.tree.despertar(frame) { ignorado("roots.despertar", &error); return Ok(vec![]); }
+        if !self.despertados.lock().map_err(|e| runtime(e.to_string()))?.insert(pid) { return self.tree.children(frame).map_err(tree_error); }
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(200));
+            let filhos = self.tree.children(frame).map_err(tree_error)?;
+            if !filhos.is_empty() { return Ok(filhos); }
+        }
+        Ok(vec![])
     }
 
     fn validate_observation(&mut self, observed: &Observation) -> Result<(), DesktopError> {

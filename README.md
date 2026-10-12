@@ -94,9 +94,12 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
 
 - `objetivo(texto, dados={}, max_passos=12, limite_segundos=240)`: a principal. `texto` é o pedido como
   se fosse pra uma pessoa. `dados` leva valores que o laço pode digitar (usuário, senha, caminho, texto):
-  qualquer valor em `dados` vira candidato de "digitar isso em cada campo editável". Retorna um texto com
+  qualquer valor em `dados` vira candidato de "digitar isso em cada campo editável", e o mesmo vale para
+  texto entre aspas e URL escritos no próprio `texto`. Retorna um texto com
   `concluído: …` ou `parou: …`, a lista de passos executados com a confiança do Jev, os tempos por etapa,
   o caminho do último print (se o LLM foi chamado) e a pasta de registro (`observacao.json`, `jev.jsonl`).
+  Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print
+  (`Leitura: …`) e/ou o texto visível da janela pela árvore (`Texto na janela: …`, até 2000 caracteres).
 - `ver_tela()`: print do desktop, devolve o caminho do PNG. Pra quando `objetivo` parou e você quer olhar.
 - `estado()`: diz se o desktop está acessível e a resolução.
 
@@ -104,19 +107,44 @@ Exemplos de `texto` que funcionaram: "abrir o Bloco de Notas, digitar o texto in
 no caminho informado" (com `dados={"texto": …, "caminho": …}`); "no Chrome, no GitLab da empresa, abrir
 a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir em Sistema > Sobre".
 
+### Progresso durante `objetivo`
+
+Enquanto roda, cada etapa sai como `notifications/progress` (só se a chamada trouxer `_meta.progressToken`;
+`progress` conta as etapas, sem `total`) e, se a chamada trouxer `_meta["claudecode/toolUseId"]`, também em
+`~/.hangar/tool-progress/<toolUseId>.jsonl` (`{"t": <unix s>, "message": …}` por linha). `message` é um destes
+rótulos fixos ou a descrição da ação executada (`invoke Button 'Enviar'`, `keys Enter`, `set_value Edit 'X' = ***`):
+
+| `message` | fase |
+|---|---|
+| `conectando ao computador` / `reconectando ao computador` | conexão com o agente |
+| `lendo a tela` | leitura da árvore de acessibilidade |
+| `decidindo o próximo passo` | pergunta ao Jev (cerca de 0,5 s) |
+| `capturando a tela` | print para o modelo de visão |
+| `pedindo ajuda visual` | modelo de visão (o passo mais lento, 4 a 10 s) |
+| qualquer outro texto | ação sendo executada |
+
+Conclusão e falha não são notificação: vêm só no resultado da ferramenta (`concluído: …` / `parou: …`,
+`isError` em falha interna). Sem notificação por muito tempo quer dizer etapa lenta (normalmente o modelo de
+visão); quem chama decide quando avisar o usuário. A última notificação sempre sai antes do resultado.
+
 ## Quando ele para sozinho
 
 - Ação arriscada (apagar, sobrescrever, enviar, fechar sem salvar) que o texto do objetivo não autorizou.
   Repita o objetivo dizendo explicitamente ("…substituindo se já existir").
 - A tela pede algo que não foi dado (login, credencial de rede): devolve isso como impedimento.
 - O mesmo aviso do aplicativo volta duas vezes: devolve o texto do aviso.
-- Três ações seguidas sem efeito, ou `max_passos`/`limite_segundos`.
+- Três ações seguidas sem efeito, ou `max_passos`/`limite_segundos`. Com a árvore vazia o efeito é
+  desconhecido (não conta como "sem efeito"): o próximo ciclo olha o print e decide.
 
 ## Limites conhecidos
 
 - Texto de console (Windows Terminal) ainda não é lido: comando roda, mas o resultado não é conferido.
 - Leitura da árvore em IDE Delphi leva 10 a 13 s por ciclo (VCL via MSAA); no resto, 1 s.
 - Um objetivo por vez por Windows alvo (trava na pasta temporária, por usuário e por alvo).
+- Linux, apps Chromium/Electron abertos sem leitor de tela (Slack, Discord): o agente pede os atributos do
+  frame (`GetAttributes`), o mesmo sinal que o Orca dá, e o app liga a própria árvore sem reiniciar. Fica
+  ligada até o app fechar (mais CPU no app). App aberto com acessibilidade desligada no barramento ou com
+  `--disable-renderer-accessibility` não liga assim: segue só pelo print.
 
 ## Desenvolver
 

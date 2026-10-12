@@ -76,6 +76,8 @@ pub trait Arvore {
     fn focus(&self, node: &Self::Node) -> Result<bool, TreeError>;
     fn invoke(&self, node: &Self::Node, index: usize) -> Result<bool, TreeError>;
     fn text(&self, node: &Self::Node) -> Result<String, TreeError>;
+    /// Asks for the attributes: Chromium/Electron take it as an assistive technology and build their tree.
+    fn despertar(&self, node: &Self::Node) -> Result<(), TreeError>;
 }
 
 pub struct AtspiTree { runtime: Runtime, connection: AccessibilityConnection }
@@ -187,6 +189,14 @@ impl Arvore for AtspiTree {
     fn text(&self, node: &Self::Node) -> Result<String, TreeError> {
         self.call(async { self.text_proxy(node).await?.get_text(0, -1).await.map_err(classify_error) })
     }
+
+    fn despertar(&self, node: &Self::Node) -> Result<(), TreeError> {
+        self.call(async {
+            let accessible = node.as_accessible_proxy(self.connection.connection()).await.map_err(classify_error)?;
+            accessible.get_attributes().await.map_err(classify_error)?;
+            Ok(())
+        })
+    }
 }
 
 pub fn nome_papel(role: atspi::Role, estendido: Option<String>) -> String {
@@ -241,8 +251,11 @@ pub fn element_from(info: &NoInfo, window: Rect) -> Option<Element> {
         Some(if info.has("checked") { "on" } else { "off" }.into())
     } else if info.has("selectable") && ITEMS.contains(&role.as_str()) {
         Some(if info.has("selected") { "selected" } else { "not selected" }.into())
-    } else if !password && (role == "Edit" || role == "Document" || (actions.is_empty() && name.is_empty())) {
+    } else if !password && (role == "Edit" || role == "Document") {
         info.text.as_ref().map(|t| t.chars().take(4000).collect())
+    } else if actions.is_empty() && name.is_empty() {
+        // Chromium sections answer "" or U+FFFC (embedded children): nothing to read there.
+        info.text.as_ref().filter(|t| !t.chars().all(|c| c.is_whitespace() || c == '\u{fffc}')).map(|t| t.chars().take(4000).collect())
     } else { None };
     if actions.is_empty() && name.is_empty() && value.is_none() { return None; }
     Some(Element { id: String::new(), name, role, value, enabled: info.has("enabled") || info.has("sensitive"),
@@ -268,9 +281,10 @@ pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, budget: Dura
         visited += 1;
         let info = match tree.read(&node) { Ok(info) => info, Err(error) => { crate::ignorado("walk.read", &error); continue; } };
         if !info.has("showing") { continue; }
+        // Scrolled-away content can be most of a feed: skip its whole subtree, not just the node.
+        if info.extents.and_then(|e| element_rect(e, window)).is_some_and(|rect| !intersects(rect, window)) { continue; }
         match tree.children(&node) { Ok(children) => pending.extend(children), Err(error) => crate::ignorado("walk.children", &error) }
         if let Some(mut element) = element_from(&info, window) {
-            if element.rect.is_some_and(|rect| !intersects(rect, window)) { continue; }
             element.id = format!("e{}", controls.len());
             controls.push(element); nodes.push(node);
         }

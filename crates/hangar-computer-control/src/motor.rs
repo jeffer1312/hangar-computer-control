@@ -34,8 +34,8 @@ pub trait Motor: Send + Sync + 'static {
 
 pub fn rotulo(p: &Progresso) -> String {
     match p {
-        Progresso::Conexao => "conectando ao Windows",
-        Progresso::Reconexao => "reconectando ao Windows",
+        Progresso::Conexao => "conectando ao computador",
+        Progresso::Reconexao => "reconectando ao computador",
         Progresso::Observacao => "lendo a tela",
         Progresso::Jev => "decidindo o próximo passo",
         Progresso::Captura => "capturando a tela",
@@ -122,8 +122,8 @@ mod tests {
     #[test]
     fn rotulos_iguais_ao_python() {
         let casos = [
-            (Progresso::Conexao, "conectando ao Windows"),
-            (Progresso::Reconexao, "reconectando ao Windows"),
+            (Progresso::Conexao, "conectando ao computador"),
+            (Progresso::Reconexao, "reconectando ao computador"),
             (Progresso::Observacao, "lendo a tela"),
             (Progresso::Jev, "decidindo o próximo passo"),
             (Progresso::Captura, "capturando a tela"),

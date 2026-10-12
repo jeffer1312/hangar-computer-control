@@ -19,7 +19,7 @@ static PEDE_FECHAR: LazyLock<Regex> = LazyLock::new(|| {
 
 const OFERTA: &str = "; a real mouse click on the same control is now offered";
 
-static LITERAIS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?:^|[^\p{L}\p{N}])'([^']*)'|"([^"]*)"|“([^”]*)”"#).unwrap());
+pub(crate) static LITERAIS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?:^|[^\p{L}\p{N}])'([^']*)'|"([^"]*)"|“([^”]*)”"#).unwrap());
 static COMBOS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(ctrl|control|alt|shift|super|win)(\+\w+)+").unwrap());
 
 fn normalizar_combo(teclas: &str) -> String {

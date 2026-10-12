@@ -23,6 +23,7 @@ struct FakeNo {
     children_error: Option<String>,
     focus_error: Option<String>,
     pid_error: Option<String>,
+    wake_children: Option<Vec<usize>>,
 }
 
 fn node(role: &str, name: &str) -> FakeNo {
@@ -33,7 +34,7 @@ fn node(role: &str, name: &str) -> FakeNo {
             extents: Some((0, 0, 10, 10)), text: None,
         },
         children: vec![], vanish: false, children_vanish: false, focus: true, pid: None,
-        read_error: None, children_error: None, focus_error: None, pid_error: None,
+        read_error: None, children_error: None, focus_error: None, pid_error: None, wake_children: None,
     }
 }
 
@@ -76,6 +77,12 @@ impl Arvore for FakeTree {
     fn invoke(&self, node: &usize, index: usize) -> Result<bool, TreeError> {
         self.events.borrow_mut().push(format!("invoke:{node}:{index}"));
         Ok(true)
+    }
+    fn despertar(&self, node: &usize) -> Result<(), TreeError> {
+        self.events.borrow_mut().push(format!("despertar:{node}"));
+        let mut nodes = self.nodes.borrow_mut();
+        if let Some(children) = nodes[*node].wake_children.take() { nodes[*node].children = children; }
+        Ok(())
     }
     fn text(&self, node: &usize) -> Result<String, TreeError> {
         self.events.borrow_mut().push(format!("text:{node}"));
@@ -683,4 +690,47 @@ fn observe_real_desktop() {
     assert!(observed.screen.width > 0 && observed.screen.height > 0);
     assert!(observed.windows.iter().any(|w| w.id == observed.foreground));
     println!("{observed:?}");
+}
+
+
+// Slack/Discord (Electron) opened normally expose only frame -> null until an AT asks for attributes.
+#[test]
+fn frame_sem_filhos_desperta_a_acessibilidade_do_app() {
+    let mut botao = node("push button", "Enviar"); botao.info.actions = vec!["click".into()];
+    let (mut desk, _, tree) = desktop(vec![botao]);
+    {
+        let mut nodes = tree.nodes.borrow_mut();
+        nodes[1].wake_children = Some(std::mem::take(&mut nodes[1].children));
+    }
+    let obs = desk.observe().unwrap();
+    assert_eq!(obs.elements.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["Enviar"]);
+    assert_eq!(tree.events.borrow().iter().filter(|e| e.starts_with("despertar")).count(), 1);
+}
+
+#[test]
+fn frame_com_filhos_nao_e_despertado() {
+    let (mut desk, _, tree) = desktop(vec![node("push button", "Enviar")]);
+    desk.observe().unwrap();
+    assert!(!tree.events.borrow().iter().any(|e| e.starts_with("despertar")));
+}
+
+// A long feed spent the 800-node budget below off-screen posts and cut the author links.
+#[test]
+fn subarvore_fora_da_janela_nao_e_percorrida() {
+    let mut fora = node("section", "Post rolado"); fora.info.extents = Some((0, -900, 500, 200)); fora.children = vec![1];
+    let mut link = node("link", "Autor"); link.info.actions = vec!["jump".into()];
+    let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![fora, link])), ..Default::default() };
+    let (controls, _, _) = walk(&tree, vec![0], Rect(100,100,600,500), Duration::from_secs(4), 800).unwrap();
+    assert!(controls.is_empty(), "{:?}", controls.iter().map(|e| &e.name).collect::<Vec<_>>());
+}
+
+// Chromium sections answer the Text interface with "" or U+FFFC: an empty Group carries nothing for Jev.
+#[test]
+fn grupo_sem_texto_nao_vira_controle() {
+    for vazio in ["", "\u{fffc}", " \u{fffc} "] {
+        let mut secao = node("section", ""); secao.info.text = Some(vazio.into());
+        assert!(element_from(&secao.info, Rect(0,0,100,100)).is_none(), "{vazio:?}");
+    }
+    let mut msg = node("section", ""); msg.info.text = Some("Mensagem".into());
+    assert_eq!(element_from(&msg.info, Rect(0,0,100,100)).unwrap().value.as_deref(), Some("Mensagem"));
 }
