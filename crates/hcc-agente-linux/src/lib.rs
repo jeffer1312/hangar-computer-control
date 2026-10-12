@@ -235,7 +235,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
 
     fn point(&self, x: Option<i32>, y: Option<i32>) -> Result<(), DesktopError> {
         let (x, y) = match (x, y) { (Some(x), Some(y)) => entrada::para_global(self.area, x, y).map_err(invalid)?, _ => return Err(invalid("coordenada fora da tela")) };
-        hypr::dispatch(&self.commands, &format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})"), &["movecursor", &x.to_string(), &y.to_string()]).map_err(runtime)
+        hypr::dispatch(&self.commands, &format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})"), &format!("movecursor {x} {y}")).map_err(runtime)
     }
 
     fn mouse(&self, action: &Action) -> Result<(), DesktopError> {
@@ -402,14 +402,14 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
             ActionType::Activate => {
                 let window = action.target.as_ref().and_then(|t| self.windows.get(t)).ok_or_else(|| invalid("janela não pertence à observação"))?;
                 let endereco = format!("address:{}", hypr::string(window, "address").map_err(runtime)?);
-                hypr::dispatch(&self.commands, &format!("hl.dsp.focus({{ window = {} }})", entrada::lua_string(&endereco)), &["focuswindow", &endereco]).map_err(runtime)
+                hypr::dispatch(&self.commands, &format!("hl.dsp.focus({{ window = {} }})", entrada::lua_string(&endereco)), &format!("focuswindow {endereco}")).map_err(runtime)
             }
             ActionType::Launch => {
                 let app = action.application.as_deref().filter(|a| !a.is_empty()).ok_or_else(|| invalid("application e args inválidos"))?;
                 if !self.commands.exists(app) { return Err(invalid(format!("programa não encontrado: {app}"))); }
                 let parts: Vec<&str> = std::iter::once(app).chain(action.args.iter().flatten().map(String::as_str)).collect();
                 let comando = entrada::shell_join(&parts);
-                hypr::dispatch(&self.commands, &format!("hl.dsp.exec_cmd({})", entrada::lua_string(&comando)), &["exec", &comando]).map_err(runtime)
+                hypr::dispatch(&self.commands, &format!("hl.dsp.exec_cmd({})", entrada::lua_string(&comando)), &format!("exec {comando}")).map_err(runtime)
             }
             ActionType::Keys => {
                 let names = action.keys.as_deref().ok_or_else(|| invalid("keys precisa conter de 1 a 8 teclas"))?;
