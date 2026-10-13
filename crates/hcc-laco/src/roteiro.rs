@@ -42,7 +42,7 @@ pub struct Ordem {
 }
 
 /// Format shared with the browser recorder in the hangar repo; bump both when it changes.
-pub const VERSAO: u32 = 1;
+pub const VERSAO: u32 = 2;
 
 /// A value from `dados` travels by key: the file never holds it, and the next run may pass another one.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -62,11 +62,31 @@ pub struct Passo {
     pub mudou_tela: Option<bool>,
 }
 
+/// One way the goal was done; installations differ (app version in a title, another build), so a file keeps several.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Variante {
+    pub passos: Vec<Passo>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Roteiro {
     pub versao: u32,
     pub objetivo: String,
-    pub passos: Vec<Passo>,
+    /// Latest success first.
+    pub variantes: Vec<Variante>,
+}
+
+const MAX_VARIANTES: usize = 5;
+
+/// On disk: version 1 had a single `passos` list.
+#[derive(Deserialize)]
+struct Lido {
+    versao: u32,
+    objetivo: String,
+    #[serde(default)]
+    passos: Option<Vec<Passo>>,
+    #[serde(default)]
+    variantes: Vec<Variante>,
 }
 
 fn normal(texto: &str) -> String {
@@ -176,13 +196,34 @@ pub fn carregar(arquivo: &Path) -> Result<Option<Roteiro>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
         Ok(bytes) => {
-            let roteiro: Roteiro = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            if roteiro.versao != VERSAO {
-                return Err(format!("versão {} do formato, esperada {VERSAO}", roteiro.versao));
-            }
-            Ok(Some(roteiro))
+            let lido: Lido = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let variantes = match (lido.versao, lido.passos) {
+                (1, Some(passos)) => vec![Variante { passos }],
+                (VERSAO, _) => lido.variantes,
+                (v, _) => return Err(format!("versão {v} do formato, esperada {VERSAO}")),
+            };
+            Ok(Some(Roteiro { versao: VERSAO, objetivo: lido.objetivo, variantes }))
         }
     }
+}
+
+/// The variant to replay: the first whose step 1 fits the screen already read. Chosen once, before acting,
+/// because switching after a step ran would replay on top of it.
+pub fn escolher<'a>(roteiro: &'a Roteiro, obs: &Observation, dados: &Map<String, Value>) -> Option<(usize, &'a [Passo])> {
+    roteiro.variantes.iter().enumerate()
+        .find(|(_, v)| !v.passos.is_empty() && (ja_aberto(&v.passos, 0, obs) || resolver(&v.passos[0], obs, dados).is_some()))
+        .map(|(i, v)| (i, v.passos.as_slice()))
+}
+
+/// The run that just succeeded becomes variant 0; an older one doing the same steps is dropped.
+pub fn juntar(anterior: Option<Roteiro>, objetivo: &str, passos: Vec<Passo>) -> Roteiro {
+    let mesmo = |a: &[Passo], b: &[Passo]| a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| x.janela == y.janela && x.alvo == y.alvo && x.acao == y.acao);
+    let mut variantes: Vec<Variante> = anterior.map(|r| r.variantes).unwrap_or_default();
+    variantes.retain(|v| !mesmo(&v.passos, &passos));
+    variantes.insert(0, Variante { passos });
+    variantes.truncate(MAX_VARIANTES);
+    Roteiro { versao: VERSAO, objetivo: objetivo.to_owned(), variantes }
 }
 
 pub fn salvar(arquivo: &Path, roteiro: &Roteiro) -> std::io::Result<()> {
@@ -275,13 +316,43 @@ mod tests {
     }
 
     #[test]
-    fn script_from_another_format_version_is_refused() {
+    fn script_from_another_format_version_is_refused_and_version_one_is_read_as_one_variant() {
         let pasta = std::env::temp_dir().join(format!("hcc-roteiro-versao-{}", std::process::id()));
         let arquivo = pasta.join("r.json");
-        salvar(&arquivo, &Roteiro { versao: VERSAO, objetivo: "x".into(), passos: vec![] }).unwrap();
-        assert_eq!(carregar(&arquivo).unwrap().map(|r| r.versao), Some(1));
-        std::fs::write(&arquivo, r#"{"versao":2,"objetivo":"x","passos":[]}"#).unwrap();
-        assert!(carregar(&arquivo).unwrap_err().contains("versão 2"));
+        let clique = Action { kind: ActionType::Invoke, target: Some("e0".into()), ..Default::default() };
+        let p = passo(&clique, &com_botoes(1), &Map::new());
+        salvar(&arquivo, &juntar(None, "x", vec![p.clone()])).unwrap();
+        assert_eq!(carregar(&arquivo).unwrap().map(|r| r.versao), Some(2));
+        std::fs::write(&arquivo, json!({"versao": 1, "objetivo": "x", "passos": [p]}).to_string()).unwrap();
+        let lido = carregar(&arquivo).unwrap().unwrap();
+        assert_eq!((lido.versao, lido.variantes.len(), lido.variantes[0].passos.len()), (2, 1, 1));
+        std::fs::write(&arquivo, r#"{"versao":3,"objetivo":"x","variantes":[]}"#).unwrap();
+        assert!(carregar(&arquivo).unwrap_err().contains("versão 3"));
         std::fs::remove_dir_all(pasta).unwrap();
+    }
+
+    fn clique_em(janela: &str) -> Passo {
+        let clique = Action { kind: ActionType::Invoke, target: Some("e0".into()), ..Default::default() };
+        let mut obs = com_botoes(1);
+        obs.windows[0].class_name = janela.into();
+        passo(&clique, &obs, &Map::new())
+    }
+
+    #[test]
+    fn replay_picks_the_variant_whose_first_step_fits_the_screen() {
+        let roteiro = juntar(Some(juntar(None, "x", vec![clique_em("TMS")])), "x", vec![clique_em("Outra")]);
+        assert_eq!(roteiro.variantes[0].passos[0].janela.classe, "Outra");
+        let (i, passos) = escolher(&roteiro, &com_botoes(1), &Map::new()).unwrap();
+        assert_eq!((i, passos[0].janela.classe.as_str()), (1, "TMS"));
+        assert!(escolher(&roteiro, &tela("Nenhuma"), &Map::new()).is_none());
+    }
+
+    #[test]
+    fn merging_puts_the_latest_first_drops_its_twin_and_keeps_five() {
+        let mut r = None;
+        for j in ["A", "B", "C", "D", "E", "F"] { r = Some(juntar(r, "x", vec![clique_em(j)])); }
+        r = Some(juntar(r, "x", vec![clique_em("D")]));
+        let ordem: Vec<_> = r.unwrap().variantes.iter().map(|v| v.passos[0].janela.classe.clone()).collect();
+        assert_eq!(ordem, ["D", "F", "E", "C", "B"]);
     }
 }

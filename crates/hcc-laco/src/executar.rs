@@ -340,7 +340,10 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             let mut parou = None;
             // A skipped step acted on nothing: the screen read after it says nothing about the last action.
             let mut pulou = false;
-            for (n, passo) in gravado.passos.iter().enumerate() {
+            let mut passos: &[roteiro::Passo] = &[];
+            let mut variante = String::new();
+            for n in 0.. {
+                if n > 0 && n == passos.len() { break; }
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let vista = controle.medir("observacao", Progresso::Observacao,
                     async { observar(s).await.map_err(erro_sessao) }).await?;
@@ -349,10 +352,17 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                     if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
                 }
                 anterior = Some(atual.clone());
+                if n == 0 {
+                    let Some((i, escolhidos)) = roteiro::escolher(&gravado, &vista, &op.dados) else {
+                        parou = Some(format!("nenhuma variação gravada ({}) começa nesta tela", gravado.variantes.len())); break;
+                    };
+                    (passos, variante) = (escolhidos, format!("variação {} de {}, ", i + 1, gravado.variantes.len()));
+                }
+                let passo = &passos[n];
                 // Kept as recorded: the next run may find the app closed.
-                if roteiro::ja_aberto(&gravado.passos, n, &vista) { gravados.push((passo.clone(), None)); pulou = true; continue; }
+                if roteiro::ja_aberto(passos, n, &vista) { gravados.push((passo.clone(), None)); pulou = true; continue; }
                 let motivo = |m: &str| Some(format!("parou no passo {}: {m}", n + 1));
-                if !std::mem::take(&mut pulou) && n > 0 && gravado.passos[n - 1].mudou_tela == Some(true)
+                if !std::mem::take(&mut pulou) && n > 0 && passos[n - 1].mudou_tela == Some(true)
                     && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
                     parou = motivo("a tela não mudou depois do passo anterior"); break;
                 }
@@ -385,11 +395,13 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1)));
                 esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
             }
-            let pulados = gravados.iter().filter(|(_, i)| i.is_none()).count();
-            let mut texto = format!("repetidos {} de {} passos", gravados.len() - pulados, gravado.passos.len());
-            if pulados > 0 { texto.push_str(&format!(" ({pulados} pulado(s): app já aberto)")); }
-            if let Some(p) = parou { texto.push_str(&format!("; {p}")); }
-            r.roteiro = Some(texto);
+            r.roteiro = Some(if passos.is_empty() { parou.unwrap_or_default() } else {
+                let pulados = gravados.iter().filter(|(_, i)| i.is_none()).count();
+                let mut texto = format!("{variante}repetidos {} de {} passos", gravados.len() - pulados, passos.len());
+                if pulados > 0 { texto.push_str(&format!(" ({pulados} pulado(s): app já aberto)")); }
+                if let Some(p) = parou { texto.push_str(&format!("; {p}")); }
+                texto
+            });
         }
     }
     for ciclo in 0..=op.max_passos {
@@ -520,7 +532,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                         r.ok = true;
                         if let Some(arquivo) = arquivo.as_deref().filter(|_| !gravados.is_empty()) {
                             let passos = gravados.drain(..).map(|(mut p, i)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
-                            let novo = roteiro::Roteiro { versao: roteiro::VERSAO, objetivo: op.texto.clone(), passos };
+                            // An unreadable file is replaced: the result already reported it.
+                            let novo = roteiro::juntar(roteiro::carregar(arquivo).ok().flatten(), &op.texto, passos);
                             // Any field may echo a secret (goal text, a title, a vision label): such a script stays off disk.
                             let gravado = if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) {
                                 Err("não gravado: contém um valor secreto".to_owned())

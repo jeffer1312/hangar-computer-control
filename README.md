@@ -116,14 +116,20 @@ Commitado, serve a quem rodar o mesmo objetivo no mesmo aplicativo, em VM ou nã
 A chave é o texto do objetivo (sem diferença de maiúsculas e espaços) e os nomes das chaves de `dados`, sem máquina nem alvo;
 os valores podem mudar entre execuções. Cada passo guarda a janela da frente (classe e título), o controle por
 papel, nome e ordem entre iguais (`{indice, de}`: se a tela tiver outro número de iguais, diverge), e o valor como
-referência à chave de `dados` (o valor em si nunca vai pro disco). O formato (`versao: 1`) é o mesmo do
-`browser_goal` do Hangar, que usa também `text`, `placeholder` e `test_id`; aqui ficam vazios. Arquivo de outra
-versão é reportado como ilegível e o objetivo segue pelo Jev.
+referência à chave de `dados` (o valor em si nunca vai pro disco). O formato (`versao: 2`) é o mesmo do
+`browser_goal` do Hangar, que usa também `text`, `placeholder`, `test_id` e `fim`; aqui ficam vazios ou são
+ignorados. Arquivo da versão 1 é lido como uma variação; de outra versão é reportado como ilegível e o objetivo
+segue pelo Jev.
+
+O arquivo guarda até 5 variações que deram certo (`variantes`, a mais recente primeiro), porque a tela muda entre
+instalações (versão do app no título, outro build). Na repetição vale a primeira variação cujo passo 1 bate com a
+tela já lida; a escolha é feita antes de agir e não troca no meio. Ao concluir, o caminho da corrida vira a
+variação 1 e uma variação com os mesmos passos sai.
 
 Na próxima chamada igual, o laço repete os passos sem perguntar ao Jev: lê a tela, acha o controle, executa.
 Para na primeira divergência (janela diferente, controle ausente, ação recusada, tela que não mudou onde mudou
 na gravação) e segue pelo Jev a partir da tela atual. O fim sempre passa pela confirmação normal do Jev; se o
-objetivo concluir, o roteiro é regravado. O resultado traz `roteiro: repetidos N de M passos; gravado em …`
+objetivo concluir, o roteiro é regravado. O resultado traz `roteiro: variação K de V, repetidos N de M passos; gravado em …`
 e os passos repetidos aparecem com `[roteiro]`. Apagar o arquivo ou `refazer=true` força o caminho pelo Jev.
 
 - Clique por coordenada nunca se repete: o roteiro devolve ao Jev ali, porque a coordenada não diz se o mesmo

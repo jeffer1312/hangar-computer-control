@@ -1660,8 +1660,8 @@ async fn confirmed_goal_is_replayed_without_asking_jev_per_step() {
     let arquivos = roteiros(&pasta);
     assert_eq!(arquivos.len(), 1);
     let salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivos[0]).unwrap()).unwrap();
-    assert_eq!(salvo["passos"][0]["valor"], json!({"dados": "nome"}), "valor de dados vai por referência");
-    assert!(salvo["passos"][0]["acao"].get("value").is_none());
+    assert_eq!(salvo["variantes"][0]["passos"][0]["valor"], json!({"dados": "nome"}), "valor de dados vai por referência");
+    assert!(salvo["variantes"][0]["passos"][0]["acao"].get("value").is_none());
 
     let mut segunda = tree("p1", "");
     segunda.elements.swap(0, 1);
@@ -1708,7 +1708,7 @@ async fn launch_skipped_because_the_app_is_open_stays_in_the_rewritten_script() 
     let mut salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
     let abrir = json!({"janela": {"classe": "Desktop", "titulo": ""}, "alvo": null,
         "acao": {"type": "launch", "application": "app"}, "valor": null, "mudou_tela": true});
-    salvo["passos"].as_array_mut().unwrap().insert(0, abrir);
+    salvo["variantes"][0]["passos"].as_array_mut().unwrap().insert(0, abrir);
     std::fs::write(&arquivo, salvo.to_string()).unwrap();
 
     let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana")]);
@@ -1718,10 +1718,10 @@ async fn launch_skipped_because_the_app_is_open_stays_in_the_rewritten_script() 
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     let regravado: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
-    assert_eq!(regravado["passos"].as_array().unwrap().len(), 2, "{regravado}");
-    assert_eq!(regravado["passos"][0]["acao"]["type"], "launch");
+    assert_eq!(regravado["variantes"][0]["passos"].as_array().unwrap().len(), 2, "{regravado}");
+    assert_eq!(regravado["variantes"][0]["passos"][0]["acao"]["type"], "launch");
     let texto = r.roteiro.unwrap_or_default();
-    assert!(texto.starts_with("repetidos 1 de 2") && texto.contains("pulado"), "{texto}");
+    assert!(texto.starts_with("variação 1 de 1, repetidos 1 de 2") && texto.contains("pulado"), "{texto}");
 }
 
 #[tokio::test]
@@ -1730,10 +1730,10 @@ async fn launch_skipped_mid_script_does_not_look_like_a_screen_that_did_not_chan
     let config = gravado(&pasta).await;
     let arquivo = roteiros(&pasta).remove(0);
     let mut salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
-    let preencher = salvo["passos"][0].clone();
+    let preencher = salvo["variantes"][0]["passos"][0].clone();
     let abrir = json!({"janela": {"classe": "TMainForm", "titulo": "Editor"}, "alvo": null,
         "acao": {"type": "launch", "application": "app"}, "valor": null, "mudou_tela": true});
-    salvo["passos"] = json!([preencher, abrir, preencher]);
+    salvo["variantes"][0]["passos"] = json!([preencher, abrir, preencher]);
     std::fs::write(&arquivo, salvo.to_string()).unwrap();
 
     let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana"), tree("p3", "Ana"), tree("p4", "Ana")]);
@@ -1742,7 +1742,32 @@ async fn launch_skipped_mid_script_does_not_look_like_a_screen_that_did_not_chan
     op.config = Some(config);
     let r = run(op, &con).await;
     let texto = r.roteiro.clone().unwrap_or_default();
-    assert!(texto.starts_with("repetidos 2 de 3") && !texto.contains("parou"), "{}", r.resumo());
+    assert!(texto.starts_with("variação 1 de 1, repetidos 2 de 3") && !texto.contains("parou"), "{}", r.resumo());
+}
+
+#[tokio::test]
+async fn replay_uses_the_variant_that_fits_this_installation_and_moves_it_first() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let arquivo = roteiros(&pasta).remove(0);
+    let mut salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
+    let mut outra = salvo["variantes"][0].clone();
+    outra["passos"][0]["janela"]["titulo"] = json!("Editor 2.0");
+    salvo["variantes"].as_array_mut().unwrap().insert(0, outra);
+    std::fs::write(&arquivo, salvo.to_string()).unwrap();
+
+    let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana")]);
+    let (mut op, server) = setup(vec![done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(bodies(&server).await.len(), 1, "só a confirmação final vai ao Jev");
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.starts_with("variação 2 de 2, repetidos 1 de 1")), "{}", r.resumo());
+    let regravado: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
+    let titulos: Vec<_> = regravado["variantes"].as_array().unwrap().iter()
+        .map(|v| v["passos"][0]["janela"]["titulo"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(titulos, ["Editor", "Editor 2.0"]);
 }
 
 #[tokio::test]
@@ -1811,5 +1836,5 @@ async fn replay_says_why_it_stopped() {
     op.roteiros = Some(pasta.clone());
     op.config = Some(config);
     let r = run(op, &con).await;
-    assert!(r.roteiro.as_deref().is_some_and(|t| t.starts_with("repetidos 0 de 1 passos; parou no passo 1: ")), "{}", r.resumo());
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.starts_with("nenhuma variação gravada (1) começa nesta tela")), "{}", r.resumo());
 }
