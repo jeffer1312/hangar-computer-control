@@ -110,8 +110,10 @@ a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir 
 
 ### Roteiros (gravar e repetir)
 
-Objetivo que termina `concluído` vira roteiro em `~/.cache/hangar-computer-control/roteiros/<hash>.json`.
-A chave é o alvo, o texto do objetivo (sem diferença de maiúsculas e espaços) e os nomes das chaves de `dados`;
+Objetivo que termina `concluído` vira roteiro em `.hangar/roteiros/desktop-<objetivo>-<hash>.json` na raiz do repositório git
+em que o MCP roda (a pasta da sessão do Claude); fora de um repositório, em `~/.cache/hangar-computer-control/roteiros/`.
+Commitado, serve a quem rodar o mesmo objetivo no mesmo aplicativo, em VM ou não.
+A chave é o texto do objetivo (sem diferença de maiúsculas e espaços) e os nomes das chaves de `dados`, sem máquina nem alvo;
 os valores podem mudar entre execuções. Cada passo guarda a janela da frente (classe e título), o controle por
 papel, nome e ordem entre iguais (`{indice, de}`: se a tela tiver outro número de iguais, diverge), e o valor como
 referência à chave de `dados` (o valor em si nunca vai pro disco). O formato (`versao: 1`) é o mesmo do

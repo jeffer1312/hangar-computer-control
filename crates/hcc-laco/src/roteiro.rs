@@ -73,13 +73,40 @@ fn normal(texto: &str) -> String {
     texto.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-/// Same target, same goal text and same `dados` keys: values may change, the steps do not.
-pub fn arquivo(pasta: &Path, config: Option<&Path>, texto: &str, dados: &Map<String, Value>) -> PathBuf {
+/// Same goal text and same `dados` keys: values may change, the steps do not. No machine or target in the key,
+/// so a script committed to the repository serves whoever runs the same goal on the same app.
+pub fn arquivo(pasta: &Path, texto: &str, dados: &Map<String, Value>) -> PathBuf {
     let mut chaves: Vec<&String> = dados.keys().collect();
     chaves.sort();
-    let semente = json!([config.map(|c| c.to_string_lossy()), normal(texto), chaves]).to_string();
-    let hash: String = Sha256::digest(semente.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
-    pasta.join(format!("{hash}.json"))
+    let semente = json!([normal(texto), chaves]).to_string();
+    let hash: String = Sha256::digest(semente.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect();
+    // The browser recorder writes to the same folder: the prefix keeps the two apart.
+    let slug = Some(slug(texto)).filter(|s| !s.is_empty()).unwrap_or_else(|| "roteiro".to_owned());
+    pasta.join(format!("desktop-{slug}-{hash}.json"))
+}
+
+fn slug(texto: &str) -> String {
+    let mut s = String::new();
+    for c in texto.to_lowercase().chars() {
+        let c = match c {
+            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            c => c,
+        };
+        if c.is_ascii_alphanumeric() { s.push(c); } else if !s.ends_with('-') { s.push('-'); }
+    }
+    let s = s.trim_matches('-');
+    s[..s.len().min(60)].trim_end_matches('-').to_owned()
+}
+
+/// `.hangar/roteiros` at the root of the git repository holding `cwd`, so scripts travel with the project; `cache` outside one.
+pub fn pasta(cwd: &Path, cache: &Path) -> PathBuf {
+    cwd.ancestors().find(|d| d.join(".git").exists())
+        .map_or_else(|| cache.to_path_buf(), |raiz| raiz.join(".hangar/roteiros"))
 }
 
 fn janela(obs: &Observation) -> Janela {
@@ -212,6 +239,31 @@ mod tests {
             "rect": null, "focused": false, "actions": ["invoke"],
         })).unwrap()).collect();
         obs
+    }
+
+    #[test]
+    fn file_name_is_readable_and_the_same_on_any_machine() {
+        let dados = json!({"usuario": "ana"}).as_object().unwrap().clone();
+        let nome = arquivo(Path::new("r"), "Abrir o  Bloco de Notas e salvar o relatório!", &dados);
+        let nome = nome.file_name().unwrap().to_str().unwrap();
+        let inicio = "desktop-abrir-o-bloco-de-notas-e-salvar-o-relatorio-";
+        assert!(nome.starts_with(inicio) && nome.ends_with(".json"), "{nome}");
+        assert_eq!(nome.len(), inicio.len() + 8 + ".json".len());
+        let outra = json!({"usuario": "bia"}).as_object().unwrap().clone();
+        assert_eq!(arquivo(Path::new("r"), "abrir o bloco de notas e salvar o relatório!", &outra), Path::new("r").join(nome));
+        assert!(arquivo(Path::new("r"), "!!", &dados).to_str().unwrap().starts_with("r/desktop-roteiro-"));
+    }
+
+    #[test]
+    fn scripts_live_in_the_repository_of_the_session() {
+        let raiz = std::env::temp_dir().join(format!("hcc-roteiro-pasta-{}", std::process::id()));
+        let sub = raiz.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let cache = Path::new("/cache");
+        assert_eq!(pasta(&sub, cache), cache);
+        std::fs::create_dir(raiz.join(".git")).unwrap();
+        assert_eq!(pasta(&sub, cache), raiz.join(".hangar/roteiros"));
+        std::fs::remove_dir_all(raiz).unwrap();
     }
 
     #[test]

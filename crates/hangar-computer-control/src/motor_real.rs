@@ -109,7 +109,9 @@ impl Motor for MotorReal {
                 config: p.config,
                 jev: jev(),
                 llm: Llm::from_env(),
-                roteiros: std::env::home_dir().map(|h| h.join(".cache/hangar-computer-control/roteiros")),
+                roteiros: std::env::home_dir().map(|h| h.join(".cache/hangar-computer-control/roteiros")).map(|cache| {
+                    std::env::current_dir().map_or(cache.clone(), |cwd| hcc_laco::roteiro::pasta(&cwd, &cache))
+                }),
                 refazer: p.refazer,
             };
             let etapa = move |e: Progresso| progresso(rotulo(&e));

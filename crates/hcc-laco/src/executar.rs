@@ -329,7 +329,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut foco_escolhido = false;
     let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
     let mut fechados: Vec<String> = Vec::new();
-    let arquivo = op.roteiros.as_deref().map(|p| roteiro::arquivo(p, op.config.as_deref(), &op.texto, &op.dados));
+    let arquivo = op.roteiros.as_deref().map(|p| roteiro::arquivo(p, &op.texto, &op.dados));
     let mut gravados: Vec<(roteiro::Passo, Option<usize>)> = Vec::new();
     // Replay: each step resolved on the current screen, no Jev; the first divergence hands over to the loop,
     // whose first cycle also asks Jev whether the goal is done.
