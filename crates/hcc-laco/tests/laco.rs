@@ -1785,6 +1785,45 @@ async fn redo_ignores_the_script() {
 }
 
 #[tokio::test]
+async fn redo_drops_the_older_variants() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let arquivo = roteiros(&pasta).remove(0);
+    let mut salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
+    let mut quebrada = salvo["variantes"][0].clone();
+    quebrada["passos"][0]["janela"]["titulo"] = json!("Antigo");
+    salvo["variantes"].as_array_mut().unwrap().push(quebrada);
+    std::fs::write(&arquivo, salvo.to_string()).unwrap();
+
+    let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    op.refazer = true;
+    assert!(run(op, &con).await.ok);
+    let regravado: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
+    assert_eq!(regravado["variantes"].as_array().unwrap().len(), 1, "{regravado}");
+}
+
+#[tokio::test]
+async fn a_script_of_a_newer_format_is_never_overwritten() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let arquivo = roteiros(&pasta).remove(0);
+    let futuro = r#"{"versao":99,"objetivo":"x","variantes":[]}"#;
+    std::fs::write(&arquivo, futuro).unwrap();
+
+    let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(std::fs::read_to_string(&arquivo).unwrap(), futuro);
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("não gravado") && t.contains("versão 99")), "{}", r.resumo());
+}
+
+#[tokio::test]
 async fn stopped_goal_records_nothing() {
     let pasta = tempfile::tempdir().unwrap().keep();
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);

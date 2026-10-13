@@ -532,12 +532,14 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                         r.ok = true;
                         if let Some(arquivo) = arquivo.as_deref().filter(|_| !gravados.is_empty()) {
                             let passos = gravados.drain(..).map(|(mut p, i)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
-                            // An unreadable file is replaced: the result already reported it.
-                            let novo = roteiro::juntar(roteiro::carregar(arquivo).ok().flatten(), &op.texto, passos);
-                            // Any field may echo a secret (goal text, a title, a vision label): such a script stays off disk.
-                            let gravado = if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) {
-                                Err("não gravado: contém um valor secreto".to_owned())
-                            } else { roteiro::salvar(arquivo, &novo).map_err(|e| format!("não gravado: {e}")) };
+                            // `refazer` asked to forget the recorded ways, not to keep them beside the new one.
+                            let anteriores = if op.refazer { Ok(None) } else { roteiro::anteriores(arquivo) };
+                            let gravado = anteriores.map(|a| roteiro::juntar(a, &op.texto, passos)).and_then(|novo| {
+                                // Any field may echo a secret (goal text, a title, a vision label): such a script stays off disk.
+                                if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) {
+                                    Err("contém um valor secreto".to_owned())
+                                } else { roteiro::salvar(arquivo, &novo).map_err(|e| e.to_string()) }
+                            }).map_err(|e| format!("não gravado: {e}"));
                             let texto = gravado.map_or_else(|e| e, |()| format!("gravado em {}", arquivo.display()));
                             r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
                         }

@@ -190,6 +190,16 @@ pub fn ja_aberto(passos: &[Passo], n: usize, obs: &Observation) -> bool {
     })
 }
 
+/// What a save merges with. A corrupt file is replaced; one of another format version may belong to a newer
+/// program or to the browser recorder, so it is never overwritten.
+pub fn anteriores(arquivo: &Path) -> Result<Option<Roteiro>, String> {
+    match carregar(arquivo) {
+        Err(e) if e.starts_with("versão ") => Err(format!("arquivo em {e}")),
+        Err(_) => Ok(None),
+        lido => lido,
+    }
+}
+
 /// `Ok(None)` only when there is no script yet; anything else unreadable is an error the result shows.
 pub fn carregar(arquivo: &Path) -> Result<Option<Roteiro>, String> {
     match std::fs::read(arquivo) {
@@ -200,6 +210,7 @@ pub fn carregar(arquivo: &Path) -> Result<Option<Roteiro>, String> {
             let variantes = match (lido.versao, lido.passos) {
                 (1, Some(passos)) => vec![Variante { passos }],
                 (VERSAO, _) => lido.variantes,
+                (1, None) => return Err("versão 1 sem `passos`".to_owned()),
                 (v, _) => return Err(format!("versão {v} do formato, esperada {VERSAO}")),
             };
             Ok(Some(Roteiro { versao: VERSAO, objetivo: lido.objetivo, variantes }))
@@ -209,9 +220,15 @@ pub fn carregar(arquivo: &Path) -> Result<Option<Roteiro>, String> {
 
 /// The variant to replay: the first whose step 1 fits the screen already read. Chosen once, before acting,
 /// because switching after a step ran would replay on top of it.
+/// A variant that fits what is on screen wins over one that only launches an app, which fits any screen.
 pub fn escolher<'a>(roteiro: &'a Roteiro, obs: &Observation, dados: &Map<String, Value>) -> Option<(usize, &'a [Passo])> {
-    roteiro.variantes.iter().enumerate()
-        .find(|(_, v)| !v.passos.is_empty() && (ja_aberto(&v.passos, 0, obs) || resolver(&v.passos[0], obs, dados).is_some()))
+    let primeira = |f: &dyn Fn(&[Passo]) -> bool| {
+        roteiro.variantes.iter().enumerate().find(|(_, v)| !v.passos.is_empty() && f(&v.passos))
+    };
+    let resolve = |p: &[Passo]| resolver(&p[0], obs, dados).is_some();
+    primeira(&|p| ja_aberto(p, 0, obs))
+        .or_else(|| primeira(&|p| p[0].acao.kind != ActionType::Launch && resolve(p)))
+        .or_else(|| primeira(&resolve))
         .map(|(i, v)| (i, v.passos.as_slice()))
 }
 
@@ -345,6 +362,15 @@ mod tests {
         let (i, passos) = escolher(&roteiro, &com_botoes(1), &Map::new()).unwrap();
         assert_eq!((i, passos[0].janela.classe.as_str()), (1, "TMS"));
         assert!(escolher(&roteiro, &tela("Nenhuma"), &Map::new()).is_none());
+    }
+
+    #[test]
+    fn a_variant_that_fits_the_screen_beats_one_that_starts_by_launching_blindly() {
+        let abrir = Action { kind: ActionType::Launch, application: Some("app".into()), ..Default::default() };
+        let lancando = vec![passo(&abrir, &tela("Desktop"), &Map::new()), clique_em("Nova")];
+        let roteiro = juntar(Some(juntar(None, "x", vec![clique_em("TMS")])), "x", lancando);
+        assert_eq!(escolher(&roteiro, &com_botoes(1), &Map::new()).map(|(i, _)| i), Some(1));
+        assert_eq!(escolher(&roteiro, &tela("Desktop"), &Map::new()).map(|(i, _)| i), Some(0));
     }
 
     #[test]
