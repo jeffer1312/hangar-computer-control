@@ -1720,6 +1720,29 @@ async fn launch_skipped_because_the_app_is_open_stays_in_the_rewritten_script() 
     let regravado: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
     assert_eq!(regravado["passos"].as_array().unwrap().len(), 2, "{regravado}");
     assert_eq!(regravado["passos"][0]["acao"]["type"], "launch");
+    let texto = r.roteiro.unwrap_or_default();
+    assert!(texto.starts_with("repetidos 1 de 2") && texto.contains("pulado"), "{texto}");
+}
+
+#[tokio::test]
+async fn launch_skipped_mid_script_does_not_look_like_a_screen_that_did_not_change() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let arquivo = roteiros(&pasta).remove(0);
+    let mut salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivo).unwrap()).unwrap();
+    let preencher = salvo["passos"][0].clone();
+    let abrir = json!({"janela": {"classe": "TMainForm", "titulo": "Editor"}, "alvo": null,
+        "acao": {"type": "launch", "application": "app"}, "valor": null, "mudou_tela": true});
+    salvo["passos"] = json!([preencher, abrir, preencher]);
+    std::fs::write(&arquivo, salvo.to_string()).unwrap();
+
+    let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana"), tree("p3", "Ana"), tree("p4", "Ana")]);
+    let (mut op, _server) = setup(vec![done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    let r = run(op, &con).await;
+    let texto = r.roteiro.clone().unwrap_or_default();
+    assert!(texto.starts_with("repetidos 2 de 3") && !texto.contains("parou"), "{}", r.resumo());
 }
 
 #[tokio::test]

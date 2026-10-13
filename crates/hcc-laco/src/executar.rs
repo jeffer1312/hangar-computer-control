@@ -338,17 +338,22 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
         Ok(None) => {}
         Ok(Some(gravado)) => {
             let mut parou = None;
+            // A skipped step acted on nothing: the screen read after it says nothing about the last action.
+            let mut pulou = false;
             for (n, passo) in gravado.passos.iter().enumerate() {
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let vista = controle.medir("observacao", Progresso::Observacao,
                     async { observar(s).await.map_err(erro_sessao) }).await?;
                 let atual = assinatura_tela(&vista);
-                if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
+                if !pulou {
+                    if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
+                }
                 anterior = Some(atual.clone());
                 // Kept as recorded: the next run may find the app closed.
-                if roteiro::ja_aberto(&gravado.passos, n, &vista) { gravados.push((passo.clone(), None)); continue; }
+                if roteiro::ja_aberto(&gravado.passos, n, &vista) { gravados.push((passo.clone(), None)); pulou = true; continue; }
                 let motivo = |m: &str| Some(format!("parou no passo {}: {m}", n + 1));
-                if n > 0 && gravado.passos[n - 1].mudou_tela == Some(true) && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
+                if !std::mem::take(&mut pulou) && n > 0 && gravado.passos[n - 1].mudou_tela == Some(true)
+                    && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
                     parou = motivo("a tela não mudou depois do passo anterior"); break;
                 }
                 if passo.acao.kind == ActionType::Mouse { parou = motivo("clique por coordenada volta ao Jev"); break; }
@@ -380,7 +385,9 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1)));
                 esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
             }
-            let mut texto = format!("repetidos {} de {} passos", gravados.len(), gravado.passos.len());
+            let pulados = gravados.iter().filter(|(_, i)| i.is_none()).count();
+            let mut texto = format!("repetidos {} de {} passos", gravados.len() - pulados, gravado.passos.len());
+            if pulados > 0 { texto.push_str(&format!(" ({pulados} pulado(s): app já aberto)")); }
             if let Some(p) = parou { texto.push_str(&format!("; {p}")); }
             r.roteiro = Some(texto);
         }
