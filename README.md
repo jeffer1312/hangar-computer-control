@@ -113,7 +113,10 @@ a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir 
 Objetivo que termina `concluído` vira roteiro em `~/.cache/hangar-computer-control/roteiros/<hash>.json`.
 A chave é o alvo, o texto do objetivo (sem diferença de maiúsculas e espaços) e os nomes das chaves de `dados`;
 os valores podem mudar entre execuções. Cada passo guarda a janela da frente (classe e título), o controle por
-papel, nome e ordem entre iguais, e o valor como referência à chave de `dados` (o valor em si nunca vai pro disco).
+papel, nome e ordem entre iguais (`{indice, de}`: se a tela tiver outro número de iguais, diverge), e o valor como
+referência à chave de `dados` (o valor em si nunca vai pro disco). O formato (`versao: 1`) é o mesmo do
+`browser_goal` do Hangar, que usa também `text`, `placeholder` e `test_id`; aqui ficam vazios. Arquivo de outra
+versão é reportado como ilegível e o objetivo segue pelo Jev.
 
 Na próxima chamada igual, o laço repete os passos sem perguntar ao Jev: lê a tela, acha o controle, executa.
 Para na primeira divergência (janela diferente, controle ausente, ação recusada, tela que não mudou onde mudou

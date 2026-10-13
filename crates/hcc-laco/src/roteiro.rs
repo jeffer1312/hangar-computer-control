@@ -20,8 +20,29 @@ pub struct Janela {
 pub enum Alvo {
     Janela(Janela),
     /// `ordem` tells apart controls with the same role and name (VCL edits often have no name).
-    Elemento { role: String, name: String, ordem: usize },
+    /// `text`, `placeholder` and `test_id` exist for the browser recorder sharing this format; UIA leaves them empty.
+    Elemento {
+        role: String,
+        name: String,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        placeholder: Option<String>,
+        #[serde(default)]
+        test_id: Option<String>,
+        ordem: Ordem,
+    },
 }
+
+/// Which of the `de` twins the step acted on; another count of twins on replay means the screen changed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Ordem {
+    pub indice: usize,
+    pub de: usize,
+}
+
+/// Format shared with the browser recorder in the hangar repo; bump both when it changes.
+pub const VERSAO: u32 = 1;
 
 /// A value from `dados` travels by key: the file never holds it, and the next run may pass another one.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -43,6 +64,7 @@ pub struct Passo {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Roteiro {
+    pub versao: u32,
     pub objetivo: String,
     pub passos: Vec<Passo>,
 }
@@ -72,8 +94,11 @@ pub fn passo(acao: &Action, obs: &Observation, dados: &Map<String, Value>) -> Pa
     let alvo = acao.target.as_deref().and_then(|id| {
         if let Some(i) = obs.elements.iter().position(|e| e.id == id) {
             let e = &obs.elements[i];
-            let ordem = obs.elements[..i].iter().filter(|o| o.role == e.role && o.name == e.name).count();
-            return Some(Alvo::Elemento { role: e.role.clone(), name: e.name.clone(), ordem });
+            let gemeo = |o: &&hcc_protocolo::Element| o.role == e.role && o.name == e.name;
+            let ordem = Ordem { indice: obs.elements[..i].iter().filter(gemeo).count(), de: obs.elements.iter().filter(gemeo).count() };
+            return Some(Alvo::Elemento {
+                role: e.role.clone(), name: e.name.clone(), text: None, placeholder: None, test_id: None, ordem,
+            });
         }
         obs.windows.iter().find(|w| w.id == id)
             .map(|w| Alvo::Janela(Janela { classe: w.class_name.clone(), titulo: w.name.clone() }))
@@ -96,8 +121,10 @@ pub fn resolver(passo: &Passo, obs: &Observation, dados: &Map<String, Value>) ->
     }
     let target = match &passo.alvo {
         None => None,
-        Some(Alvo::Elemento { role, name, ordem }) => {
-            Some(obs.elements.iter().filter(|e| &e.role == role && &e.name == name).nth(*ordem)?.id.clone())
+        Some(Alvo::Elemento { role, name, ordem, .. }) => {
+            let gemeos: Vec<_> = obs.elements.iter().filter(|e| &e.role == role && &e.name == name).collect();
+            if gemeos.len() != ordem.de { return None; }
+            Some(gemeos.get(ordem.indice)?.id.clone())
         }
         Some(Alvo::Janela(j)) => Some(obs.windows.iter().find(|w| w.class_name == j.classe && w.name == j.titulo)?.id.clone()),
     };
@@ -121,7 +148,13 @@ pub fn carregar(arquivo: &Path) -> Result<Option<Roteiro>, String> {
     match std::fs::read(arquivo) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| e.to_string()),
+        Ok(bytes) => {
+            let roteiro: Roteiro = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            if roteiro.versao != VERSAO {
+                return Err(format!("versão {} do formato, esperada {VERSAO}", roteiro.versao));
+            }
+            Ok(Some(roteiro))
+        }
     }
 }
 
@@ -170,5 +203,33 @@ mod tests {
         assert!(ja_aberto(&passos, 0, &tela("Calculator")));
         assert!(!ja_aberto(&passos, 0, &tela("Hangar")));
         assert!(!ja_aberto(&passos, 1, &tela("Calculator")));
+    }
+
+    fn com_botoes(n: usize) -> Observation {
+        let mut obs = tela("TMS");
+        obs.elements = (0..n).map(|i| serde_json::from_value(json!({
+            "id": format!("e{i}"), "name": "", "role": "button", "value": null, "enabled": true,
+            "rect": null, "focused": false, "actions": ["invoke"],
+        })).unwrap()).collect();
+        obs
+    }
+
+    #[test]
+    fn twin_controls_must_be_as_many_as_when_recorded() {
+        let clique = Action { kind: ActionType::Invoke, target: Some("e1".into()), ..Default::default() };
+        let gravado = passo(&clique, &com_botoes(2), &Map::new());
+        assert_eq!(resolver(&gravado, &com_botoes(2), &Map::new()).and_then(|a| a.target), Some("e1".into()));
+        assert_eq!(resolver(&gravado, &com_botoes(3), &Map::new()), None);
+    }
+
+    #[test]
+    fn script_from_another_format_version_is_refused() {
+        let pasta = std::env::temp_dir().join(format!("hcc-roteiro-versao-{}", std::process::id()));
+        let arquivo = pasta.join("r.json");
+        salvar(&arquivo, &Roteiro { versao: VERSAO, objetivo: "x".into(), passos: vec![] }).unwrap();
+        assert_eq!(carregar(&arquivo).unwrap().map(|r| r.versao), Some(1));
+        std::fs::write(&arquivo, r#"{"versao":2,"objetivo":"x","passos":[]}"#).unwrap();
+        assert!(carregar(&arquivo).unwrap_err().contains("versão 2"));
+        std::fs::remove_dir_all(pasta).unwrap();
     }
 }

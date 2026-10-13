@@ -330,7 +330,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
     let mut fechados: Vec<String> = Vec::new();
     let arquivo = op.roteiros.as_deref().map(|p| roteiro::arquivo(p, op.config.as_deref(), &op.texto, &op.dados));
-    let mut gravados: Vec<(roteiro::Passo, usize)> = Vec::new();
+    let mut gravados: Vec<(roteiro::Passo, Option<usize>)> = Vec::new();
     // Replay: each step resolved on the current screen, no Jev; the first divergence hands over to the loop,
     // whose first cycle also asks Jev whether the goal is done.
     match arquivo.as_deref().filter(|_| !op.refazer).map(roteiro::carregar).transpose().map(Option::flatten) {
@@ -345,7 +345,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 let atual = assinatura_tela(&vista);
                 if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
                 anterior = Some(atual.clone());
-                if roteiro::ja_aberto(&gravado.passos, n, &vista) { continue; }
+                // Kept as recorded: the next run may find the app closed.
+                if roteiro::ja_aberto(&gravado.passos, n, &vista) { gravados.push((passo.clone(), None)); continue; }
                 let motivo = |m: &str| Some(format!("parou no passo {}: {m}", n + 1));
                 if n > 0 && gravado.passos[n - 1].mudou_tela == Some(true) && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
                     parou = motivo("a tela não mudou depois do passo anterior"); break;
@@ -376,7 +377,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                     Ok(_) => {}
                 }
                 foco_escolhido |= escolhe_foco(&acao) || invoca_editavel(&acao, &vista);
-                gravados.push((roteiro::passo(&acao, &vista, &op.dados), recentes.len() - 1));
+                gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1)));
                 esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
             }
             let mut texto = format!("repetidos {} de {} passos", gravados.len(), gravado.passos.len());
@@ -511,8 +512,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                         }
                         r.ok = true;
                         if let Some(arquivo) = arquivo.as_deref().filter(|_| !gravados.is_empty()) {
-                            let passos = gravados.drain(..).map(|(mut p, i)| { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); p }).collect();
-                            let novo = roteiro::Roteiro { objetivo: op.texto.clone(), passos };
+                            let passos = gravados.drain(..).map(|(mut p, i)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
+                            let novo = roteiro::Roteiro { versao: roteiro::VERSAO, objetivo: op.texto.clone(), passos };
                             // Any field may echo a secret (goal text, a title, a vision label): such a script stays off disk.
                             let gravado = if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) {
                                 Err("não gravado: contém um valor secreto".to_owned())
@@ -608,7 +609,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
             };
             r.passos.push(format!("{}. {nome} [{}]", r.passos.len() + 1, percentual(decisao.p)));
             if !falhou && op.roteiros.is_some() {
-                gravados.push((roteiro::passo(acao, &vista, &op.dados), recentes.len() - 1));
+                gravados.push((roteiro::passo(acao, &vista, &op.dados), Some(recentes.len() - 1)));
             }
             esperar_efeito(conector, sessao, controle, acao, &vista, &atual, secretos).await?;
             let Some(proxima) = fila.next().filter(|_| !falhou) else { break };
