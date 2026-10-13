@@ -100,12 +100,35 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   o caminho do último print (se o LLM foi chamado) e a pasta de registro (`observacao.json`, `jev.jsonl`).
   Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print
   (`Leitura: …`) e/ou o texto visível da janela pela árvore (`Texto na janela: …`, até 2000 caracteres).
+  `refazer=true` ignora o roteiro gravado (abaixo).
 - `ver_tela()`: print do desktop, devolve o caminho do PNG. Pra quando `objetivo` parou e você quer olhar.
 - `estado()`: diz se o desktop está acessível e a resolução.
 
 Exemplos de `texto` que funcionaram: "abrir o Bloco de Notas, digitar o texto informado e salvar o arquivo
 no caminho informado" (com `dados={"texto": …, "caminho": …}`); "no Chrome, no GitLab da empresa, abrir
 a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir em Sistema > Sobre".
+
+### Roteiros (gravar e repetir)
+
+Objetivo que termina `concluído` vira roteiro em `~/.cache/hangar-computer-control/roteiros/<hash>.json`.
+A chave é o alvo, o texto do objetivo (sem diferença de maiúsculas e espaços) e os nomes das chaves de `dados`;
+os valores podem mudar entre execuções. Cada passo guarda a janela da frente (classe e título), o controle por
+papel, nome e ordem entre iguais, e o valor como referência à chave de `dados` (o valor em si nunca vai pro disco).
+
+Na próxima chamada igual, o laço repete os passos sem perguntar ao Jev: lê a tela, acha o controle, executa.
+Para na primeira divergência (janela diferente, controle ausente, ação recusada, tela que não mudou onde mudou
+na gravação) e segue pelo Jev a partir da tela atual. O fim sempre passa pela confirmação normal do Jev; se o
+objetivo concluir, o roteiro é regravado. O resultado traz `roteiro: repetidos N de M passos; gravado em …`
+e os passos repetidos aparecem com `[roteiro]`. Apagar o arquivo ou `refazer=true` força o caminho pelo Jev.
+
+- Clique por coordenada nunca se repete: o roteiro devolve ao Jev ali, porque a coordenada não diz se o mesmo
+  item ainda está embaixo.
+- Abrir um app é pulado quando a janela do passo seguinte já existe (não abre segunda instância).
+- Roteiro em que qualquer campo traria um valor secreto de `dados` (texto do objetivo, título, rótulo da visão)
+  não é gravado; o resultado diz `roteiro: não gravado: contém um valor secreto`.
+- Toda ação bem-sucedida da corrida entra no roteiro, inclusive desvios que o Jev corrigiu depois (menu errado
+  seguido de Esc); `refazer=true` regrava pelo caminho atual.
+- Cada passo repetido ainda lê a árvore inteira, então no Delphi o ganho é só o do Jev e da visão.
 
 ### Progresso durante `objetivo`
 

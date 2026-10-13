@@ -272,7 +272,7 @@ fn objective_inputs_and_defaults_reach_motor() {
     s.inicializar();
     let r = s.chamar(3, "objetivo", json!({"texto": "digitar olá"}), None);
     let esperado = format!(
-        "concluído: fake\ntexto=digitar olá; max_passos=12; dados={{}}; limite=240s; config={}",
+        "concluído: fake\ntexto=digitar olá; max_passos=12; dados={{}}; limite=240s; config={}; refazer=false",
         amb.alvo("vm-a-agent.json").display()
     );
     assert_eq!(texto(&r), esperado);
@@ -281,10 +281,11 @@ fn objective_inputs_and_defaults_reach_motor() {
     let r = s.chamar(
         4,
         "objetivo",
-        json!({"texto": "t", "max_passos": 3, "dados": {"nome": "Zé"}, "limite_segundos": 1.5}),
+        json!({"texto": "t", "max_passos": 3, "dados": {"nome": "Zé"}, "limite_segundos": 1.5, "refazer": true}),
         None,
     );
     assert!(texto(&r).contains("max_passos=3; dados={\"nome\":\"Zé\"}; limite=1.5s;"), "{r}");
+    assert!(texto(&r).ends_with("; refazer=true"), "{r}");
     let r = s.chamar(5, "ver_tela", json!({}), None);
     assert_eq!(texto(&r), format!("{}; 0.00s", amb.alvo("vm-a-agent.json").display()));
 }

@@ -109,6 +109,8 @@ impl Motor for MotorReal {
                 config: p.config,
                 jev: jev(),
                 llm: Llm::from_env(),
+                roteiros: std::env::home_dir().map(|h| h.join(".cache/hangar-computer-control/roteiros")),
+                refazer: p.refazer,
             };
             let etapa = move |e: Progresso| progresso(rotulo(&e));
             executar(op, &conector, cancel, &etapa).await.resumo()

@@ -8,6 +8,7 @@ pub struct Resultado {
     pub tempos: Vec<String>,
     pub captura: Option<PathBuf>,
     pub registro: Option<PathBuf>,
+    pub roteiro: Option<String>,
 }
 
 impl Resultado {
@@ -17,6 +18,7 @@ impl Resultado {
         linhas.push(format!("tempos: {}", self.tempos.join("; ")));
         linhas.push(self.captura.as_ref().map_or_else(|| "sem captura".into(), |p| format!("captura: {}", p.display())));
         if let Some(p) = &self.registro { linhas.push(format!("registro: {}", p.display())); }
+        if let Some(t) = &self.roteiro { linhas.push(format!("roteiro: {t}")); }
         linhas.join("\n")
     }
 }

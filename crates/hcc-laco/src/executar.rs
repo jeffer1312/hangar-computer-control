@@ -22,6 +22,7 @@ use crate::jev::Jev;
 use crate::llm::Llm;
 use crate::objetivo::{literais, nome_parecido, pede_leitura, texto_janela};
 use crate::resultado::Resultado;
+use crate::roteiro;
 use crate::tipos::{Ajuda, Candidato, Decisao, Escolha, Progresso, Registro};
 
 const CANCELADO: &str = "RuntimeError: objetivo cancelado; nenhuma nova ação será enviada";
@@ -35,6 +36,9 @@ pub struct Opcoes {
     pub config: Option<PathBuf>,
     pub jev: Option<Jev>,
     pub llm: Llm,
+    /// Folder of recorded scripts; `None` turns record and replay off.
+    pub roteiros: Option<PathBuf>,
+    pub refazer: bool,
 }
 
 struct Controle<'a> {
@@ -104,6 +108,16 @@ impl Segredos {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn tem_segredo(&self, valor: &Value) -> bool {
+        let casa = |s: &str| self.padrao.as_ref().is_some_and(|r| r.is_match(s));
+        match valor {
+            Value::String(s) => casa(s),
+            Value::Array(a) => a.iter().any(|v| self.tem_segredo(v)),
+            Value::Object(m) => m.iter().any(|(k, v)| casa(k) || self.tem_segredo(v)),
+            _ => false,
         }
     }
 
@@ -281,6 +295,26 @@ async fn reconectar<C: Connector>(conector: &C, sessao: &mut Option<C::S>, contr
     Ok(())
 }
 
+async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
+    acao: &Action, vista: &Observation, atual: &AssinaturaTela, secretos: &Segredos) -> Result<(), String> {
+    // Blind (empty tree): only the title could change; no polling, the next observation looks.
+    let prazo = Instant::now() + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
+        else if vista.elements.is_empty() { Duration::from_millis(800) } else { Duration::from_secs(3) };
+    controle.esperar(Duration::from_millis(800)).await?;
+    while Instant::now() < prazo {
+        let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+        match controle.rodar(async { Ok(observar(s).await) }).await? {
+            Ok(nova) if assinatura_tela(&nova) != *atual => break,
+            Ok(_) => {}
+            Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
+            Err(e) if e.tipo() == "RuntimeError" => eprintln!("observação durante espera ignorada: {}", secretos.texto(&e.to_string())),
+            Err(e) => return Err(erro_sessao(e)),
+        }
+        controle.esperar(Duration::from_secs(1)).await?;
+    }
+    Ok(())
+}
+
 async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
     r: &mut Resultado, secretos: &Segredos) -> Result<(), String> {
     let jev = validar(op)?;
@@ -295,6 +329,61 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut foco_escolhido = false;
     let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
     let mut fechados: Vec<String> = Vec::new();
+    let arquivo = op.roteiros.as_deref().map(|p| roteiro::arquivo(p, op.config.as_deref(), &op.texto, &op.dados));
+    let mut gravados: Vec<(roteiro::Passo, usize)> = Vec::new();
+    // Replay: each step resolved on the current screen, no Jev; the first divergence hands over to the loop,
+    // whose first cycle also asks Jev whether the goal is done.
+    match arquivo.as_deref().filter(|_| !op.refazer).map(roteiro::carregar).transpose().map(Option::flatten) {
+        Err(e) => r.roteiro = Some(format!("ilegível, seguindo pelo Jev: {}", secretos.texto(&e))),
+        Ok(None) => {}
+        Ok(Some(gravado)) => {
+            let mut parou = None;
+            for (n, passo) in gravado.passos.iter().enumerate() {
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                let vista = controle.medir("observacao", Progresso::Observacao,
+                    async { observar(s).await.map_err(erro_sessao) }).await?;
+                let atual = assinatura_tela(&vista);
+                if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
+                anterior = Some(atual.clone());
+                if roteiro::ja_aberto(&gravado.passos, n, &vista) { continue; }
+                let motivo = |m: &str| Some(format!("parou no passo {}: {m}", n + 1));
+                if n > 0 && gravado.passos[n - 1].mudou_tela == Some(true) && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
+                    parou = motivo("a tela não mudou depois do passo anterior"); break;
+                }
+                if passo.acao.kind == ActionType::Mouse { parou = motivo("clique por coordenada volta ao Jev"); break; }
+                let Some(acao) = roteiro::resolver(passo, &vista, &op.dados) else {
+                    parou = motivo("janela da frente ou controle diferente do gravado"); break;
+                };
+                let nome = secretos.descricao(&acao, &vista, true);
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false)),
+                    async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
+                let resultado = match &retorno {
+                    Ok(ret) if ret.ok => "ok".to_owned(),
+                    Ok(_) => "{'ok': False}".to_owned(),
+                    Err(e) => secretos.texto(&format!("NOT executed: {e}")),
+                };
+                recentes.push(Registro { action: nome.clone(), result: resultado.clone(),
+                    screen_changed: None, target_rect: None, clique: None, executada: retorno.is_ok() });
+                r.passos.push(format!("{}. {nome} [roteiro]", r.passos.len() + 1));
+                match retorno {
+                    Err(e) => {
+                        parou = motivo(&resultado);
+                        if reconectavel(&e) && !controle.cancel.is_cancelled() { reconectar(conector, sessao, controle).await?; }
+                        break;
+                    }
+                    Ok(ret) if !ret.ok => { parou = motivo("o agente recusou a ação"); break; }
+                    Ok(_) => {}
+                }
+                foco_escolhido |= escolhe_foco(&acao) || invoca_editavel(&acao, &vista);
+                gravados.push((roteiro::passo(&acao, &vista, &op.dados), recentes.len() - 1));
+                esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
+            }
+            let mut texto = format!("repetidos {} de {} passos", gravados.len(), gravado.passos.len());
+            if let Some(p) = parou { texto.push_str(&format!("; {p}")); }
+            r.roteiro = Some(texto);
+        }
+    }
     for ciclo in 0..=op.max_passos {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let obs = controle.medir("observacao", Progresso::Observacao,
@@ -421,6 +510,16 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                             continue;
                         }
                         r.ok = true;
+                        if let Some(arquivo) = arquivo.as_deref().filter(|_| !gravados.is_empty()) {
+                            let passos = gravados.drain(..).map(|(mut p, i)| { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); p }).collect();
+                            let novo = roteiro::Roteiro { objetivo: op.texto.clone(), passos };
+                            // Any field may echo a secret (goal text, a title, a vision label): such a script stays off disk.
+                            let gravado = if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) {
+                                Err("não gravado: contém um valor secreto".to_owned())
+                            } else { roteiro::salvar(arquivo, &novo).map_err(|e| format!("não gravado: {e}")) };
+                            let texto = gravado.map_or_else(|e| e, |()| format!("gravado em {}", arquivo.display()));
+                            r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
+                        }
                         let janela = estado["window"].as_str().map_or_else(|| "None".into(), py_repr);
                         r.motivo = if leitura_forte {
                             format!("objetivo confirmado pela leitura da tela ({}) na janela {janela}. Leitura: {leitura}", percentual(p))
@@ -508,21 +607,10 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 }
             };
             r.passos.push(format!("{}. {nome} [{}]", r.passos.len() + 1, percentual(decisao.p)));
-            // Blind (empty tree): only the title could change; no polling, the next observation looks.
-            let prazo = Instant::now() + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
-                else if vista.elements.is_empty() { Duration::from_millis(800) } else { Duration::from_secs(3) };
-            controle.esperar(Duration::from_millis(800)).await?;
-            while Instant::now() < prazo {
-                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                match controle.rodar(async { Ok(observar(s).await) }).await? {
-                    Ok(nova) if assinatura_tela(&nova) != atual => break,
-                    Ok(_) => {}
-                    Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
-                    Err(e) if e.tipo() == "RuntimeError" => eprintln!("observação durante espera ignorada: {}", secretos.texto(&e.to_string())),
-                    Err(e) => return Err(erro_sessao(e)),
-                }
-                controle.esperar(Duration::from_secs(1)).await?;
+            if !falhou && op.roteiros.is_some() {
+                gravados.push((roteiro::passo(acao, &vista, &op.dados), recentes.len() - 1));
             }
+            esperar_efeito(conector, sessao, controle, acao, &vista, &atual, secretos).await?;
             let Some(proxima) = fila.next().filter(|_| !falhou) else { break };
             // The agent consumes each observation id: the next key/text needs a fresh one.
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;

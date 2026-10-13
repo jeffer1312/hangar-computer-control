@@ -17,6 +17,7 @@ pub struct PedidoObjetivo {
     pub dados: serde_json::Map<String, Value>,
     pub limite: Duration,
     pub config: Option<PathBuf>,
+    pub refazer: bool,
 }
 
 pub trait Motor: Send + Sync + 'static {
@@ -73,12 +74,13 @@ impl Motor for FakeMotor {
                 };
             }
             format!(
-                "concluído: fake\ntexto={}; max_passos={}; dados={}; limite={}s; config={}",
+                "concluído: fake\ntexto={}; max_passos={}; dados={}; limite={}s; config={}; refazer={}",
                 p.texto,
                 p.max_passos,
                 Value::Object(p.dados),
                 p.limite.as_secs_f64(),
-                p.config.map(|c| c.display().to_string()).unwrap_or_default()
+                p.config.map(|c| c.display().to_string()).unwrap_or_default(),
+                p.refazer
             )
         })
     }

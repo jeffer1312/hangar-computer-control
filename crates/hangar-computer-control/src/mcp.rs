@@ -24,7 +24,7 @@ use crate::alvos;
 use crate::motor::{Motor, PedidoObjetivo};
 use crate::progresso;
 
-const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    limite_segundos é o orçamento total; max_passos limita os ciclos internos.";
+const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    limite_segundos é o orçamento total; max_passos limita os ciclos internos.\n\n    Objetivo concluído vira roteiro: a mesma frase, com as mesmas chaves em `dados`,\n    no mesmo alvo repete os passos sem consultar o Jev a cada um e volta ao Jev se a\n    tela divergir. refazer=true ignora o roteiro gravado.";
 const DESC_VER_TELA: &str = "Captura a tela do desktop e devolve o caminho do arquivo PNG.\n\n    Para quando o `objetivo` parou e você precisa olhar o que há na tela.\n    Cite o caminho devolvido na sua resposta para que o usuário veja a imagem.";
 const DESC_ESTADO: &str = "Diz se o desktop está acessível e em qual resolução.";
 
@@ -71,6 +71,7 @@ fn ferramentas() -> Vec<Tool> {
                     "dados": {"anyOf": [{"additionalProperties": true, "type": "object"},
                         {"type": "null"}], "default": null, "title": "Dados"},
                     "limite_segundos": {"default": 240, "title": "Limite Segundos", "type": "number"},
+                    "refazer": {"default": false, "title": "Refazer", "type": "boolean"},
                     "alvo": alvo_schema()
                 },
                 "required": ["texto"], "type": "object", "title": "objetivoArguments"
@@ -98,6 +99,8 @@ struct ArgsObjetivo {
     dados: Option<Map<String, Value>>,
     #[serde(default = "limite_padrao")]
     limite_segundos: f64,
+    #[serde(default)]
+    refazer: bool,
     #[serde(default)]
     alvo: Option<String>,
 }
@@ -187,6 +190,7 @@ impl Servidor {
                 if a.limite_segundos > 0.0 { Duration::MAX } else { Duration::ZERO },
             ),
             config,
+            refazer: a.refazer,
         };
 
         let cancel = self.cancelamento(ctx.ct.clone());

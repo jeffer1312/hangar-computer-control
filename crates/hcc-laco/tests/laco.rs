@@ -33,6 +33,7 @@ async fn setup(answers: Vec<Answer>) -> (Opcoes, MockServer) {
         dados: json!({"nome":"Ana"}).as_object().unwrap().clone(), limite: seconds(240), config: Some(config),
         jev: Some(Jev::new(format!("{}/jev", server.uri()), "fake-key".into(), JEV_MODEL.into())),
         llm: Llm::new(format!("{}/llm", server.uri()), "fake-model".into(), None, Some("fake-key".into())),
+        roteiros: None, refazer: false,
     };
     (op, server)
 }
@@ -1247,7 +1248,7 @@ async fn oversized_secret_mask_fails_closed() {
 fn summary_keeps_python_line_order() {
     let r = Resultado { ok: true, motivo: "pronto".into(), passos: vec!["1. ação [90%]".into()],
         tempos: vec!["conexao=0.01s".into(), "total=1.00s".into()],
-        captura: Some(PathBuf::from("/registro/tela.png")), registro: Some(PathBuf::from("/registro")) };
+        captura: Some(PathBuf::from("/registro/tela.png")), registro: Some(PathBuf::from("/registro")), roteiro: None };
     assert_eq!(r.resumo(), "concluído: pronto\n1. ação [90%]\ntempos: conexao=0.01s; total=1.00s\ncaptura: /registro/tela.png\nregistro: /registro");
 }
 
@@ -1636,4 +1637,134 @@ fn sentence_opening_verb_is_not_a_misheard_name() {
     let mut obs = tree("o1", "");
     obs.elements[1].name = "Abre".into();
     assert_eq!(nome_parecido("Abra o menu", &obs), None);
+}
+
+fn roteiros(r: &PathBuf) -> Vec<PathBuf> {
+    std::fs::read_dir(r).map(|d| d.map(|e| e.unwrap().path()).collect()).unwrap_or_default()
+}
+
+async fn gravado(pasta: &std::path::Path) -> PathBuf {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.to_path_buf());
+    let config = op.config.clone().unwrap();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    config
+}
+
+#[tokio::test]
+async fn confirmed_goal_is_replayed_without_asking_jev_per_step() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let arquivos = roteiros(&pasta);
+    assert_eq!(arquivos.len(), 1);
+    let salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivos[0]).unwrap()).unwrap();
+    assert_eq!(salvo["passos"][0]["valor"], json!({"dados": "nome"}), "valor de dados vai por referência");
+    assert!(salvo["passos"][0]["acao"].get("value").is_none());
+
+    let mut segunda = tree("p1", "");
+    segunda.elements.swap(0, 1);
+    segunda.elements[0].id = "e0".into();
+    segunda.elements[1].id = "e1".into();
+    let mut fim = tree("p2", "Bia");
+    fim.elements.swap(0, 1);
+    let con = FakeConnector::new(vec![segunda, fim]);
+    let (mut op, server) = setup(vec![done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    op.dados = json!({"nome":"Bia"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let acts: Vec<_> = con.state.lock().unwrap().acts.iter().map(|(a, id, _)| (a.clone(), id.clone())).collect();
+    assert_eq!(acts, vec![(action(json!({"type":"set_value","target":"e1","value":"Bia"})), "p1".into())]);
+    assert_eq!(bodies(&server).await.len(), 1, "só a confirmação final vai ao Jev");
+    assert!(r.passos[0].ends_with("[roteiro]"), "{}", r.resumo());
+}
+
+#[tokio::test]
+async fn diverging_screen_falls_back_to_jev_and_rewrites_the_script() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let mut outra = tree("p1", "");
+    outra.elements[0].name = "Nome completo".into();
+    let mut fim = tree("p2", "Ana");
+    fim.elements[0].name = "Nome completo".into();
+    let con = FakeConnector::new(vec![outra, fim]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    assert!(std::fs::read_to_string(&roteiros(&pasta)[0]).unwrap().contains("Nome completo"));
+}
+
+#[tokio::test]
+async fn redo_ignores_the_script() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana")]);
+    let (mut op, server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    op.refazer = true;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(bodies(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn stopped_goal_records_nothing() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    op.roteiros = Some(pasta.clone());
+    let r = run(op, &con).await;
+    assert!(!r.ok, "{}", r.resumo());
+    assert!(roteiros(&pasta).is_empty());
+}
+
+#[tokio::test]
+async fn script_with_a_secret_anywhere_is_not_recorded() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.dados = json!({"nome":"Ana","senha":"Nome"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(roteiros(&pasta).is_empty());
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("não gravado")), "{}", r.resumo());
+}
+
+#[tokio::test]
+async fn unreadable_script_is_reported_and_the_loop_still_runs() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    std::fs::write(&roteiros(&pasta)[0], "{").unwrap();
+    let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.starts_with("ilegível")), "{}", r.resumo());
+}
+
+#[tokio::test]
+async fn replay_says_why_it_stopped() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let mut outra = tree("p1", "");
+    outra.elements[0].name = "Nome completo".into();
+    let mut fim = tree("p2", "Ana");
+    fim.elements[0].name = "Nome completo".into();
+    let con = FakeConnector::new(vec![outra, fim]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    let r = run(op, &con).await;
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.starts_with("repetidos 0 de 1 passos; parou no passo 1: ")), "{}", r.resumo());
 }
