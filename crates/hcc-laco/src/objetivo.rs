@@ -74,7 +74,7 @@ pub fn so_leitura(goal: &str) -> bool {
     ).unwrap());
     // Any change the goal asks (delete, save, copy, reply...) is an action: only a goal that just reads skips Jev.
     static MUDA: LazyLock<Regex> = LazyLock::new(|| Regex::new(
-        r"(?i)\b(salv|copi|col[ae]|cri[ae]|edit|alter|mud|renome|mov|instal|desinstal|baix|carreg|imprim|exporte|import|save|copy|paste|create|delete|close|reply|write|edit|move|print|download|upload)\w*",
+        r"(?i)\b(encaminh|limp|arquiv|salv|copi|col[ae]|cri[ae]|edit|alter|mud|renome|mov|instal|desinstal|baix|carreg|imprim|exporte|import|save|copy|paste|create|delete|close|reply|write|edit|move|print|download|upload|forward|clear|archive|remove|send)\w*",
     ).unwrap());
     let afirmado = crate::candidatos::afirmado(goal);
     LEITURA.is_match(&afirmado) && !ACAO.is_match(&afirmado) && !ACAO_DIRIGIDA.is_match(&afirmado) && !MUDA.is_match(&afirmado)

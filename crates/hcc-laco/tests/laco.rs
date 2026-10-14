@@ -2167,7 +2167,8 @@ async fn goal_names_in_a_window_that_appeared_confirm_an_app_opened_without_focu
 #[test]
 fn reading_goal_that_also_asks_to_change_something_is_not_reading_only() {
     use hcc_laco::objetivo::so_leitura;
-    for goal in ["apague a mensagem e leia o título", "salve o arquivo e leia o aviso", "leia o e-mail e responda", "copie o texto e leia"] {
+    for goal in ["apague a mensagem e leia o título", "salve o arquivo e leia o aviso", "leia o e-mail e responda", "copie o texto e leia",
+        "leia o e-mail e encaminhe", "leia e arquive a conversa", "limpe o filtro e leia"] {
         assert!(!so_leitura(goal), "{goal}");
     }
 }
