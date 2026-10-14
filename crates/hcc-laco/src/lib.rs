@@ -14,3 +14,4 @@ pub mod executar;
 pub mod resultado;
 pub mod objetivo;
 pub mod roteiro;
+pub mod trecho;

@@ -1,6 +1,8 @@
 //! What the goal text itself gives the loop: values to type, a reading request, a misheard name.
 
 use std::collections::HashSet;
+
+use serde_json::{Map, Value};
 use std::sync::LazyLock;
 
 use hcc_protocolo::Observation;
@@ -40,6 +42,29 @@ pub(crate) fn pede_digitar(goal: &str) -> bool {
 
 pub fn pede_leitura(goal: &str) -> bool {
     LEITURA.is_match(goal) && !ACAO_DIRIGIDA.is_match(goal)
+}
+
+/// What in the goal may change from one use to the next: quoted texts, URLs, proper names (a run of them too),
+/// the term after a search verb, and the non-secret values of `dados`. Pieces turn these into slots.
+pub fn valores_do_objetivo(goal: &str, dados: &Map<String, Value>, segredos: &HashSet<String>) -> Vec<String> {
+    static BUSCA: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+        r"(?i)\b(?:pesquis|busc|procur|search|find)\w*\s+(?:(?:por|pelo|pela|o|a|os|as|for|the)\s+)?([^\s,.;:!?]{3,})").unwrap());
+    let inicio = |i: usize| goal[..i].trim_end().is_empty() || goal[..i].trim_end().ends_with(['.', '!', '?', ':']);
+    let nomes: Vec<regex::Match> = NOME.find_iter(goal).filter(|m| !inicio(m.start())).collect();
+    let mut valores: Vec<String> = LITERAIS.captures_iter(goal).filter_map(|c| c.iter().skip(1).flatten().next()).map(|m| m.as_str().to_owned())
+        .chain(URL.find_iter(goal).map(|m| m.as_str().trim_end_matches(['.', ',', ';', ':', ')', '!', '?']).to_owned()))
+        .chain(BUSCA.captures_iter(goal).filter_map(|c| c.get(1)).map(|m| m.as_str().to_owned()))
+        .chain(nomes.iter().map(|m| m.as_str().to_owned()))
+        .collect();
+    // "Rafael Freitas": names separated by a single space are also one name.
+    for i in 0..nomes.len() {
+        let mut fim = i;
+        while fim + 1 < nomes.len() && goal[nomes[fim].end()..nomes[fim + 1].start()] == *" " { fim += 1; }
+        if fim > i { valores.push(goal[nomes[i].start()..nomes[fim].end()].to_owned()); }
+    }
+    valores.extend(dados.values().map(crate::candidatos::py_str));
+    let mut vistos = HashSet::new();
+    valores.into_iter().filter(|v| v.chars().count() >= 3 && !segredos.contains(v) && vistos.insert(v.clone())).collect()
 }
 
 /// A reading goal whose affirmed part asks no action: the screen is read and returned, nothing is clicked.
@@ -145,6 +170,17 @@ mod tests {
     #[test]
     fn literais_pegam_citacao_e_url_sem_pontuacao_final() {
         assert_eq!(literais("digite https://x.com, depois 'olá' e \"ok\"."), vec!["olá", "ok", "https://x.com"]);
+    }
+
+    #[test]
+    fn goal_values_that_may_change_between_uses() {
+        let dados = serde_json::json!({"nome": "Bia", "senha": "x9"}).as_object().unwrap().clone();
+        let segredos = std::collections::HashSet::from(["x9".to_owned()]);
+        let v = valores_do_objetivo("Abra a conversa com Rafael Freitas e pesquise openrouter, depois \"DevOps\" em https://x.dev/a", &dados, &segredos);
+        for esperado in ["DevOps", "https://x.dev/a", "Rafael Freitas", "Rafael", "Freitas", "openrouter", "Bia"] {
+            assert!(v.contains(&esperado.to_owned()), "{esperado} in {v:?}");
+        }
+        assert!(!v.iter().any(|x| x == "Abra" || x == "x9"), "a sentence-opening verb and a secret are never values: {v:?}");
     }
 
     // "messages" named a table row and was typed in the site's search box.

@@ -1,5 +1,6 @@
 //! Scripts: the actions of a confirmed goal, replayed by selector without asking Jev at each step.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use hcc_protocolo::{Action, ActionType, Observation};
@@ -8,6 +9,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::candidatos::py_str;
+use crate::trecho::{mesmo_titulo, preencher};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Janela {
@@ -50,6 +52,8 @@ pub const VERSAO: u32 = 2;
 pub enum Valor {
     Dados(String),
     Literal(String),
+    /// A piece's slot: the value changes between uses (a person, a name, a search term).
+    Parametro(String),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -108,7 +112,7 @@ pub fn arquivo(pasta: &Path, texto: &str, dados: &Map<String, Value>) -> PathBuf
     pasta.join(format!("desktop-{slug}-{hash}.json"))
 }
 
-fn slug(texto: &str) -> String {
+pub(crate) fn slug(texto: &str) -> String {
     let mut s = String::new();
     for c in texto.to_lowercase().chars() {
         let c = match c {
@@ -159,12 +163,27 @@ pub fn passo(acao: &Action, obs: &Observation, dados: &Map<String, Value>) -> Pa
     Passo { janela: janela(obs), alvo, acao: Action { target: None, value: None, ..acao.clone() }, valor, mudou_tela: None }
 }
 
-/// The action for this screen, or `None` when the screen diverged from the recording.
 pub fn resolver(passo: &Passo, obs: &Observation, dados: &Map<String, Value>) -> Option<Action> {
+    resolver_em(passo, obs, dados, None)
+}
+
+/// A piece's step: names and titles are templates filled with `params`.
+pub fn resolver_com(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, params: &BTreeMap<String, String>) -> Option<Action> {
+    resolver_em(passo, obs, dados, Some(params))
+}
+
+/// The action for this screen, or `None` when the screen diverged from the recording.
+fn resolver_em(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, params: Option<&BTreeMap<String, String>>) -> Option<Action> {
     let agora = janela(obs);
     // A click by coordinate cannot tell whether the same thing is still under it: Jev decides it again.
     if passo.acao.kind == ActionType::Mouse { return None; }
-    let mesma_janela = agora.classe == passo.janela.classe && agora.titulo == passo.janela.titulo;
+    // Names and titles are templates: `{pN}` is filled, counters in titles are free.
+    // A goal script (format 2) holds plain names: a brace there is text, not a slot.
+    let modelo = |t: &str| match params { Some(p) => preencher(t, p), None => Some(t.to_owned()) };
+    let titulo = modelo(&passo.janela.titulo)?;
+    // A piece keeps no title: it may start on any screen of its window.
+    let titulo_ok = (params.is_some() && titulo.is_empty()) || mesmo_titulo(&titulo, &agora.titulo);
+    let mesma_janela = agora.classe == passo.janela.classe && titulo_ok;
     // Launching an app does not depend on the window in front.
     if passo.acao.kind != ActionType::Launch && !mesma_janela {
         return None;
@@ -172,16 +191,21 @@ pub fn resolver(passo: &Passo, obs: &Observation, dados: &Map<String, Value>) ->
     let target = match &passo.alvo {
         None => None,
         Some(Alvo::Elemento { role, name, ordem, .. }) => {
-            let gemeos: Vec<_> = obs.elements.iter().filter(|e| &e.role == role && &e.name == name).collect();
+            let name = modelo(name)?;
+            let gemeos: Vec<_> = obs.elements.iter().filter(|e| &e.role == role && e.name == name).collect();
             if gemeos.len() != ordem.de { return None; }
             Some(gemeos.get(ordem.indice)?.id.clone())
         }
-        Some(Alvo::Janela(j)) => Some(obs.windows.iter().find(|w| w.class_name == j.classe && w.name == j.titulo)?.id.clone()),
+        Some(Alvo::Janela(j)) => {
+            let titulo = modelo(&j.titulo)?;
+            Some(obs.windows.iter().find(|w| w.class_name == j.classe && mesmo_titulo(&titulo, &w.name))?.id.clone())
+        }
     };
     let value = match &passo.valor {
         None => None,
         Some(Valor::Dados(k)) => Some(py_str(dados.get(k)?)),
         Some(Valor::Literal(v)) => Some(v.clone()),
+        Some(Valor::Parametro(k)) => Some(params?.get(k)?.clone()),
     };
     Some(Action { target, value, ..passo.acao.clone() })
 }
@@ -270,8 +294,12 @@ pub fn parecidos(pasta: &Path, dados: &Map<String, Value>, exceto: &Path) -> Vec
 }
 
 pub fn salvar(arquivo: &Path, roteiro: &Roteiro) -> std::io::Result<()> {
+    salvar_json(arquivo, roteiro)
+}
+
+pub(crate) fn salvar_json(arquivo: &Path, valor: &impl Serialize) -> std::io::Result<()> {
     if let Some(pasta) = arquivo.parent() { std::fs::create_dir_all(pasta)?; }
-    let texto = serde_json::to_string_pretty(roteiro).map_err(std::io::Error::other)?;
+    let texto = serde_json::to_string_pretty(valor).map_err(std::io::Error::other)?;
     // Write then rename, so an interrupted save never leaves half a script behind.
     let temporario = arquivo.with_extension("json.tmp");
     std::fs::write(&temporario, texto)?;
@@ -288,6 +316,27 @@ mod tests {
             "windows": [{"id": "w1", "name": classe, "process_id": 1, "class_name": classe, "rect": [0,0,10,10]}],
             "elements": [], "truncated": false, "timestamp": 1.0, "screen": {"width": 10, "height": 10},
         })).unwrap()
+    }
+
+    // A piece step keeps `{p1}` where the person changes; the title's counter changes on its own.
+    #[test]
+    fn piece_step_resolves_with_its_parameters_and_any_counter() {
+        let mut agora = tela("slack");
+        agora.windows[0].name = "Rafael (MD) - Acme - 3 novos itens - Slack".into();
+        agora.elements = vec![serde_json::from_value(json!({"id": "e7", "name": "Rafael, Mensagem direta", "role": "ListItem",
+            "value": null, "enabled": true, "rect": null, "focused": false, "actions": ["invoke"]})).unwrap()];
+        let gravado = Passo {
+            janela: Janela { classe: "slack".into(), titulo: "{p1} (MD) - Acme - 4 novos itens - Slack".into() },
+            alvo: Some(Alvo::Elemento { role: "ListItem".into(), name: "{p1}, Mensagem direta".into(), text: None, placeholder: None,
+                test_id: None, ordem: Ordem { indice: 0, de: 1 } }),
+            acao: Action { kind: ActionType::Text, ..Default::default() },
+            valor: Some(Valor::Parametro("p1".into())), mudou_tela: None,
+        };
+        let params = BTreeMap::from([("p1".to_owned(), "Rafael".to_owned())]);
+        let acao = resolver_com(&gravado, &agora, &Map::new(), &params).unwrap();
+        assert_eq!((acao.target.as_deref(), acao.value.as_deref()), (Some("e7"), Some("Rafael")));
+        let outro = BTreeMap::from([("p1".to_owned(), "Junior".to_owned())]);
+        assert_eq!(resolver_com(&gravado, &agora, &Map::new(), &outro), None, "another person is another screen");
     }
 
     #[test]

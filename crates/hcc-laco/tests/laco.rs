@@ -1780,7 +1780,7 @@ fn sentence_opening_verb_is_not_a_misheard_name() {
 }
 
 fn roteiros(r: &PathBuf) -> Vec<PathBuf> {
-    std::fs::read_dir(r).map(|d| d.map(|e| e.unwrap().path()).collect()).unwrap_or_default()
+    std::fs::read_dir(r).map(|d| d.map(|e| e.unwrap().path()).filter(|p| p.is_file()).collect()).unwrap_or_default()
 }
 
 async fn gravado(pasta: &std::path::Path) -> PathBuf {
@@ -2072,4 +2072,74 @@ async fn stopped_goal_keeps_the_good_start_as_partial() {
     assert_eq!(salvo["variantes"][0]["parcial"], true);
     assert_eq!(salvo["variantes"][0]["passos"].as_array().unwrap().len(), 1);
     assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("parcial")), "{:?}", r.roteiro);
+    assert_eq!(roteiros(&pasta.join("trechos")).len(), 1, "the good start also becomes a reusable piece: {:?}", r.roteiro);
+}
+
+// Every confirmed run also leaves its pieces, to be reused by other goals that go through the same screens.
+#[tokio::test]
+async fn confirmed_run_leaves_reusable_pieces() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "")]);
+    let (mut op, _server) = setup(vec![select("invoke Button 'Salvar'"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.texto = "clicar em Salvar no Editor".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let pecas = roteiros(&pasta.join("trechos"));
+    assert_eq!(pecas.len(), 1, "{:?}", r.roteiro);
+    let peca: Value = serde_json::from_str(&std::fs::read_to_string(&pecas[0]).unwrap()).unwrap();
+    assert_eq!((peca["versao"].as_u64(), peca["tipo"].as_str(), peca["contexto"].as_str()), (Some(3), Some("trecho"), Some("TMainForm")));
+    assert_eq!(peca["descricao"], "invoke Button '{p1}'");
+    assert_eq!(peca["parametros"]["p1"]["exemplo"], "Salvar");
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("trechos gravados: 1")), "{:?}", r.roteiro);
+}
+
+fn peca_salvar(pasta: &std::path::Path) {
+    let dir = pasta.join("trechos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("trecho-invoke-button-p1-00000000.json"), json!({
+        "versao": 3, "tipo": "trecho", "descricao": "invoke Button '{p1}'", "parametros": {"p1": {"exemplo": "Gravar"}},
+        "contexto": "TMainForm",
+        "variantes": [{"usos": 1, "passos": [{"janela": {"classe": "TMainForm", "titulo": ""},
+            "alvo": {"elemento": {"role": "Button", "name": "{p1}", "ordem": {"indice": 0, "de": 1}}},
+            "acao": {"type": "invoke"}, "valor": null, "mudou_tela": true}]}],
+    }).to_string()).unwrap();
+}
+
+// A piece recorded by another goal is replayed with this goal's value in its slot, after Jev picks it.
+#[tokio::test]
+async fn piece_fitting_the_screen_is_replayed_with_the_goals_value() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    peca_salvar(&pasta);
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "")]);
+    let (mut op, server) = setup(vec![Answer::Pick("invoke Button 'Salvar'", 0.9), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.texto = "clicar em Salvar no Editor".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"invoke","target":"e1"}))]);
+    assert!(r.passos[0].ends_with("[trecho]"), "{}", r.resumo());
+    assert!(bodies(&server).await[0]["questions"]["pick"].is_object(), "the first question picks the piece");
+}
+
+#[tokio::test]
+async fn piece_jev_does_not_pick_or_that_does_not_fit_leaves_the_run_to_jev() {
+    for (texto, respostas) in [
+        ("clicar em Salvar no Editor", vec![Answer::Pick("NONE", 0.9), select("invoke Button 'Salvar'"), done()]),
+        ("clicar no botão de salvar", vec![select("invoke Button 'Salvar'"), done()]),
+    ] {
+        let pasta = tempfile::tempdir().unwrap().keep();
+        peca_salvar(&pasta);
+        let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "")]);
+        let (mut op, _server) = setup(respostas).await;
+        op.roteiros = Some(pasta.clone());
+        op.texto = texto.into();
+        op.dados = Map::new();
+        let r = run(op, &con).await;
+        assert!(r.ok, "{texto}: {}", r.resumo());
+        assert!(!r.passos[0].ends_with("[trecho]"), "{texto}: {}", r.resumo());
+    }
 }

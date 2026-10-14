@@ -20,7 +20,8 @@ use crate::geometria::{dentro, para_tela};
 use crate::http::py_dumps;
 use crate::jev::Jev;
 use crate::llm::Llm;
-use crate::objetivo::{literais, nome_parecido, nomes_no_titulo, pede_leitura, so_leitura, texto_janela};
+use crate::objetivo::{literais, nome_parecido, nomes_no_titulo, pede_leitura, so_leitura, texto_janela, valores_do_objetivo};
+use crate::trecho;
 use crate::resultado::Resultado;
 use crate::roteiro;
 use crate::tipos::{Ajuda, Candidato, Decisao, Escolha, Progresso, Registro};
@@ -338,6 +339,35 @@ async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, c
     Ok(())
 }
 
+/// The pieces of a run that went right, under `trechos/` of the scripts folder: each cut is a new piece file or
+/// one more use of the same way. A piece with a click by coordinate cannot be replayed with a check, so it stays out.
+fn gravar_trechos(op: &Opcoes, secretos: &Segredos, passos: &[roteiro::Passo]) -> String {
+    let Some(dir) = op.roteiros.as_deref() else { return String::new(); };
+    let pasta = dir.join("trechos");
+    let valores = valores_do_objetivo(&op.texto, &op.dados, &secretos.valores);
+    let (mut gravados, mut falhas) = (0, Vec::new());
+    for r in trecho::cortar(passos, &valores) {
+        if r.passos.is_empty() || r.passos.iter().any(|p| p.acao.kind == ActionType::Mouse) { continue; }
+        let descricao = trecho::resumo(&r.passos);
+        let arquivo = trecho::arquivo(&pasta, &descricao, &r.contexto);
+        let anterior = std::fs::read(&arquivo).ok().and_then(|b| serde_json::from_slice::<trecho::Trecho>(&b).ok())
+            .filter(|t| t.versao == trecho::VERSAO_TRECHO);
+        let novo = trecho::Trecho { versao: trecho::VERSAO_TRECHO, tipo: "trecho".into(), descricao, parametros: r.parametros,
+            contexto: r.contexto, variantes: vec![trecho::VarianteTrecho { passos: r.passos, usos: 0 }] };
+        let junto = trecho::juntar(anterior, novo);
+        if serde_json::to_value(&junto).map_or(true, |v| secretos.tem_segredo(&v)) { falhas.push("contém um valor secreto".to_owned()); continue; }
+        match trecho::salvar(&arquivo, &junto) { Ok(()) => gravados += 1, Err(e) => falhas.push(e.to_string()) }
+    }
+    if gravados == 0 && falhas.is_empty() { return String::new(); }
+    let mut texto = format!("trechos gravados: {gravados} em {}", pasta.display());
+    if !falhas.is_empty() { texto.push_str(&format!(" (não gravados: {})", falhas.join(", "))); }
+    texto
+}
+
+const TRECHO: &str = "Pick the recorded step sequence that is the right next part of `goal` on the CURRENT screen, \
+with the values shown in it being the ones `goal` means (the person, item or term `goal` names). NONE when no option \
+is a step toward `goal`, when its values are not the ones `goal` means, or when `goal` is already done.";
+
 const PARECIDO: &str = "Pick the recorded goal that asks for exactly the same task as `goal`: same application, same \
 target (person, record, screen) and same outcome; values the user supplies in `data` may differ. NONE when no recorded \
 goal is that task, or when a goal only looks alike.";
@@ -369,12 +399,14 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let Some(fim) = i.filter(|_| p >= 0.8) else { return Ok(()); };
     let arquivo = roteiro::arquivo(dir, &op.texto, &op.dados);
     let passos: Vec<roteiro::Passo> = feitos.into_iter().take(fim + 1).map(|(p, _)| p).collect();
+    let pecas = gravar_trechos(op, secretos, &passos);
     let gravado = roteiro::anteriores(&arquivo).map(|a| roteiro::juntar(a, &op.texto, passos, true)).and_then(|novo| {
         if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) { Err("contém um valor secreto".to_owned()) }
         else { roteiro::salvar(&arquivo, &novo).map_err(|e| e.to_string()) }
     });
     let texto = gravado.map_or_else(|e| format!("parcial não gravado: {e}"),
         |()| format!("parcial gravado: {} passo(s) em {}", fim + 1, arquivo.display()));
+    let texto = if pecas.is_empty() { texto } else { format!("{texto}; {pecas}") };
     r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
     Ok(())
 }
@@ -419,6 +451,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     }
     // Replay: each step resolved on the current screen, no Jev; the first divergence hands over to the loop,
     // whose first cycle also asks Jev whether the goal is done.
+    let sem_roteiro = matches!(lido, Ok(None));
     match lido {
         Err(e) => r.roteiro = Some(format!("ilegível, seguindo pelo Jev: {}", secretos.texto(&e))),
         Ok(None) => {}
@@ -488,6 +521,78 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if let Some(p) = parou { texto.push_str(&format!("; {p}")); }
                 texto
             });
+        }
+    }
+    // Without a script for this goal, pieces recorded by any goal: Jev picks the one that fits the screen and the
+    // goal, its slots filled with the goal's values; each step is checked, and the first divergence leaves it to Jev.
+    let pecas = match op.roteiros.as_deref() { Some(d) if sem_roteiro && !op.refazer => trecho::todos(&d.join("trechos")), _ => vec![] };
+    if !pecas.is_empty() {
+        let valores = valores_do_objetivo(&op.texto, &op.dados, &secretos.valores);
+        let mut repetidos = Vec::new();
+        let mut feitas: Vec<(usize, std::collections::BTreeMap<String, String>)> = Vec::new();
+        let mut parou = None;
+        'pecas: for _ in 0..5 {
+            let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+            let vista = controle.medir("observacao", Progresso::Observacao, async { observar(s).await.map_err(erro_sessao) }).await?;
+            let atual = assinatura_tela(&vista);
+            if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) && ultima.screen_changed.is_none() {
+                ultima.screen_changed = mudou(a, &atual);
+            }
+            anterior = Some(atual);
+            // A piece already replayed with the same values would only repeat itself.
+            let opcoes: Vec<trecho::Opcao> = trecho::opcoes(&pecas, &vista, &op.dados, &valores).into_iter()
+                .filter(|o| !feitas.contains(&(o.trecho, o.params.clone()))).collect();
+            if opcoes.is_empty() { break; }
+            let textos: Vec<String> = opcoes.iter().map(|o| secretos.texto(&o.texto)).collect();
+            let estado = secretos.estado(op, &vista, recentes, None);
+            let limite = controle.restante()?.min(Duration::from_secs(30));
+            let (i, p) = match controle.medir("jev", Progresso::Jev, jev.escolher(&estado, TRECHO, &textos, limite)).await {
+                Ok(v) => v,
+                Err(e) => { parou = Some(format!("escolha de trecho falhou: {}", secretos.texto(&e))); break; }
+            };
+            controle.rodar(registrar(&pasta, json!({"trecho": i.map(|i| &textos[i]), "probability": p}), secretos)).await?;
+            let Some(i) = i.filter(|_| p >= 0.8) else { break; };
+            let opcao = &opcoes[i];
+            let passos = &pecas[opcao.trecho].1.variantes[opcao.variante].passos;
+            let mut vista = vista;
+            for (n, passo) in passos.iter().enumerate() {
+                if n > 0 {
+                    let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                    vista = controle.medir("observacao", Progresso::Observacao, async { observar(s).await.map_err(erro_sessao) }).await?;
+                    let agora = assinatura_tela(&vista);
+                    if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &agora); }
+                    anterior = Some(agora);
+                    if passos[n - 1].mudou_tela == Some(true) && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
+                        parou = Some(format!("trecho {} parou no passo {}: a tela não mudou", textos[i], n + 1)); break 'pecas;
+                    }
+                }
+                let atual = assinatura_tela(&vista);
+                let Some(acao) = roteiro::resolver_com(passo, &vista, &op.dados, &opcao.params) else {
+                    parou = Some(format!("trecho {} parou no passo {}: controle diferente do gravado", textos[i], n + 1)); break 'pecas;
+                };
+                let nome = secretos.descricao(&acao, &vista, true);
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false)),
+                    async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
+                let ok = matches!(&retorno, Ok(ret) if ret.ok);
+                let resultado = match &retorno { Ok(ret) if ret.ok => "ok".to_owned(), Ok(_) => "{'ok': False}".to_owned(),
+                    Err(e) => secretos.texto(&format!("NOT executed: {e}")) };
+                recentes.push(Registro { action: nome.clone(), result: resultado.clone(), screen_changed: None, target_rect: None,
+                    clique: None, executada: retorno.is_ok() });
+                r.passos.push(format!("{}. {nome} [trecho]", r.passos.len() + 1));
+                if let Err(e) = &retorno && reconectavel(e) && !controle.cancel.is_cancelled() { reconectar(conector, sessao, controle).await?; }
+                if !ok { parou = Some(format!("trecho {} parou no passo {}: {resultado}", textos[i], n + 1)); break 'pecas; }
+                foco_escolhido |= escolhe_foco(&acao) || invoca_editavel(&acao, &vista);
+                gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1)));
+                esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
+            }
+            feitas.push((opcao.trecho, opcao.params.clone()));
+            repetidos.push(textos[i].clone());
+        }
+        if !repetidos.is_empty() || parou.is_some() {
+            let mut texto = format!("trechos repetidos: {}", if repetidos.is_empty() { "nenhum".into() } else { repetidos.join(" | ") });
+            if let Some(p) = parou { texto.push_str(&format!("; {p}")); }
+            r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
         }
     }
     for ciclo in 0..=op.max_passos {
@@ -635,7 +740,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         }
                         r.ok = true;
                         if let Some(arquivo) = arquivo.as_deref().filter(|_| !gravados.is_empty()) {
-                            let passos = gravados.drain(..).map(|(mut p, i)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
+                            let passos: Vec<roteiro::Passo> = gravados.drain(..).map(|(mut p, i)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
+                            let pecas = gravar_trechos(op, secretos, &passos);
                             // `refazer` asked to forget the recorded ways, not to keep them beside the new one.
                             let anteriores = if op.refazer { Ok(None) } else { roteiro::anteriores(arquivo) };
                             let gravado = anteriores.map(|a| roteiro::juntar(a, &op.texto, passos, false)).and_then(|novo| {
@@ -645,6 +751,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                                 } else { roteiro::salvar(arquivo, &novo).map_err(|e| e.to_string()) }
                             }).map_err(|e| format!("não gravado: {e}"));
                             let texto = gravado.map_or_else(|e| e, |()| format!("gravado em {}", arquivo.display()));
+                            let texto = if pecas.is_empty() { texto } else { format!("{texto}; {pecas}") };
                             r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
                         }
                         let janela = estado["window"].as_str().map_or_else(|| "None".into(), py_repr);

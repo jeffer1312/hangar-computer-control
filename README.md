@@ -155,6 +155,36 @@ e os passos repetidos aparecem com `[roteiro]`. Apagar o arquivo ou `refazer=tru
   seguido de Esc); `refazer=true` regrava pelo caminho atual.
 - Cada passo repetido ainda lê a árvore inteira, então no Delphi o ganho é só o do Jev e da visão.
 
+### Pedaços reaproveitáveis (formato versão 3)
+
+Além do roteiro do objetivo, toda corrida que concluiu (e o começo certo de uma que parou) é cortada em pedaços
+que servem a outros objetivos: abrir um app, abrir um item pelo nome, pesquisar um termo. Ficam em
+`e2e/roteiros/trechos/trecho-<descrição>-<hash>.json`, formato combinado com o gravador do navegador do Hangar:
+
+```json
+{"versao": 3, "tipo": "trecho", "descricao": "invoke ListItem '{p1}'", "parametros": {"p1": {"exemplo": "Ana"}},
+ "contexto": "app", "variantes": [{"passos": [...], "usos": 2}]}
+```
+
+- Corte: onde a janela da frente muda, ou onde um passo que mudou a tela também mudou o título (contadores à parte).
+- Lacuna `{pN}`: um valor do objetivo (entre aspas, nome próprio, URL, termo depois de "pesquisar/buscar/procurar",
+  valor não secreto de `dados`) com que a corrida agiu: nome do controle usado ou texto digitado. Valor visto só no
+  título (o nome do app) fica fixo. No passo, `valor` pode ser `{"parametro": "pN"}`; nomes de controle levam o modelo
+  (`{{`/`}}` para chave literal).
+- `descricao` é o resumo dos passos com as lacunas, sem modelo de linguagem: o mesmo caminho cai sempre no mesmo
+  arquivo e soma `usos`. `contexto` é a classe da janela do primeiro passo (do app aberto, quando o pedaço abre um
+  app; no navegador, o caminho da página), com dígitos tratados como um só (`/paciente/123` = `/paciente/9`).
+- Pedaço não guarda título: pode começar em qualquer tela da janela, e é conferido pela classe e pelos controles.
+- Repetição: sem roteiro para o objetivo, as opções são os pedaços cujo primeiro passo cabe na tela atual com as
+  lacunas preenchidas pelos valores do objetivo (pedaço que abre um app só cabe se o app não estiver aberto). O Jev
+  escolhe uma delas ou nenhuma (vale com 80% ou mais); cada passo é conferido, e a primeira divergência devolve ao
+  Jev. Depois de um pedaço, procura o próximo (até 5); o mesmo pedaço com os mesmos valores não volta.
+- Caminho alternativo é outro pedaço: "clicar no item visível" só cabe com o item na tela; "abrir a busca e digitar"
+  cabe sempre, e o Jev escolhe.
+- Limites: o corte e a lacuna são heurísticos (um rótulo citado no objetivo, como o nome de um campo, também vira
+  lacuna) e não se aprende o que nunca deu certo. Clique por coordenada não entra em pedaço. Segredo nunca vai para
+  o arquivo.
+
 ### Progresso durante `objetivo`
 
 Enquanto roda, cada etapa sai como `notifications/progress` (só se a chamada trouxer `_meta.progressToken`;
