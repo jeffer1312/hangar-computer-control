@@ -2163,3 +2163,58 @@ async fn goal_names_in_a_window_that_appeared_confirm_an_app_opened_without_focu
         assert_eq!(r.ok, ok, "já existia={ja_existia}: {}", r.resumo());
     }
 }
+
+#[test]
+fn reading_goal_that_also_asks_to_change_something_is_not_reading_only() {
+    use hcc_laco::objetivo::so_leitura;
+    for goal in ["apague a mensagem e leia o título", "salve o arquivo e leia o aviso", "leia o e-mail e responda", "copie o texto e leia"] {
+        assert!(!so_leitura(goal), "{goal}");
+    }
+}
+
+// A reading goal never acts, not even through a recorded piece.
+#[tokio::test]
+async fn reading_goal_does_not_replay_pieces() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    peca_salvar(&pasta);
+    let mut tela = tree("o1", "");
+    tela.elements[1].name = "Ajuda".into();
+    let con = FakeConnector::new(vec![tela]);
+    let (mut op, _server) = setup(vec![help(json!([]))]).await;
+    op.roteiros = Some(pasta.clone());
+    op.texto = "leia o que diz o botão Ajuda".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(con.state.lock().unwrap().acts.is_empty());
+}
+
+// A piece that types a secret could be offered on another site of the same browser class: it is never recorded.
+#[tokio::test]
+async fn piece_typing_a_secret_is_not_recorded() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.texto = "preencher a Senha".into();
+    op.dados = json!({"senha": "x9"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(roteiros(&pasta.join("trechos")).is_empty(), "{:?}", r.roteiro);
+}
+
+// "Ana" into a field holding "Ana Maria" is not a duplicate; only the same text again is.
+#[tokio::test]
+async fn shortcut_without_focus_purpose_still_aims_text_at_a_field() {
+    let tela = |id: &str| { let mut o = tree(id, ""); o.elements[0].focused = false; o };
+    let con = FakeConnector::new(vec![tela("o1"), tela("o2"), tela("o3")]);
+    let fraco = || Answer::Choice("0", 0.2, 0.05);
+    let (mut op, _server) = setup(vec![
+        fraco(), help(json!([{"type":"keys","keys":["ctrl","a"]}])), fraco(), Answer::Risk(0.05),
+        fraco(), help(json!([{"type":"text","value":"Ana"}])), fraco(), Answer::Risk(0.05), done()]).await;
+    op.texto = "escrever Ana".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts.get(1).and_then(|a| a.target.as_deref()), Some("e0"), "Ctrl+A does not place the focus for typing: {}", r.resumo());
+}

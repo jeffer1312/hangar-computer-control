@@ -106,9 +106,8 @@ pub fn preencher(modelo: &str, params: &BTreeMap<String, String>) -> Option<Stri
     while let Some(i) = resto.find(['{', '}']) {
         saida.push_str(&resto[..i]);
         let c = &resto[i..];
-        if c.starts_with("{{") { saida.push('{'); resto = &c[2..]; continue; }
-        if c.starts_with("}}") { saida.push('}'); resto = &c[2..]; continue; }
-        if c.starts_with('}') { saida.push('}'); resto = &c[1..]; continue; }
+        if let Some(r) = c.strip_prefix("{{") { saida.push('{'); resto = r; continue; }
+        if let Some(r) = c.strip_prefix("}}").or_else(|| c.strip_prefix('}')) { saida.push('}'); resto = r; continue; }
         let fim = c.find('}')?;
         saida.push_str(params.get(&c[1..fim])?);
         resto = &c[fim + 1..];

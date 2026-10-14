@@ -289,7 +289,9 @@ pub type WalkResult<N> = (Vec<Element>, Vec<(N, f64)>, bool);
 /// `escala` is the monitor's: Chromium/Electron web content on a scaled Wayland output reports physical pixels
 /// while the frame reports logical ones; each node carries the factor that brings its extents to logical.
 pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64, budget: Duration, limit: usize) -> Result<WalkResult<T::Node>, String> {
-    let mut pending: VecDeque<(T::Node, f64, Option<(i32, i32, i32, i32)>)> = roots.into_iter().map(|n| (n, 1.0, None)).collect();
+    // Each pending node with its scale factor and its parent's raw extents.
+    type Pendente<N> = (N, f64, Option<(i32, i32, i32, i32)>);
+    let mut pending: VecDeque<Pendente<T::Node>> = roots.into_iter().map(|n| (n, 1.0, None)).collect();
     let (mut controls, mut nodes, mut visited) = (vec![], vec![], 0);
     let start = Instant::now();
     while !pending.is_empty() && visited < limit && start.elapsed() < budget {

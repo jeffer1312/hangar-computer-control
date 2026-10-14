@@ -72,8 +72,12 @@ pub fn so_leitura(goal: &str) -> bool {
     static ACAO: LazyLock<Regex> = LazyLock::new(|| Regex::new(
         r"(?i)\b(abr|clic|clique|rol|ir\b|vá|va\b|entr|pesquis|busc|procur|digit|escrev|preench|selecion|naveg|volt|fech|apert|press|ativ|toc|marc|lig|deslig|expand|envi|mand|open|click|scroll|go\b|search|type|press|select)\w*",
     ).unwrap());
+    // Any change the goal asks (delete, save, copy, reply...) is an action: only a goal that just reads skips Jev.
+    static MUDA: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+        r"(?i)\b(salv|copi|col[ae]|cri[ae]|edit|alter|mud|renome|mov|instal|desinstal|baix|carreg|imprim|exporte|import|save|copy|paste|create|delete|close|reply|write|edit|move|print|download|upload)\w*",
+    ).unwrap());
     let afirmado = crate::candidatos::afirmado(goal);
-    LEITURA.is_match(&afirmado) && !ACAO.is_match(&afirmado)
+    LEITURA.is_match(&afirmado) && !ACAO.is_match(&afirmado) && !ACAO_DIRIGIDA.is_match(&afirmado) && !MUDA.is_match(&afirmado)
 }
 
 /// Visible text of the front window, in tree order, once each: what a reading goal returns.

@@ -379,7 +379,11 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         self.available()?;
         self.observed_at = None; self.elements.clear(); self.windows.clear();
         let (active, area, monitor) = self.current()?;
-        let escala = monitor["scale"].as_f64().filter(|s| *s > 0.0).unwrap_or(1.0);
+        let escala = monitor["scale"].as_f64().filter(|s| *s > 0.0).unwrap_or_else(|| {
+            // Without it, web content on a scaled monitor keeps physical pixels and clicks land off.
+            ignorado("observe.escala", &format!("monitor sem escala válida: {}", monitor["scale"]));
+            1.0
+        });
         let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
         let mut windows = hypr::windows_from(&clients, (area.0, area.1)).map_err(runtime)?;
         for client in clients.as_array().ok_or_else(|| runtime("hyprctl retornou clients inválido"))? {

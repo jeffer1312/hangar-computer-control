@@ -188,13 +188,15 @@ fn apps_fechados(em_foco: &[hcc_protocolo::Window], agora: &Observation) -> Vec<
 /// a field the tree does not show (Slack's message search): untargeted text stays there instead of being aimed at
 /// another editable field.
 fn no_campo(acao: Action, obs: &Observation, recentes: &[Registro]) -> Vec<Action> {
+    // Only shortcuts that open a search or an address field: Ctrl+A or Ctrl+W leave no field to type in.
+    const FOCAM: &[&str] = &["ctrl+f", "ctrl+k", "ctrl+l", "ctrl+e", "ctrl+g", "ctrl+shift+f", "ctrl+shift+k", "alt+d"];
     let atalho = recentes.iter().rev().find(|r| r.executada).is_some_and(|r| r.result == "ok"
-        && r.action.starts_with("keys ") && r.action.rsplit(' ').next().is_some_and(|k| k.contains('+')));
+        && r.action.starts_with("keys ") && r.action.rsplit(' ').next().is_some_and(|k| FOCAM.contains(&k.to_lowercase().as_str())));
     let acoes = if atalho && acao.kind == ActionType::Text && acao.target.is_none() { vec![acao] } else { texto_no_editavel(acao, obs) };
     // Text appends: a field already holding it would end up with it twice.
     acoes.into_iter().filter(|a| a.kind != ActionType::Text || !a.target.as_ref().is_some_and(|id| {
         let valor = a.value.as_deref().unwrap_or_default();
-        !valor.is_empty() && obs.elements.iter().any(|e| &e.id == id && e.value.as_deref().is_some_and(|v| v.contains(valor)))
+        !valor.is_empty() && obs.elements.iter().any(|e| &e.id == id && e.value.as_deref().is_some_and(|v| v.ends_with(valor)))
     })).collect()
 }
 
@@ -305,7 +307,11 @@ async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_
         let bruto = json!({"llm": ajuda.acoes, "interpretacao": ajuda.interpretacao, "impedimento": ajuda.impedimento});
         controle.rodar(registrar(&pasta, bruto, secretos)).await?;
     }
+    let propostas = ajuda.acoes.len();
     ajuda.acoes = ajuda.acoes.iter().map(|a| para_tela(a, &obs.screen, &op.texto)).filter_map(|a| secretos.desmascarar(a)).collect();
+    if ajuda.acoes.len() < propostas {
+        ajuda.interpretacao.push_str(&format!(" [{} ação(ões) com <senha> descartada(s): não há um único segredo nos dados]", propostas - ajuda.acoes.len()));
+    }
     Ok((ajuda, leitura_valida))
 }
 
@@ -349,10 +355,21 @@ fn gravar_trechos(op: &Opcoes, secretos: &Segredos, passos: &[roteiro::Passo], f
     let classe_final = fim.and_then(|o| o.windows.iter().find(|w| w.id == o.foreground)).map(|w| w.class_name.as_str());
     for r in trecho::cortar(passos, &valores, classe_final) {
         if r.passos.is_empty() || r.passos.iter().any(|p| p.acao.kind == ActionType::Mouse) { continue; }
+        // A browser's window class is the same on every site: a piece typing a secret could be offered on another.
+        if r.passos.iter().any(|p| matches!(&p.valor, Some(roteiro::Valor::Dados(k)) if crate::candidatos::chave_secreta(k))) {
+            falhas.push("trecho que digita segredo fica de fora".to_owned()); continue;
+        }
         let descricao = trecho::resumo(&r.passos);
         let arquivo = trecho::arquivo(&pasta, &descricao, &r.contexto);
-        let anterior = std::fs::read(&arquivo).ok().and_then(|b| serde_json::from_slice::<trecho::Trecho>(&b).ok())
-            .filter(|t| t.versao == trecho::VERSAO_TRECHO);
+        // An existing file that does not read as this version may be newer or damaged: it is reported, never replaced.
+        let anterior = match std::fs::read(&arquivo) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => { falhas.push(format!("{}: {e}", arquivo.display())); continue; }
+            Ok(b) => match serde_json::from_slice::<trecho::Trecho>(&b) {
+                Ok(t) if t.versao == trecho::VERSAO_TRECHO => Some(t),
+                _ => { falhas.push(format!("{} ilegível ou de outra versão, mantido", arquivo.display())); continue; }
+            },
+        };
         let novo = trecho::Trecho { versao: trecho::VERSAO_TRECHO, tipo: "trecho".into(), descricao, parametros: r.parametros,
             contexto: r.contexto, variantes: vec![trecho::VarianteTrecho { passos: r.passos, usos: 0 }] };
         let junto = trecho::juntar(anterior, novo);
@@ -385,9 +402,12 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut recentes = Vec::new();
     ciclo_passos(op, conector, sessao, controle, r, secretos, &mut gravados, &mut recentes).await?;
     let (Some(dir), Some(pasta), false) = (op.roteiros.as_deref(), r.registro.clone(), r.ok) else { return Ok(()); };
+    // Like a confirmed run: each step keeps whether it changed the screen, the check its replay relies on.
     let feitos: Vec<(roteiro::Passo, String)> = gravados.into_iter()
-        .filter_map(|(p, i)| i.and_then(|i| recentes.get(i)).map(|reg| (p, reg.action.clone()))).collect();
-    if feitos.is_empty() || controle.restante().is_err() { return Ok(()); }
+        .filter_map(|(mut p, i)| i.and_then(|i| recentes.get(i)).map(|reg| { p.mudou_tela = reg.screen_changed; (p, reg.action.clone()) })).collect();
+    if feitos.is_empty() { return Ok(()); }
+    let anota = |r: &mut Resultado, texto: String| r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
+    if controle.restante().is_err() { anota(r, "parcial não gravado: sem tempo para perguntar ao Jev".into()); return Ok(()); }
     let jev = validar(op)?;
     let opcoes: Vec<String> = feitos.iter().enumerate().map(|(n, (_, d))| format!("{}. {d}", n + 1)).collect();
     let estado = json!({"goal": secretos.texto(&op.texto), "stopped": secretos.texto(&r.motivo)});
@@ -397,7 +417,10 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
         Err(e) => { r.roteiro = Some(format!("parcial não gravado: {}", secretos.texto(&e))); return Ok(()); }
     };
     controle.rodar(registrar(&pasta, json!({"parcial": i.map(|i| &opcoes[i]), "probability": p}), secretos)).await?;
-    let Some(fim) = i.filter(|_| p >= 0.8) else { return Ok(()); };
+    let Some(fim) = i.filter(|_| p >= 0.8) else {
+        anota(r, format!("parcial não gravado: o Jev não viu um começo certo ({})", percentual(p)));
+        return Ok(());
+    };
     let arquivo = roteiro::arquivo(dir, &op.texto, &op.dados);
     let passos: Vec<roteiro::Passo> = feitos.into_iter().take(fim + 1).map(|(p, _)| p).collect();
     let pecas = gravar_trechos(op, secretos, &passos, None);
@@ -434,7 +457,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     let mut lido = arquivo.as_deref().filter(|_| !op.refazer).map(roteiro::carregar).transpose().map(Option::flatten);
     let mut origem = String::new();
     // The same request said in other words: Jev matches it to a recorded goal, or to none.
-    if let (Ok(None), Some(arq), Some(dir)) = (&lido, arquivo.as_deref(), op.roteiros.as_deref()) {
+    if let (Ok(None), Some(arq), Some(dir), false, false) = (&lido, arquivo.as_deref(), op.roteiros.as_deref(), op.refazer, so_leitura(&op.texto)) {
         let achados = roteiro::parecidos(dir, &op.dados, arq);
         if !achados.is_empty() {
             let opcoes: Vec<String> = achados.iter().map(|(_, r)| secretos.texto(&r.objetivo)).collect();
@@ -529,7 +552,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     }
     // Without a script for this goal, pieces recorded by any goal: Jev picks the one that fits the screen and the
     // goal, its slots filled with the goal's values; each step is checked, and the first divergence leaves it to Jev.
-    let pecas = match op.roteiros.as_deref() { Some(d) if sem_roteiro && !op.refazer => trecho::todos(&d.join("trechos")), _ => vec![] };
+    // A reading goal never acts, not even through a piece.
+    let pecas = match op.roteiros.as_deref() {
+        Some(d) if sem_roteiro && !op.refazer && !so_leitura(&op.texto) => trecho::todos(&d.join("trechos")), _ => vec![] };
     if !pecas.is_empty() {
         let valores = valores_do_objetivo(&op.texto, &op.dados, &secretos.valores);
         let mut repetidos = Vec::new();
@@ -623,7 +648,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         }
         if so_leitura(&op.texto) {
             // Nothing to do on screen: the tree text and one print reading are the answer; no Jev, no action.
-            let estado = secretos.estado(op, &obs, &recentes, None);
+            let estado = secretos.estado(op, &obs, recentes, None);
             let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
             let texto = texto_janela(&obs);
             if !leu && texto.is_empty() { r.motivo = format!("leitura sem resultado: {}", ajuda.interpretacao); return Ok(()); }
@@ -639,10 +664,10 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let cands = sem_reabrir(apps_do_objetivo(sem_app_aberto(candidatos(&obs, &valores, &secretos.valores), &obs, &op.texto), &op.texto), &fechados).into_iter().map(|mut c| {
             c.descricao = secretos.descricao(&c.acao, &obs, true); c
         }).collect();
-        if let Some(motivo) = Barreiras::tres_sem_efeito(&recentes) {
+        if let Some(motivo) = Barreiras::tres_sem_efeito(recentes) {
             r.motivo = motivo; return Ok(());
         }
-        let mut acoes: Vec<Candidato> = segurar_segredos(Barreiras::barrar(cands, &recentes), &op.texto, &recentes, &secretos.valores)
+        let mut acoes: Vec<Candidato> = segurar_segredos(Barreiras::barrar(cands, recentes), &op.texto, recentes, &secretos.valores)
             .into_iter().filter(|c| !texto_sem_alvo_barrado(&c.acao, foco_escolhido)).collect();
         if let Some(mut clique) = Barreiras::reclique(recentes, &obs) {
             clique.descricao = secretos.texto(&clique.descricao);
@@ -658,7 +683,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let mut falta_dica = None;
         let mut primeira_ajuda: Option<Candidato> = None;
         if sem_controles(&obs) {
-            let estado = secretos.estado(op, &obs, &recentes, None);
+            let estado = secretos.estado(op, &obs, recentes, None);
             let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
@@ -666,7 +691,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             dica = com_dica(&nome, ajuda.interpretacao); ajudou = true;
             let grupos: Vec<Vec<Action>> = ajuda.acoes.into_iter()
                 .filter(|a| matches!(a.kind, ActionType::Mouse | ActionType::Keys | ActionType::Text))
-                .map(|a| no_campo(alvo_observado(a, &obs), &obs, &recentes)).collect();
+                .map(|a| no_campo(alvo_observado(a, &obs), &obs, recentes)).collect();
             // The first text fits several fields: Jev picks the field, no direct guess.
             let ambigua = grupos.first().is_some_and(|g| g.len() > 1);
             let mut foco_na_fila = foco_escolhido;
@@ -679,7 +704,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 })
                 .take(3).map(|g| g[0].clone()).collect();
             let propostas = grupos.into_iter().flatten().map(|a| secretos.candidato(a, &obs)).collect();
-            let propostas: Vec<Candidato> = segurar_segredos(Barreiras::barrar(propostas, &recentes), &op.texto, &recentes, &secretos.valores);
+            let propostas: Vec<Candidato> = segurar_segredos(Barreiras::barrar(propostas, recentes), &op.texto, recentes, &secretos.valores);
             // A proposal dropped by the guards breaks the run: the rest waits for the next cycle.
             let seguidas = propostas.iter().zip(&teclado).take_while(|(p, a)| p.acao == **a && dentro(&p.acao, &obs)).count();
             if seguidas >= 2 { fila = propostas[1..seguidas].to_vec(); }
@@ -696,7 +721,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         }
         let mut decisao = loop {
             if let Some(d) = direta.take() { break d; }
-            let estado = secretos.estado(op, &obs, &recentes, Some(&dica));
+            let estado = secretos.estado(op, &obs, recentes, Some(&dica));
             let limite = controle.restante()?.min(Duration::from_secs(30));
             let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, limite)).await?;
             let opcao = escolha(d.escolha);
@@ -711,7 +736,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 let mut confirmado = (!ajudou).then_some(d.p);
                 let mut leitura_forte = false;
                 if ajudou {
-                    let sem_dica = secretos.estado(op, &obs, &recentes, None);
+                    let sem_dica = secretos.estado(op, &obs, recentes, None);
                     let limite = controle.restante()?.min(Duration::from_secs(30));
                     let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "sem_dica":true,
@@ -728,13 +753,13 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     // The print reading plus every explicit item of the goal on screen is evidence enough.
                     else if (itens_pendentes(conferir, &obs) > 0 || nomes_no_titulo(&op.texto, &obs)
                         || iniciais.as_ref().is_some_and(|i| nomes_em_janela_nova(&op.texto, &obs, i)))
-                        && pendencia(conferir, &obs, &recentes, &secretos.valores).is_none() {
+                        && pendencia(conferir, &obs, recentes, &secretos.valores).is_none() {
                         confirmado = Some(d.p);
                     }
                 }
                 match confirmado {
                     Some(p) => {
-                        if let Some((indice, falta)) = pendencia(conferir, &obs, &recentes, &secretos.valores) {
+                        if let Some((indice, falta)) = pendencia(conferir, &obs, recentes, &secretos.valores) {
                             recentes.push(Registro { action: format!("DONE recusado: {falta}"), result: "não confirmado".into(),
                                 screen_changed: Some(false), target_rect: None, clique: None, executada: false });
                             if !recusas.insert(indice) {
@@ -786,7 +811,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if ajudou {
                 // Jev still unsure: the help's first action decides, after the risk question.
                 if let Some(proposta) = primeira_ajuda.take() {
-                    let estado = secretos.estado(op, &obs, &recentes, Some(&dica));
+                    let estado = secretos.estado(op, &obs, recentes, Some(&dica));
                     let limite = controle.restante()?.min(Duration::from_secs(30));
                     let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
@@ -805,8 +830,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
-                .flat_map(|a| no_campo(a, &obs, &recentes)).map(|a| secretos.candidato(a, &obs)).collect();
-            for proposta in segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), &fechados), &recentes), &op.texto, &recentes, &secretos.valores)
+                .flat_map(|a| no_campo(a, &obs, recentes)).map(|a| secretos.candidato(a, &obs)).collect();
+            for proposta in segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), &fechados), recentes), &op.texto, recentes, &secretos.valores)
                 .into_iter().filter(|p| !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
                 if primeira_ajuda.is_none() && dentro(&proposta.acao, &obs) { primeira_ajuda = Some(proposta.clone()); }
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta); }
@@ -880,8 +905,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             // Same action again while the last one's effect is unknown (empty tree): look first, never resend.
             let repete_cego = recentes.last().is_some_and(|u| u.action == proxima.descricao && u.screen_changed != Some(true));
             if repete_cego || texto_sem_alvo_barrado(&proxima.acao, foco_escolhido)
-                || Barreiras::tres_sem_efeito(&recentes).is_some() || Barreiras::barrar(vec![proxima.clone()], &recentes).is_empty() { break; }
-            let estado = secretos.estado(op, &vista, &recentes, None);
+                || Barreiras::tres_sem_efeito(recentes).is_some() || Barreiras::barrar(vec![proxima.clone()], recentes).is_empty() { break; }
+            let estado = secretos.estado(op, &vista, recentes, None);
             let limite = controle.restante()?.min(Duration::from_secs(30));
             decisao.risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proxima.descricao, limite)).await?;
             controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proxima.descricao, "risky":decisao.risco, "dica":dica}), secretos)).await?;

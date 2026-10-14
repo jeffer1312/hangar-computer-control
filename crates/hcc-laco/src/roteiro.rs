@@ -181,8 +181,9 @@ fn resolver_em(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, par
     // A goal script (format 2) holds plain names: a brace there is text, not a slot.
     let modelo = |t: &str| match params { Some(p) => preencher(t, p), None => Some(t.to_owned()) };
     let titulo = modelo(&passo.janela.titulo)?;
-    // A piece keeps no title: it may start on any screen of its window.
-    let titulo_ok = (params.is_some() && titulo.is_empty()) || mesmo_titulo(&titulo, &agora.titulo);
+    // A piece keeps no title (it may start on any screen of its window) and tolerates counters; a goal script
+    // compares its title exactly: "Paciente 123" is not "Paciente 456".
+    let titulo_ok = match params { Some(_) => titulo.is_empty() || mesmo_titulo(&titulo, &agora.titulo), None => titulo == agora.titulo };
     let mesma_janela = agora.classe == passo.janela.classe && titulo_ok;
     // Launching an app does not depend on the window in front.
     if passo.acao.kind != ActionType::Launch && !mesma_janela {
@@ -198,7 +199,8 @@ fn resolver_em(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, par
         }
         Some(Alvo::Janela(j)) => {
             let titulo = modelo(&j.titulo)?;
-            Some(obs.windows.iter().find(|w| w.class_name == j.classe && mesmo_titulo(&titulo, &w.name))?.id.clone())
+            let igual = |w: &str| if params.is_some() { mesmo_titulo(&titulo, w) } else { titulo == w };
+            Some(obs.windows.iter().find(|w| w.class_name == j.classe && igual(&w.name))?.id.clone())
         }
     };
     let value = match &passo.valor {
@@ -337,6 +339,16 @@ mod tests {
         assert_eq!((acao.target.as_deref(), acao.value.as_deref()), (Some("e7"), Some("Rafael")));
         let outro = BTreeMap::from([("p1".to_owned(), "Junior".to_owned())]);
         assert_eq!(resolver_com(&gravado, &agora, &Map::new(), &outro), None, "another person is another screen");
+    }
+
+    // A goal script recorded on "Paciente 123" must not act on "Paciente 456": counters are tolerated only in pieces.
+    #[test]
+    fn goal_script_titles_compare_exactly() {
+        let clique = Action { kind: ActionType::Invoke, ..Default::default() };
+        let titulada = |t: &str| { let mut o = tela("TMS"); o.windows[0].name = t.into(); o };
+        let gravado = passo(&clique, &titulada("Paciente 123"), &Map::new());
+        assert_eq!(resolver(&gravado, &titulada("Paciente 456"), &Map::new()), None);
+        assert!(resolver(&gravado, &titulada("Paciente 123"), &Map::new()).is_some());
     }
 
     #[test]
