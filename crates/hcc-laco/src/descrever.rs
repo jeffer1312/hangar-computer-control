@@ -37,7 +37,10 @@ pub fn descrever(acao: &Action, obs: &Observation, segredos: &HashSet<String>, c
     let alvo = alvo(acao, obs);
     let mut nome = match &alvo {
         Some(Alvo::Janela(w)) => format!(" window '{}'", w.name),
-        Some(Alvo::Elemento(e)) => format!(" {} '{}'", e.role, e.name),
+        Some(Alvo::Elemento(e)) => {
+            let linha = linha(e, obs).map(|l| format!(" [linha: {l}]")).unwrap_or_default();
+            format!(" {} '{}'{linha}", e.role, e.name)
+        }
         None => match acao.rotulo.as_deref() {
             Some(r) if !r.is_empty() => format!(" '{r}'"),
             _ => String::new(),
@@ -68,6 +71,21 @@ pub fn descrever(acao: &Action, obs: &Observation, segredos: &HashSet<String>, c
         _ => String::new(),
     };
     format!("{}{nome}{extra}", acao.kind)
+}
+
+/// Controls sharing role and name (one switch per table row) are told apart by the leftmost other named element
+/// on the same row: the row's label.
+// ponytail: row = vertical overlap of rects; a table without rects or with wrapped rows gets no label.
+fn linha(e: &Element, obs: &Observation) -> Option<String> {
+    if obs.elements.iter().filter(|o| o.role == e.role && o.name == e.name).count() < 2 { return None; }
+    let r = e.rect?;
+    let meio = |a: i32, b: i32| (i64::from(a) + i64::from(b)) / 2;
+    obs.elements.iter()
+        .filter(|o| !o.name.trim().is_empty() && o.name != e.name)
+        .filter_map(|o| o.rect.map(|q| (o, q)))
+        .filter(|(_, q)| { let c = meio(q.1, q.3); i64::from(r.1) <= c && c <= i64::from(r.3) && q.2 <= r.2 })
+        .min_by_key(|(_, q)| q.0)
+        .map(|(o, _)| o.name.chars().take(80).collect())
 }
 
 pub fn direcao(d: Direction) -> &'static str {

@@ -6,7 +6,7 @@ use hcc_laco::candidatos::{candidatos, segredos};
 use hcc_laco::estado::estado_compacto;
 use hcc_laco::jev::{JEV_MODEL, Jev};
 use hcc_laco::llm::Llm;
-use hcc_protocolo::Observation;
+use hcc_protocolo::{Button, MouseMode, Observation};
 use serde_json::{Value, json};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -43,15 +43,32 @@ async fn llm_timeout_degrades_to_hint() {
     assert_eq!(a.interpretacao, "ajuda visual indisponível: TimeoutError: timed out");
 }
 
+// One bad action used to throw away the whole help, and the loop gave up: now only that action goes.
 #[tokio::test]
-async fn llm_invalid_answer_degrades_to_hint() {
-    let sete = json!({"interpretacao": "x", "acoes": vec![json!({"type": "keys", "keys": ["Tab"]}); 7]});
-    let s = responde(conteudo(&sete.to_string())).await;
+async fn llm_bad_actions_are_dropped_and_incomplete_mouse_gets_defaults() {
+    let resposta = json!({"interpretacao": "tabela de campos", "motivo": "extra", "acoes": [
+        {"type": "invoke"},
+        {"type": "mouse", "x": 10, "y": 20, "rotulo": "interruptor", "motivo": "campo a mais"},
+        {"type": "mouse", "x": 10, "y": 20, "delta": -5},
+        {"type": "keys", "keys": ["Tab"]}, {"type": "keys", "keys": ["Tab"]}, {"type": "keys", "keys": ["Tab"]},
+        {"type": "keys", "keys": ["Tab"]}, {"type": "keys", "keys": ["Tab"]}]});
+    let s = responde(conteudo(&resposta.to_string())).await;
     let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;
-    assert!(a.interpretacao.starts_with("ajuda visual indisponível: ValidationError: "), "{}", a.interpretacao);
-    let s = responde(conteudo(r#"{"interpretacao": "x", "acoes": [{"type": "invoke"}]}"#)).await;
+    assert_eq!(a.interpretacao, "tabela de campos");
+    assert_eq!(a.acoes.len(), 6, "invoke without target dropped, then at most 6");
+    assert_eq!((a.acoes[0].button, a.acoes[0].mode, a.acoes[0].rotulo.as_deref()), (Some(Button::Left), Some(MouseMode::Click), Some("interruptor")));
+    assert_eq!((a.acoes[1].mode, a.acoes[1].delta), (Some(MouseMode::Scroll), Some(-5)));
+}
+
+// A reply without the JSON object is asked once more before giving up.
+#[tokio::test]
+async fn llm_reply_without_json_is_asked_again() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(conteudo("Vejo a tabela, mas não sei.")).up_to_n_times(1).mount(&s).await;
+    Mock::given(method("POST")).respond_with(conteudo(r#"{"interpretacao": "segunda", "acoes": []}"#)).mount(&s).await;
     let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;
-    assert!(a.interpretacao.starts_with("ajuda visual indisponível: ValidationError: "), "{}", a.interpretacao);
+    assert_eq!(a.interpretacao, "segunda");
+    assert_eq!(s.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -128,7 +145,7 @@ async fn llm_answer_shape_errors_name_the_python_exception() {
         (json!({"choices": []}), "IndexError: list index out of range"),
         (json!({"choices": [{}]}), "KeyError: 'message'"),
         (json!({"choices": [{"message": {"content": null}}]}), "AttributeError: 'NoneType' object has no attribute 'strip'"),
-        (json!({"choices": [{"message": {"content": "```sem quebra"}}]}), "ValidationError: expected value at line 1 column 1"),
+        (json!({"choices": [{"message": {"content": "```sem quebra"}}]}), "ValidationError: resposta sem o objeto JSON pedido: ```sem quebra"),
     ] {
         let s = responde(ResponseTemplate::new(200).set_body_json(resposta)).await;
         let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;

@@ -245,6 +245,7 @@ pub fn element_from(info: &NoInfo, window: Rect) -> Option<Element> {
     if info.has("expandable") { actions.push(if info.has("expanded") { ElementAction::Collapse } else { ElementAction::Expand }); }
     if info.has("editable") { actions.push(ElementAction::SetValue); }
     if info.has("focusable") { actions.push(ElementAction::Focus); }
+    if role == "Document" { actions.push(ElementAction::Scroll); }
     let password = info.role == "password text";
     let name = info.name();
     let value = if role == "CheckBox" || role == "RadioButton" || info.has("checkable") || info.role == "toggle button" {

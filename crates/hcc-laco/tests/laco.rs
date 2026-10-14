@@ -681,6 +681,43 @@ async fn repeated_warning_can_be_dismissed() {
     assert_eq!(con.state.lock().unwrap().acts.len(), 2);
 }
 
+// The quoted page title only located the window: after "Voltar" it is gone, and that is the goal done, not missing.
+#[tokio::test]
+async fn quoted_text_already_on_screen_at_start_is_not_required_at_the_end() {
+    let mut antes = tree("o1", "");
+    antes.elements.push(serde_json::from_value(json!({"id":"e2","name":"Referência de webhooks","role":"Document",
+        "value":null,"enabled":true,"rect":null,"focused":false,"actions":[]})).unwrap());
+    let con = FakeConnector::new(vec![antes, tree("o2", "")]);
+    let (mut op, _server) = setup(vec![select("invoke Button 'Salvar'"), done()]).await;
+    op.texto = "na página \"Referência de webhooks\", clicar em Salvar. Só isso.".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+}
+
+// Jev still unsure after the help: the help's first action decides (after the risk question) and the loop goes on.
+#[tokio::test]
+async fn low_confidence_after_help_follows_the_help() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, server) = setup(vec![Answer::Choice("0", 0.2, 0.05), help(json!([{"type":"keys","keys":["Tab"],"rotulo":"próximo campo"}])),
+        Answer::Choice("0", 0.2, 0.05), Answer::Risk(0.05), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts[0].0, action(json!({"type":"keys","keys":["Tab"],"rotulo":"próximo campo"})));
+    assert_eq!(bodies(&server).await[3]["questions"].as_object().unwrap().len(), 1, "only the risk question");
+}
+
+#[tokio::test]
+async fn risky_help_action_after_low_confidence_is_not_run() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (op, _server) = setup(vec![Answer::Choice("0", 0.2, 0.05), help(json!([{"type":"keys","keys":["Tab"]}])),
+        Answer::Choice("0", 0.2, 0.05), Answer::Risk(0.9)]).await;
+    let r = run(op, &con).await;
+    assert!(r.motivo.starts_with("ação arriscada não executada: keys Tab"), "{}", r.motivo);
+    assert!(con.state.lock().unwrap().acts.is_empty());
+}
+
 #[tokio::test]
 async fn low_confidence_after_help_stops() {
     let con = FakeConnector::new(vec![tree("o1", "")]);

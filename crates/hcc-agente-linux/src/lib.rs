@@ -336,7 +336,19 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                 if self.tree.focus(&element.node).map_err(tree_error)? { Ok(()) } else { Err(runtime("aplicativo recusou o foco")) }
             }
             ActionType::SetValue => self.set_value(element, &info, action.value.as_deref()),
-            ActionType::Scroll => Err(invalid("tipo de ação desconhecido: scroll")),
+            ActionType::Scroll => {
+                // The wheel over the visible part of the element; delta > 0 goes down, as in the mouse action.
+                let visivel = rect.map(|r| Rect(r.0.max(window.0), r.1.max(window.1), r.2.min(window.2), r.3.min(window.3)))
+                    .filter(|r| r.0 < r.2 && r.1 < r.3).ok_or_else(|| runtime("controle sem área visível para rolar"))?;
+                let passos = if action.amount == Some(hcc_protocolo::Amount::Large) { 10 } else { 3 };
+                let delta = match action.direction {
+                    Some(hcc_protocolo::Direction::Down) => passos,
+                    Some(hcc_protocolo::Direction::Up) => -passos,
+                    _ => return Err(invalid("rolagem só para cima ou para baixo")),
+                };
+                let (x, y) = center(visivel);
+                self.mouse(&Action { kind: ActionType::Mouse, x: Some(x), y: Some(y), mode: Some(MouseMode::Scroll), delta: Some(delta), ..Default::default() })
+            }
             ActionType::Activate | ActionType::Launch | ActionType::Keys | ActionType::Text | ActionType::Mouse => Err(invalid(format!("tipo de ação desconhecido: {}", action.kind))),
         }
     }

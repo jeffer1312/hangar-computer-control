@@ -77,6 +77,20 @@ pub fn itens_pendentes(objetivo: &str, obs: &Observation) -> usize {
     literais + COMBOS.find_iter(objetivo).count()
 }
 
+/// The goal with the quotes taken off literals already naming a control on the first screen: those locate ("na página \"X\""),
+/// they are not something the goal must make appear.
+pub fn sem_localizadores(objetivo: &str, inicial: &Observation) -> String {
+    LITERAIS.replace_all(objetivo, |c: &regex::Captures| {
+        let texto = c.iter().skip(1).flatten().next().map_or("", |m| m.as_str());
+        // Names only (titles, labels): a field's value on the first screen may be the very thing to type.
+        let visto = texto.chars().count() >= 2 && inicial.elements.iter().any(|e| e.name.contains(texto));
+        if !visto { return c[0].to_owned(); }
+        let inteiro = &c[0];
+        let antes = &inteiro[..inteiro.find(['\'', '"', '“']).unwrap_or(0)];
+        format!("{antes}{texto}")
+    }).into_owned()
+}
+
 pub(crate) fn pendencia(objetivo: &str, obs: &Observation, recentes: &[Registro], segredos: &HashSet<String>) -> Option<(usize, String)> {
     let publico = |texto: &str| {
         if segredos.iter().any(|s| s.contains(texto)) { return "<senha>".into(); }

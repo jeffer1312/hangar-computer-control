@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use crate::http::{self, Falha, py_dumps};
 use crate::prompts::{AJUDA, AJUDA_SCHEMA};
 use crate::tipos::Ajuda;
+use hcc_protocolo::Action;
 
 pub const LLM_URL: &str = "http://127.0.0.1:8317/v1/chat/completions";
 pub const LLM_MODELO: &str = "gpt-5.6-luna";
@@ -23,16 +24,6 @@ pub struct Llm {
 
 fn be(b: &[u8]) -> u64 {
     b.iter().fold(0, |n, &x| (n << 8) | u64::from(x))
-}
-
-fn validar(a: &Ajuda) -> Result<(), String> {
-    if a.interpretacao.chars().count() > 1500 {
-        return Err("interpretacao com mais de 1500 caracteres".into());
-    }
-    if a.acoes.len() > 6 {
-        return Err("acoes com mais de 6 itens".into());
-    }
-    a.acoes.iter().try_for_each(|x| x.validate())
 }
 
 impl Llm {
@@ -77,32 +68,60 @@ impl Llm {
             let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png));
             conteudo.push(json!({"type": "image_url", "image_url": {"url": url}}));
         }
-        let mut corpo = json!({"model": self.model, "messages": [
-            {"role": "system", "content": format!("{AJUDA}{AJUDA_SCHEMA}")},
-            {"role": "user", "content": conteudo}]});
-        if let Some(e) = self.effort.as_deref().filter(|e| !e.is_empty()) {
-            corpo["reasoning_effort"] = json!(e);
+        let mut mensagens = vec![
+            json!({"role": "system", "content": format!("{AJUDA}{AJUDA_SCHEMA}")}),
+            json!({"role": "user", "content": conteudo})];
+        // A reply without the object is asked once more, quoting it back.
+        for tentativa in 0..2 {
+            let mut corpo = json!({"model": self.model, "messages": mensagens});
+            if let Some(e) = self.effort.as_deref().filter(|e| !e.is_empty()) {
+                corpo["reasoning_effort"] = json!(e);
+            }
+            let r = http::post(&self.http, &self.url, &corpo, chave, timeout).await?;
+            let campo = |v: &Value, k: &str| v.get(k).cloned().ok_or_else(|| Falha::new("KeyError", format!("'{k}'")));
+            let primeira = campo(&r, "choices")?
+                .get(0)
+                .cloned()
+                .ok_or_else(|| Falha::new("IndexError", "list index out of range"))?;
+            let conteudo = campo(&campo(&primeira, "message")?, "content")?;
+            let bruto = conteudo
+                .as_str()
+                .ok_or_else(|| Falha::new("AttributeError", "'NoneType' object has no attribute 'strip'"))?
+                .trim();
+            if let Some(ajuda) = ler_ajuda(bruto) { return Ok(ajuda); }
+            if tentativa == 1 {
+                let trecho: String = bruto.chars().take(200).collect();
+                return Err(Falha::new("ValidationError", format!("resposta sem o objeto JSON pedido: {trecho}")));
+            }
+            mensagens.push(json!({"role": "assistant", "content": bruto}));
+            mensagens.push(json!({"role": "user", "content": "Reply again with only the JSON object of the schema, nothing else."}));
         }
-        let r = http::post(&self.http, &self.url, &corpo, chave, timeout).await?;
-        let campo = |v: &Value, k: &str| v.get(k).cloned().ok_or_else(|| Falha::new("KeyError", format!("'{k}'")));
-        let primeira = campo(&r, "choices")?
-            .get(0)
-            .cloned()
-            .ok_or_else(|| Falha::new("IndexError", "list index out of range"))?;
-        let conteudo = campo(&campo(&primeira, "message")?, "content")?;
-        let bruto = conteudo
-            .as_str()
-            .ok_or_else(|| Falha::new("AttributeError", "'NoneType' object has no attribute 'strip'"))?
-            .trim();
-        // Models wrap the object in a sentence or a ``` block, before or after: the answer is the first `{` that
-        // parses as Ajuda; without one, the error of parsing from the start.
-        let ler = |s: &str| serde_json::Deserializer::from_str(s).into_iter::<Ajuda>().next();
-        let ajuda = match bruto.match_indices('{').find_map(|(i, _)| ler(&bruto[i..]).and_then(Result::ok)) {
-            Some(ajuda) => ajuda,
-            None => ler(bruto).ok_or_else(|| Falha::new("ValidationError", "resposta vazia"))?
-                .map_err(|e| Falha::new("ValidationError", e.to_string()))?,
-        };
-        validar(&ajuda).map_err(|e| Falha::new("ValidationError", e))?;
-        Ok(ajuda)
+        unreachable!("the second attempt returns")
     }
+}
+
+const CAMPOS: &[&str] = &["type", "target", "value", "keys", "application", "args", "direction", "amount", "x", "y",
+    "button", "mode", "x2", "y2", "delta", "rotulo"];
+
+/// The first `{` of the reply that holds `interpretacao`, wherever the model put it (after a sentence, in a ```
+/// block). Unknown fields are ignored, a mouse action missing button/mode gets left/click (scroll with a delta),
+/// and an action that still does not validate is dropped alone; at most 6 are kept.
+fn ler_ajuda(bruto: &str) -> Option<Ajuda> {
+    let objeto = bruto.match_indices('{').find_map(|(i, _)| {
+        serde_json::Deserializer::from_str(&bruto[i..]).into_iter::<Value>().next()?.ok()
+            .filter(|v| v.get("interpretacao").is_some_and(Value::is_string))
+    })?;
+    let texto = |k: &str| objeto.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
+    let acoes = objeto.get("acoes").and_then(Value::as_array).into_iter().flatten().filter_map(|a| {
+        let mut a: serde_json::Map<String, Value> = a.as_object()?.iter()
+            .filter(|(k, v)| CAMPOS.contains(&k.as_str()) && !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect();
+        if a.get("type").and_then(Value::as_str) == Some("mouse") {
+            a.entry("button").or_insert_with(|| json!("left"));
+            let modo = if a.contains_key("delta") { "scroll" } else { "click" };
+            a.entry("mode").or_insert_with(|| json!(modo));
+        }
+        let acao: Action = serde_json::from_value(Value::Object(a)).ok()?;
+        acao.validate().is_ok().then_some(acao)
+    }).take(6).collect();
+    Some(Ajuda { interpretacao: texto("interpretacao").chars().take(1500).collect(), acoes, impedimento: texto("impedimento") })
 }

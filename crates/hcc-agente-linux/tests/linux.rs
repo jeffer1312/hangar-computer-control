@@ -776,3 +776,17 @@ fn grupo_sem_texto_nao_vira_controle() {
     let mut msg = node("section", ""); msg.info.text = Some("Mensagem".into());
     assert_eq!(element_from(&msg.info, Rect(0,0,100,100)).unwrap().value.as_deref(), Some("Mensagem"));
 }
+
+// A page longer than the window: the document is scrolled by the wheel over its visible center.
+#[test]
+fn documento_rola_pela_roda_no_centro_visivel() {
+    let mut pagina = node("document web", "Webhooks"); pagina.info.extents = Some((0, 0, 800, 2000));
+    let (mut desktop, commands, _) = desktop(vec![pagina]);
+    let observed = desktop.observe().unwrap();
+    assert!(observed.elements[0].actions.contains(&ElementAction::Scroll), "{:?}", observed.elements[0].actions);
+    commands.calls.borrow_mut().clear();
+    let rolar: Action = serde_json::from_value(json!({"type":"scroll","target":"e0","direction":"down","amount":"small"})).unwrap();
+    desktop.act(&observed, &rolar).unwrap();
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["hyprctl","dispatch","hl.dsp.cursor.move({ x = 1942, y = 351 })"]), "{:?}", commands.calls.borrow());
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","mousemove","--wheel","-x","0","-y","-3"]));
+}

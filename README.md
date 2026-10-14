@@ -10,7 +10,9 @@ Como funciona, por ciclo:
 2. O laço transforma a árvore em ações concretas (clicar botão X, digitar valor Y no campo Z, ativar janela W).
 3. O Jev (TypeSafe) escolhe uma ação. Não gera texto.
 4. Só quando o Jev não acha saída, ou a árvore vem vazia, um LLM barato olha o print e propõe ações extras,
-   que voltam pro Jev escolher. Janela da frente sem nenhum controle na árvore (botões desenhados, como a
+   que voltam pro Jev escolher. Se o Jev continua em dúvida, a primeira ação proposta pelo LLM é executada,
+   depois da pergunta de risco ao Jev. Resposta do LLM sem o JSON é pedida de novo uma vez; ação inválida dela
+   é descartada sozinha (mouse sem botão/modo vira clique esquerdo). Janela da frente sem nenhum controle na árvore (botões desenhados, como a
    caixa de mensagem da TMS): o print vai direto ao LLM, que devolve o clique rotulado ("botão Não"); o laço
    executa sem votação, só depois da pergunta de risco ao Jev e se o clique cair dentro dessa janela.
 5. O agente executa, o laço observa de novo. Repete até DONE, impedimento real ou limite.
@@ -95,7 +97,11 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
 - `objetivo(texto, dados={}, max_passos=12, limite_segundos=240)`: a principal. `texto` é o pedido como
   se fosse pra uma pessoa. `dados` leva valores que o laço pode digitar (usuário, senha, caminho, texto):
   qualquer valor em `dados` vira candidato de "digitar isso em cada campo editável", e o mesmo vale para
-  texto entre aspas e URL escritos no próprio `texto`. Retorna um texto com
+  URL escrita no próprio `texto`, e texto entre aspas quando o objetivo pede para digitar, preencher ou buscar
+  (fora disso, aspas só nomeiam o controle ou a página). Texto entre aspas que já é nome de um controle na
+  primeira tela localiza e não é cobrado na conferência final. Controles de mesmo papel e nome (um interruptor
+  por linha de tabela) aparecem pro Jev com o rótulo da linha: `Button 'X' [linha: messages]`. No Linux o
+  documento da página rola pela roda do mouse (`scroll` up/down). Retorna um texto com
   `concluído: …` ou `parou: …`, a lista de passos executados com a confiança do Jev, os tempos por etapa,
   o caminho do último print (se o LLM foi chamado) e a pasta de registro (`observacao.json`, `jev.jsonl`).
   Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print

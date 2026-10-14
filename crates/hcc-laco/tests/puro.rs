@@ -734,3 +734,21 @@ fn pedido_negado_nao_autoriza_fechar_nem_abrir() {
     installed.windows[0].class_name = "google-chrome".into();
     assert_eq!(launches(sem_app_aberto(all.clone(), &installed, goal)), ["Firefox", "Calculator"]);
 }
+
+// Every "Assinar" switch of the Meta webhook table is a Button named 'Cancelou a assinatura': only the row tells them apart.
+#[test]
+fn controles_de_mesmo_nome_levam_o_rotulo_da_linha() {
+    let tela = obs(vec![
+        el("e0", "messages", "Hyperlink", &[ElementAction::Invoke], None, Some(Rect(10, 100, 120, 120))),
+        el("e1", "Cancelou a assinatura", "Button", &[ElementAction::Invoke], None, Some(Rect(600, 98, 640, 122))),
+        el("e2", "message_deliveries", "Hyperlink", &[ElementAction::Invoke], None, Some(Rect(10, 200, 160, 220))),
+        el("e3", "Assinatura ativa", "Text", &[], None, Some(Rect(400, 200, 520, 220))),
+        el("e4", "Cancelou a assinatura", "Button", &[ElementAction::Invoke], None, Some(Rect(600, 198, 640, 222))),
+        el("e5", "Salvar", "Button", &[ElementAction::Invoke], None, Some(Rect(600, 300, 640, 320))),
+    ]);
+    let invoke = |id: &str| Action { kind: ActionType::Invoke, target: Some(id.into()), ..Default::default() };
+    let d = |id: &str| descrever_acao(&invoke(id), &tela, &HashSet::new(), true);
+    assert_eq!(d("e1"), "invoke Button 'Cancelou a assinatura' [linha: messages]");
+    assert_eq!(d("e4"), "invoke Button 'Cancelou a assinatura' [linha: message_deliveries]");
+    assert_eq!(d("e5"), "invoke Button 'Salvar'");
+}

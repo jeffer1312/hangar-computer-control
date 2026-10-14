@@ -17,13 +17,19 @@ static LEITURA: LazyLock<Regex> = LazyLock::new(|| {
 static ACAO_DIRIGIDA: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(envi|mand|respond|escrev|digit|apag|exclu|delet|remov|send|post|publi|compr|pag|curt|segu|bloque|denunc|agend|cancel|marc|transf|lig|cham|prescrev|assin|aprov|autoriz)\w*").unwrap()
 });
+static DIGITAR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(digit|escrev|preench|insir|inser|inform|coloc|pesquis|busc|procur|respond|envi|mand|type|write|fill|enter|search|input)\w*").unwrap()
+});
 static NOME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\p{Lu}\p{L}{3,}\b").unwrap());
 static PALAVRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\p{L}{3,}").unwrap());
 
 /// Texts the goal spells out (quoted or URLs): typing them is not inventing data.
 pub fn literais(goal: &str) -> Vec<String> {
     let mut vistos = HashSet::new();
-    let citados = LITERAIS.captures_iter(goal).filter_map(|c| c.iter().skip(1).flatten().next()).map(|m| m.as_str().to_owned());
+    // A quoted text names a row, a button, a page unless the goal asks to type something.
+    let digitar = DIGITAR.is_match(&crate::candidatos::afirmado(goal));
+    let citados = LITERAIS.captures_iter(goal).filter(|_| digitar)
+        .filter_map(|c| c.iter().skip(1).flatten().next()).map(|m| m.as_str().to_owned());
     let urls = URL.find_iter(goal).map(|m| m.as_str().trim_end_matches(['.', ',', ';', ':', ')', '!', '?']).to_owned());
     citados.chain(urls).filter(|t| t.chars().count() >= 2 && vistos.insert(t.clone())).collect()
 }
@@ -115,5 +121,13 @@ mod tests {
     #[test]
     fn literais_pegam_citacao_e_url_sem_pontuacao_final() {
         assert_eq!(literais("digite https://x.com, depois 'olá' e \"ok\"."), vec!["olá", "ok", "https://x.com"]);
+    }
+
+    // "messages" named a table row and was typed in the site's search box.
+    #[test]
+    fn citacao_so_vira_texto_quando_o_objetivo_pede_para_digitar() {
+        assert!(literais("ligar o interruptor da linha \"messages\". NÃO usar a caixa \"Pesquisar\"").is_empty());
+        assert_eq!(literais("na página \"X\", ir para https://y.dev/a"), vec!["https://y.dev/a"]);
+        assert_eq!(literais("preencher o campo \"URL\" com 'abc'"), vec!["URL", "abc"]);
     }
 }

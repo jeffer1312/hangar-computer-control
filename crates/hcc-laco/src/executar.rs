@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use crate::barreiras::{Barreiras, aviso, escolhe_foco, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
+use crate::barreiras::{Barreiras, aviso, escolhe_foco, sem_localizadores, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
 use crate::candidatos::{apps_do_objetivo, candidatos, descrever_acao, py_str, segredos, sem_app_aberto, texto_no_editavel};
 use crate::descrever::{intencao, py_repr};
 use crate::estado::{AssinaturaTela, assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
@@ -326,6 +326,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut anterior = None;
     let mut barreiras = Barreiras::default();
     let mut recusas = HashSet::new();
+    let mut conferir: Option<String> = None;
     let mut foco_escolhido = false;
     let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
     let mut fechados: Vec<String> = Vec::new();
@@ -409,6 +410,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
         let obs = controle.medir("observacao", Progresso::Observacao,
             async { observar(s).await.map_err(erro_sessao) }).await?;
         let atual = assinatura_tela(&obs);
+        let conferir = &*conferir.get_or_insert_with(|| sem_localizadores(&op.texto, &obs));
         if let Some(ultima) = recentes.last_mut().filter(|r| r.screen_changed.is_none()) {
             ultima.screen_changed = anterior.as_ref().map_or(Some(true), |a| mudou(a, &atual));
         }
@@ -443,6 +445,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
         let mut leitura = String::new();
         let mut fila: Vec<Candidato> = Vec::new();
         let mut falta_dica = None;
+        let mut primeira_ajuda: Option<Candidato> = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, &recentes, None);
             let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
@@ -512,13 +515,13 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                         leitura_forte = true;
                     } else if d2.escolha == Escolha::Done && d2.p >= 0.75 { confirmado = Some(d2.p); }
                     // The print reading plus every explicit item of the goal on screen is evidence enough.
-                    else if itens_pendentes(&op.texto, &obs) > 0 && pendencia(&op.texto, &obs, &recentes, &secretos.valores).is_none() {
+                    else if itens_pendentes(conferir, &obs) > 0 && pendencia(conferir, &obs, &recentes, &secretos.valores).is_none() {
                         confirmado = Some(d.p);
                     }
                 }
                 match confirmado {
                     Some(p) => {
-                        if let Some((indice, falta)) = pendencia(&op.texto, &obs, &recentes, &secretos.valores) {
+                        if let Some((indice, falta)) = pendencia(conferir, &obs, &recentes, &secretos.valores) {
                             recentes.push(Registro { action: format!("DONE recusado: {falta}"), result: "não confirmado".into(),
                                 screen_changed: Some(false), target_rect: None, clique: None, executada: false });
                             if !recusas.insert(indice) {
@@ -566,6 +569,15 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 || (d.escolha == Escolha::Wait && esperando);
             if !fraco && (!obs.elements.is_empty() && !obs.truncated || ajudou) { break d; }
             if ajudou {
+                // Jev still unsure: the help's first action decides, after the risk question.
+                if let Some(proposta) = primeira_ajuda.take() {
+                    let estado = secretos.estado(op, &obs, &recentes, Some(&dica));
+                    let limite = controle.restante()?.min(Duration::from_secs(30));
+                    let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, limite)).await?;
+                    controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
+                    let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
+                    break Decisao { escolha: Escolha::Indice(i), p: 1.0, risco, top: vec![] };
+                }
                 r.motivo = format!("sem ação segura: Jev escolheu {opcao} com {}. {dica}", percentual(d.p)).trim().into();
                 return Ok(());
             }
@@ -580,6 +592,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                 .flat_map(|a| texto_no_editavel(a, &obs)).map(|a| secretos.candidato(a, &obs)).collect();
             for proposta in segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), &fechados), &recentes), &op.texto, &recentes, &secretos.valores)
                 .into_iter().filter(|p| !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
+                if primeira_ajuda.is_none() && dentro(&proposta.acao, &obs) { primeira_ajuda = Some(proposta.clone()); }
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta); }
             }
         };
