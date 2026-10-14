@@ -18,7 +18,7 @@ static ACAO_DIRIGIDA: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(envi|mand|respond|escrev|digit|apag|exclu|delet|remov|send|post|publi|compr|pag|curt|segu|bloque|denunc|agend|cancel|marc|transf|lig|cham|prescrev|assin|aprov|autoriz)\w*").unwrap()
 });
 static DIGITAR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(digit|escrev|preench|insir|inser|inform|coloc|pesquis|busc|procur|respond|envi|mand|type|write|fill|enter|search|input)\w*").unwrap()
+    Regex::new(r"(?i)\b(?:(?:digit|escrev|preench|pesquis|procur)\w*|insir[ao]|inserir|insere|inform(?:e|ar|a)|coloqu?(?:e|ar|a)|busqu?(?:e|ar|a)|envi(?:e|ar|a)|mand(?:e|ar|a)|respond(?:a|er|e)|type|write|fill|enter|search|input)\b").unwrap()
 });
 static NOME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\p{Lu}\p{L}{3,}\b").unwrap());
 static PALAVRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\p{L}{3,}").unwrap());
@@ -27,11 +27,15 @@ static PALAVRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\p{L}{3,}").unwr
 pub fn literais(goal: &str) -> Vec<String> {
     let mut vistos = HashSet::new();
     // A quoted text names a row, a button, a page unless the goal asks to type something.
-    let digitar = DIGITAR.is_match(&crate::candidatos::afirmado(goal));
+    let digitar = pede_digitar(goal);
     let citados = LITERAIS.captures_iter(goal).filter(|_| digitar)
         .filter_map(|c| c.iter().skip(1).flatten().next()).map(|m| m.as_str().to_owned());
     let urls = URL.find_iter(goal).map(|m| m.as_str().trim_end_matches(['.', ',', ';', ':', ')', '!', '?']).to_owned());
     citados.chain(urls).filter(|t| t.chars().count() >= 2 && vistos.insert(t.clone())).collect()
+}
+
+pub(crate) fn pede_digitar(goal: &str) -> bool {
+    DIGITAR.is_match(&crate::candidatos::afirmado(goal))
 }
 
 pub fn pede_leitura(goal: &str) -> bool {

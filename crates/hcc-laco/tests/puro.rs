@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use hcc_laco::barreiras::{Barreiras, aviso, fecha_janela,itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
+use hcc_laco::barreiras::{Barreiras, aviso, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
 use hcc_laco::candidatos::{apps_do_objetivo, candidatos, descrever_acao, segredos, sem_app_aberto, texto_no_editavel};
 use hcc_laco::descrever::intencao;
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
@@ -751,4 +751,34 @@ fn controles_de_mesmo_nome_levam_o_rotulo_da_linha() {
     assert_eq!(d("e1"), "invoke Button 'Cancelou a assinatura' [linha: messages]");
     assert_eq!(d("e4"), "invoke Button 'Cancelou a assinatura' [linha: message_deliveries]");
     assert_eq!(d("e5"), "invoke Button 'Salvar'");
+}
+
+#[test]
+fn negacao_nao_come_palavra_que_comeca_igual() {
+    assert_eq!(hcc_laco::candidatos::afirmado("abrir a semana no calendário").trim(), "abrir a semana no calendário");
+    assert!(!hcc_laco::candidatos::afirmado("salvar, sem fechar a janela").contains("fechar"));
+}
+
+// A value to type that also starts a name on the first screen ("Maria Silva") is still required at the end.
+#[test]
+fn texto_a_digitar_nao_vira_localizador() {
+    let tela = obs(vec![el("e0", "Maria Silva", "ListItem", &[], None, None)]);
+    assert_eq!(hcc_laco::barreiras::sem_localizadores("digitar \"Maria\" no campo", &tela), "digitar \"Maria\" no campo");
+    assert_eq!(hcc_laco::barreiras::sem_localizadores("na lista \"Maria Silva\", clicar Abrir", &tela), "na lista Maria Silva, clicar Abrir");
+}
+
+#[test]
+fn revisao_digitar_estrito_super_q_e_app_de_mesma_marca() {
+    assert!(hcc_laco::objetivo::literais("abrir a página de informações, linha \"messages\"").is_empty());
+    assert_eq!(hcc_laco::objetivo::literais("informe \"Ana\" no campo"), vec!["Ana"]);
+    let keys = |k: &[&str]| Action { kind: ActionType::Keys, keys: Some(k.iter().map(|s| s.to_string()).collect()), ..Default::default() };
+    assert!(fecha_janela(&keys(&["super", "q"]), &obs(vec![])));
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Google Calendar => /x/calendar", "Chrome (CDP) => /x/chrome-cdp"]);
+    let mut aberto: Observation = serde_json::from_value(wire).unwrap();
+    aberto.windows[0].class_name = "google-chrome".into();
+    let todos = candidatos(&aberto, &Map::new(), &HashSet::new());
+    let lancados: Vec<String> = sem_app_aberto(todos, &aberto, "abrir o calendário").into_iter()
+        .filter(|c| c.acao.kind == ActionType::Launch).filter_map(|c| c.acao.rotulo).collect();
+    assert_eq!(lancados, ["Google Calendar"]);
 }

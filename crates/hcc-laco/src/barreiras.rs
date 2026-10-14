@@ -80,6 +80,8 @@ pub fn itens_pendentes(objetivo: &str, obs: &Observation) -> usize {
 /// The goal with the quotes taken off literals already naming a control on the first screen: those locate ("na página \"X\""),
 /// they are not something the goal must make appear.
 pub fn sem_localizadores(objetivo: &str, inicial: &Observation) -> String {
+    // A goal that types something: its quoted texts may be the values, and a value may start a name on screen.
+    if crate::objetivo::pede_digitar(objetivo) { return objetivo.to_owned(); }
     LITERAIS.replace_all(objetivo, |c: &regex::Captures| {
         let texto = c.iter().skip(1).flatten().next().map_or("", |m| m.as_str());
         // Names only (titles, labels): a field's value on the first screen may be the very thing to type.
@@ -129,12 +131,13 @@ pub fn fecha_janela(acao: &Action, obs: &Observation) -> bool {
     if acao.kind == ActionType::Keys {
         let teclas: HashSet<String> = acao.keys.iter().flatten().map(|k| casefold(k)).collect();
         let tem = |k: &str| teclas.contains(k) || (k == "ctrl" && teclas.contains("control"));
-        return (tem("alt") && tem("f4")) || (tem("ctrl") && tem("q")) || (tem("ctrl") && tem("shift") && tem("w"));
+        let super_ = tem("super") || tem("win") || tem("meta");
+        return (tem("alt") && tem("f4")) || (tem("ctrl") && tem("q")) || (tem("ctrl") && tem("shift") && tem("w")) || (super_ && tem("q"));
     }
     let Some(alvo) = acao.target.as_deref().and_then(|id| obs.elements.iter().rev().find(|e| e.id == id)) else {
         return false;
     };
-    let Some(r) = alvo.rect.filter(|_| alvo.role == "Button" && matches!(casefold(&alvo.name).as_str(), "close" | "fechar"))
+    let Some(r) = alvo.rect.filter(|_| alvo.role == "Button" && matches!(casefold(&alvo.name).as_str(), "close" | "fechar" | "sair" | "quit" | "exit"))
     else {
         return false;
     };

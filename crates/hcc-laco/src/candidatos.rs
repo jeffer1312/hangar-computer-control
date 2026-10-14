@@ -11,7 +11,7 @@ use crate::descrever::{Alvo, alvo, descrever, intencao};
 use crate::tipos::Candidato;
 
 static NEGADO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:^|[^\p{L}])(?:não|nao|nunca|jamais|sem|nem|never|without|don'?t|do not)(?:[^\p{L}][^.,;:!?\n]*)?").unwrap()
+    Regex::new(r"(?i)(?:^|[^\p{L}])(?:não|nao|nunca|jamais|sem|nem|never|without|don'?t|do not)(?:[^\p{L}][^.,;:!?\n]*|$)").unwrap()
 });
 
 /// The goal without its negated clauses ("não fechar janela nem abrir outro navegador"): what it forbids must
@@ -160,8 +160,10 @@ pub fn sem_app_aberto(cands: Vec<Candidato>, obs: &Observation, goal: &str) -> V
         let exe = c.acao.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_lowercase();
         let exe = exe.strip_suffix(".exe").unwrap_or(&exe);
         // "Chrome (CDP)" while google-chrome is open: a distinctive word of the name already names an open window.
-        let palavra_aberta = c.acao.rotulo.as_deref().unwrap_or_default().split(|ch: char| !ch.is_alphanumeric())
-            .filter(|w| w.chars().count() >= 5).any(|w| { let w = w.to_lowercase(); abertos.iter().any(|a| a.contains(&w)) });
+        // Every distinctive word, so a vendor word alone ("Google Calendar" with google-chrome open) does not count.
+        let palavras: Vec<String> = c.acao.rotulo.as_deref().unwrap_or_default().split(|ch: char| !ch.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 5).map(str::to_lowercase).collect();
+        let palavra_aberta = !palavras.is_empty() && palavras.iter().all(|w| abertos.iter().any(|a| a.contains(w.as_str())));
         c.acao.kind != ActionType::Launch || !(abertos.contains(exe) || palavra_aberta)
     }).collect()
 }

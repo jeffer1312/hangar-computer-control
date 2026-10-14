@@ -576,7 +576,8 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
                     let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
                     let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
-                    break Decisao { escolha: Escolha::Indice(i), p: 1.0, risco, top: vec![] };
+                    // Jev's own confidence stays on record: the step came from the help, not from a sure vote.
+                    break Decisao { escolha: Escolha::Indice(i), p: d.p, risco, top: vec![] };
                 }
                 r.motivo = format!("sem ação segura: Jev escolheu {opcao} com {}. {dica}", percentual(d.p)).trim().into();
                 return Ok(());

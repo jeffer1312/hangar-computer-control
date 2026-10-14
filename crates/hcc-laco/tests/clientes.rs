@@ -47,15 +47,14 @@ async fn llm_timeout_degrades_to_hint() {
 #[tokio::test]
 async fn llm_bad_actions_are_dropped_and_incomplete_mouse_gets_defaults() {
     let resposta = json!({"interpretacao": "tabela de campos", "motivo": "extra", "acoes": [
-        {"type": "invoke"},
         {"type": "mouse", "x": 10, "y": 20, "rotulo": "interruptor", "motivo": "campo a mais"},
         {"type": "mouse", "x": 10, "y": 20, "delta": -5},
-        {"type": "keys", "keys": ["Tab"]}, {"type": "keys", "keys": ["Tab"]}, {"type": "keys", "keys": ["Tab"]},
-        {"type": "keys", "keys": ["Tab"]}, {"type": "keys", "keys": ["Tab"]}]});
+        {"type": "invoke"},
+        {"type": "text", "value": "sem o clique de foco antes"}]});
     let s = responde(conteudo(&resposta.to_string())).await;
     let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;
-    assert_eq!(a.interpretacao, "tabela de campos");
-    assert_eq!(a.acoes.len(), 6, "invoke without target dropped, then at most 6");
+    assert!(a.interpretacao.starts_with("tabela de campos [2 ação(ões) da ajuda descartada(s): invoke exige"), "{}", a.interpretacao);
+    assert_eq!(a.acoes.len(), 2, "the list stops at the first bad action: what follows depended on it");
     assert_eq!((a.acoes[0].button, a.acoes[0].mode, a.acoes[0].rotulo.as_deref()), (Some(Button::Left), Some(MouseMode::Click), Some("interruptor")));
     assert_eq!((a.acoes[1].mode, a.acoes[1].delta), (Some(MouseMode::Scroll), Some(-5)));
 }
@@ -145,7 +144,7 @@ async fn llm_answer_shape_errors_name_the_python_exception() {
         (json!({"choices": []}), "IndexError: list index out of range"),
         (json!({"choices": [{}]}), "KeyError: 'message'"),
         (json!({"choices": [{"message": {"content": null}}]}), "AttributeError: 'NoneType' object has no attribute 'strip'"),
-        (json!({"choices": [{"message": {"content": "```sem quebra"}}]}), "ValidationError: resposta sem o objeto JSON pedido: ```sem quebra"),
+        (json!({"choices": [{"message": {"content": "```sem quebra"}}]}), "ValidationError: resposta sem o objeto JSON pedido: ```sem quebra | ```sem quebra"),
     ] {
         let s = responde(ResponseTemplate::new(200).set_body_json(resposta)).await;
         let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;

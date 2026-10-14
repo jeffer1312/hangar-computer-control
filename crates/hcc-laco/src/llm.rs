@@ -72,6 +72,7 @@ impl Llm {
             json!({"role": "system", "content": format!("{AJUDA}{AJUDA_SCHEMA}")}),
             json!({"role": "user", "content": conteudo})];
         // A reply without the object is asked once more, quoting it back.
+        let mut recusadas = Vec::new();
         for tentativa in 0..2 {
             let mut corpo = json!({"model": self.model, "messages": mensagens});
             if let Some(e) = self.effort.as_deref().filter(|e| !e.is_empty()) {
@@ -89,14 +90,12 @@ impl Llm {
                 .ok_or_else(|| Falha::new("AttributeError", "'NoneType' object has no attribute 'strip'"))?
                 .trim();
             if let Some(ajuda) = ler_ajuda(bruto) { return Ok(ajuda); }
-            if tentativa == 1 {
-                let trecho: String = bruto.chars().take(200).collect();
-                return Err(Falha::new("ValidationError", format!("resposta sem o objeto JSON pedido: {trecho}")));
-            }
+            recusadas.push(bruto.chars().take(200).collect::<String>());
+            if tentativa == 1 { break; }
             mensagens.push(json!({"role": "assistant", "content": bruto}));
             mensagens.push(json!({"role": "user", "content": "Reply again with only the JSON object of the schema, nothing else."}));
         }
-        unreachable!("the second attempt returns")
+        Err(Falha::new("ValidationError", format!("resposta sem o objeto JSON pedido: {}", recusadas.join(" | "))))
     }
 }
 
@@ -105,23 +104,30 @@ const CAMPOS: &[&str] = &["type", "target", "value", "keys", "application", "arg
 
 /// The first `{` of the reply that holds `interpretacao`, wherever the model put it (after a sentence, in a ```
 /// block). Unknown fields are ignored, a mouse action missing button/mode gets left/click (scroll with a delta),
-/// and an action that still does not validate is dropped alone; at most 6 are kept.
+/// and the list stops at the first action that still does not validate (what follows depended on it), with a note
+/// in `interpretacao`; at most 6 are kept.
 fn ler_ajuda(bruto: &str) -> Option<Ajuda> {
     let objeto = bruto.match_indices('{').find_map(|(i, _)| {
         serde_json::Deserializer::from_str(&bruto[i..]).into_iter::<Value>().next()?.ok()
             .filter(|v| v.get("interpretacao").is_some_and(Value::is_string))
     })?;
     let texto = |k: &str| objeto.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-    let acoes = objeto.get("acoes").and_then(Value::as_array).into_iter().flatten().filter_map(|a| {
-        let mut a: serde_json::Map<String, Value> = a.as_object()?.iter()
+    let lidas: Vec<Result<Action, String>> = objeto.get("acoes").and_then(Value::as_array).into_iter().flatten().map(|a| {
+        let mut a: serde_json::Map<String, Value> = a.as_object().ok_or("ação não é um objeto")?.iter()
             .filter(|(k, v)| CAMPOS.contains(&k.as_str()) && !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect();
         if a.get("type").and_then(Value::as_str) == Some("mouse") {
             a.entry("button").or_insert_with(|| json!("left"));
             let modo = if a.contains_key("delta") { "scroll" } else { "click" };
             a.entry("mode").or_insert_with(|| json!(modo));
         }
-        let acao: Action = serde_json::from_value(Value::Object(a)).ok()?;
-        acao.validate().is_ok().then_some(acao)
-    }).take(6).collect();
-    Some(Ajuda { interpretacao: texto("interpretacao").chars().take(1500).collect(), acoes, impedimento: texto("impedimento") })
+        let acao: Action = serde_json::from_value(Value::Object(a)).map_err(|e| e.to_string())?;
+        acao.validate().map(|()| acao)
+    }).collect();
+    let validas = lidas.iter().take_while(|a| a.is_ok()).count();
+    let mut interpretacao: String = texto("interpretacao").chars().take(1500).collect();
+    if let Some(Err(motivo)) = lidas.get(validas) {
+        interpretacao.push_str(&format!(" [{} ação(ões) da ajuda descartada(s): {motivo}]", lidas.len() - validas));
+    }
+    let acoes = lidas.into_iter().take(validas.min(6)).flatten().collect();
+    Some(Ajuda { interpretacao, acoes, impedimento: texto("impedimento") })
 }
