@@ -717,3 +717,20 @@ fn navegador_so_e_lancado_quando_o_objetivo_pede() {
         .filter(|c| c.acao.kind == ActionType::Launch).filter_map(|c| c.acao.rotulo).collect();
     assert_eq!(abertos, ["Firefox", "Calculator"]);
 }
+
+// "Não fechar janela nem abrir outro navegador" read as a request to close and to open another window.
+#[test]
+fn pedido_negado_nao_autoriza_fechar_nem_abrir() {
+    let goal = "No Google Chrome, preencher o campo URL. Não fechar janela nem abrir outro navegador. Parar depois.";
+    assert!(!objetivo_pede_fechar(goal));
+    assert!(!objetivo_pede_fechar("preencher o campo, sem fechar o aplicativo"));
+    assert!(objetivo_pede_fechar("salvar e fechar a janela"));
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Firefox => firefox", "Google Chrome => google-chrome-stable", "Calculator => gnome-calculator"]);
+    let mut installed: Observation = serde_json::from_value(wire).unwrap();
+    let all = candidatos(&installed, &Map::new(), &HashSet::new());
+    let launches = |v: Vec<Candidato>| -> Vec<String> { v.into_iter().filter(|c| c.acao.kind == ActionType::Launch).filter_map(|c| c.acao.rotulo).collect() };
+    assert_eq!(launches(apps_do_objetivo(all.clone(), "preencher o campo URL. Não abrir outro navegador.")), ["Calculator"]);
+    installed.windows[0].class_name = "google-chrome".into();
+    assert_eq!(launches(sem_app_aberto(all.clone(), &installed, goal)), ["Firefox", "Calculator"]);
+}

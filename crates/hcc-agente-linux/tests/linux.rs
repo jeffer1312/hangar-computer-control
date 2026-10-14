@@ -223,7 +223,9 @@ fn subarvore_oculta_fora_da_janela_e_no_que_sumiu_ficam_de_fora() {
 #[test]
 fn secao_web_fora_da_janela_nao_esconde_os_filhos() {
     // Chromium: a primeira section da página do Meta for Developers vem em x=2213 e contém o formulário inteiro.
+    // Chromium gives nearly every web node the actions click and showContextMenu.
     let mut secao = node("section", ""); secao.info.extents = Some((2213,190,64,40)); secao.children = vec![1, 2];
+    secao.info.actions = vec!["click".into(), "showContextMenu".into()];
     let mut campo = node("entry", "URL de callback"); campo.info.states.push("editable".into()); campo.info.extents = Some((50,50,300,30));
     let mut fora = node("push button", "Fora"); fora.info.extents = Some((2213,190,64,40));
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![secao, campo, fora])), ..Default::default() };

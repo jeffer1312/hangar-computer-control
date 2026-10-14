@@ -10,6 +10,16 @@ use serde_json::{Map, Value};
 use crate::descrever::{Alvo, alvo, descrever, intencao};
 use crate::tipos::Candidato;
 
+static NEGADO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[^\p{L}])(?:não|nao|nunca|jamais|sem|nem|never|without|don'?t|do not)(?:[^\p{L}][^.,;:!?\n]*)?").unwrap()
+});
+
+/// The goal without its negated clauses ("não fechar janela nem abrir outro navegador"): what it forbids must
+/// never read as what it asks for.
+pub fn afirmado(goal: &str) -> String {
+    NEGADO.replace_all(goal, " ").into_owned()
+}
+
 static CHAVE_SECRETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)senha|password|passwd|pin|token").unwrap());
 
 /// Roles whose real click is offered when UIA has no pattern for them (laco_uia.py:159).
@@ -143,7 +153,7 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
 /// another window keeps the launch.
 pub fn sem_app_aberto(cands: Vec<Candidato>, obs: &Observation, goal: &str) -> Vec<Candidato> {
     static NOVA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(nova|novo|outra|outro|new|another)\b").unwrap());
-    if NOVA.is_match(goal) { return cands; }
+    if NOVA.is_match(&afirmado(goal)) { return cands; }
     let abertos: HashSet<String> = obs.windows.iter()
         .filter_map(|w| w.class_name.rsplit('.').next().map(str::to_lowercase)).collect();
     cands.into_iter().filter(|c| {
@@ -167,7 +177,7 @@ fn nomeado(texto: &str, termo: &str) -> bool {
 
 /// A goal that names installed apps may only launch those: the full installed list lets Jev open another browser.
 pub fn apps_do_objetivo(cands: Vec<Candidato>, goal: &str) -> Vec<Candidato> {
-    let goal = goal.to_lowercase();
+    let goal = afirmado(goal).to_lowercase();
     let inteiro = |a: &Action| {
         let executavel = a.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default();
         let executavel = executavel.strip_suffix(".exe").or_else(|| executavel.strip_suffix(".EXE")).unwrap_or(executavel);

@@ -205,7 +205,7 @@ pub fn nome_papel(role: atspi::Role, estendido: Option<String>) -> String {
 }
 
 pub const ITEMS: &[&str] = &["ListItem", "TreeItem", "TabItem", "DataItem"];
-pub const INVOKE: &[&str] = &["click", "press", "activate", "dodefault", "jump", "open", "showmenu"];
+pub const INVOKE: &[&str] =&["click", "press", "activate", "dodefault", "jump", "open", "showmenu"];
 
 pub fn role_name(role: &str, states: &[String]) -> String {
     if role == "text" { return if states.iter().any(|s| s == "editable") { "Edit" } else { "Text" }.into(); }
@@ -281,10 +281,12 @@ pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, budget: Dura
         visited += 1;
         let info = match tree.read(&node) { Ok(info) => info, Err(error) => { crate::ignorado("walk.read", &error); continue; } };
         if !info.has("showing") { continue; }
-        let outside = info.extents.and_then(|e| element_rect(e, window)).is_some_and(|rect| !intersects(rect, window));
-        // Scrolled-away content can be most of a feed: skip its whole subtree. A nameless web container is the
-        // exception: its CSS box does not bound its children (Chromium puts a whole page under one at x=2213).
-        if outside && (!info.name.is_empty() || !info.actions.is_empty()) { continue; }
+        let rect = info.extents.and_then(|e| element_rect(e, window));
+        let outside = rect.is_some_and(|rect| !intersects(rect, window));
+        // Scrolled-away content can be most of a feed: skip the whole subtree of what is above or below the window.
+        // Only sideways is not enough: a CSS box does not bound its children (Chromium puts a whole page under one
+        // section at x=2213).
+        if rect.is_some_and(|r| r.3 <= window.1 || r.1 >= window.3) { continue; }
         match tree.children(&node) { Ok(children) => pending.extend(children), Err(error) => crate::ignorado("walk.children", &error) }
         if outside { continue; }
         if let Some(mut element) = element_from(&info, window) {

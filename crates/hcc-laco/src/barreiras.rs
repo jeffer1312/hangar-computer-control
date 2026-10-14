@@ -137,7 +137,7 @@ pub fn fecha_janela(acao: &Action, obs: &Observation) -> bool {
 }
 
 pub fn objetivo_pede_fechar(goal: &str) -> bool {
-    PEDE_FECHAR.is_match(goal)
+    PEDE_FECHAR.is_match(&crate::candidatos::afirmado(goal))
 }
 
 /// Text of the app's message box: Text/Edit longer than 15 chars, only on small trees.
