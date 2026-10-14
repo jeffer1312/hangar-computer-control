@@ -263,6 +263,19 @@ pub fn element_from(info: &NoInfo, window: Rect) -> Option<Element> {
         rect: info.extents.and_then(|e| element_rect(e, window)), focused: info.has("focused"), actions, password })
 }
 
+/// A web document as wide as its parent times the monitor scale: Chromium reported it in physical pixels.
+fn fisico(info: &NoInfo, pai: Option<(i32, i32, i32, i32)>, escala: f64) -> bool {
+    let (Some((_, _, w, _)), Some((_, _, pw, _))) = (info.extents, pai) else { return false; };
+    escala > 1.01 && info.role.starts_with("document") && pw > 0
+        && (f64::from(w) / (f64::from(pw) * escala) - 1.0).abs() < 0.03
+}
+
+pub fn escalar((x, y, w, h): (i32, i32, i32, i32), fator: f64) -> (i32, i32, i32, i32) {
+    if fator == 1.0 { return (x, y, w, h); }
+    let f = |v: i32| (f64::from(v) * fator).round() as i32;
+    (f(x), f(y), f(w), f(h))
+}
+
 fn intersects(a: Rect, b: Rect) -> bool { a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3 }
 
 pub fn choose_frame(frames: &[(String, Vec<String>)], title: &str) -> Option<usize> {
@@ -271,28 +284,36 @@ pub fn choose_frame(frames: &[(String, Vec<String>)], title: &str) -> Option<usi
     if active.len() == 1 { Some(active[0]) } else if frames.len() == 1 { Some(0) } else { None }
 }
 
-pub type WalkResult<N> = (Vec<Element>, Vec<N>, bool);
+pub type WalkResult<N> = (Vec<Element>, Vec<(N, f64)>, bool);
 
-pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, budget: Duration, limit: usize) -> Result<WalkResult<T::Node>, String> {
-    let mut pending: VecDeque<_> = roots.into();
+/// `escala` is the monitor's: Chromium/Electron web content on a scaled Wayland output reports physical pixels
+/// while the frame reports logical ones; each node carries the factor that brings its extents to logical.
+pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64, budget: Duration, limit: usize) -> Result<WalkResult<T::Node>, String> {
+    let mut pending: VecDeque<(T::Node, f64, Option<(i32, i32, i32, i32)>)> = roots.into_iter().map(|n| (n, 1.0, None)).collect();
     let (mut controls, mut nodes, mut visited) = (vec![], vec![], 0);
     let start = Instant::now();
     while !pending.is_empty() && visited < limit && start.elapsed() < budget {
-        let Some(node) = pending.pop_front() else { break; };
+        let Some((node, mut fator, pai)) = pending.pop_front() else { break; };
         visited += 1;
-        let info = match tree.read(&node) { Ok(info) => info, Err(error) => { crate::ignorado("walk.read", &error); continue; } };
+        let mut info = match tree.read(&node) { Ok(info) => info, Err(error) => { crate::ignorado("walk.read", &error); continue; } };
         if !info.has("showing") { continue; }
+        let bruto = info.extents;
+        if fator == 1.0 && fisico(&info, pai, escala) { fator = 1.0 / escala; }
+        info.extents = info.extents.map(|e| escalar(e, fator));
         let rect = info.extents.and_then(|e| element_rect(e, window));
         let outside = rect.is_some_and(|rect| !intersects(rect, window));
         // Scrolled-away content can be most of a feed: skip the whole subtree of what is above or below the window.
         // Only sideways is not enough: a CSS box does not bound its children (Chromium puts a whole page under one
         // section at x=2213).
         if rect.is_some_and(|r| r.3 <= window.1 || r.1 >= window.3) { continue; }
-        match tree.children(&node) { Ok(children) => pending.extend(children), Err(error) => crate::ignorado("walk.children", &error) }
+        match tree.children(&node) {
+            Ok(children) => pending.extend(children.into_iter().map(|c| (c, fator, bruto.or(pai)))),
+            Err(error) => crate::ignorado("walk.children", &error),
+        }
         if outside { continue; }
         if let Some(mut element) = element_from(&info, window) {
             element.id = format!("e{}", controls.len());
-            controls.push(element); nodes.push(node);
+            controls.push(element); nodes.push((node, fator));
         }
     }
     Ok((controls, nodes, !pending.is_empty()))

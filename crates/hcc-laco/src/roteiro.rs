@@ -66,6 +66,9 @@ pub struct Passo {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Variante {
     pub passos: Vec<Passo>,
+    /// The start of a goal that stopped, kept because Jev judged it went the right way: replayed, then Jev goes on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parcial: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -123,10 +126,10 @@ fn slug(texto: &str) -> String {
     s[..s.len().min(60)].trim_end_matches('-').to_owned()
 }
 
-/// `.hangar/roteiros` at the root of the git repository holding `cwd`, so scripts travel with the project; `cache` outside one.
+/// `e2e/roteiros` at the root of the git repository holding `cwd`, so scripts travel with the project; `cache` outside one.
 pub fn pasta(cwd: &Path, cache: &Path) -> PathBuf {
     cwd.ancestors().find(|d| d.join(".git").exists())
-        .map_or_else(|| cache.to_path_buf(), |raiz| raiz.join(".hangar/roteiros"))
+        .map_or_else(|| cache.to_path_buf(), |raiz| raiz.join("e2e/roteiros"))
 }
 
 fn janela(obs: &Observation) -> Janela {
@@ -208,7 +211,7 @@ pub fn carregar(arquivo: &Path) -> Result<Option<Roteiro>, String> {
         Ok(bytes) => {
             let lido: Lido = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             let variantes = match (lido.versao, lido.passos) {
-                (1, Some(passos)) => vec![Variante { passos }],
+                (1, Some(passos)) => vec![Variante { passos, parcial: false }],
                 (VERSAO, _) => lido.variantes,
                 (1, None) => return Err("versão 1 sem `passos`".to_owned()),
                 (v, _) => return Err(format!("versão {v} do formato, esperada {VERSAO}")),
@@ -233,14 +236,37 @@ pub fn escolher<'a>(roteiro: &'a Roteiro, obs: &Observation, dados: &Map<String,
 }
 
 /// The run that just succeeded becomes variant 0; an older one doing the same steps is dropped.
-pub fn juntar(anterior: Option<Roteiro>, objetivo: &str, passos: Vec<Passo>) -> Roteiro {
+/// A complete run goes first and retires every partial start; a partial one goes after the complete ones.
+pub fn juntar(anterior: Option<Roteiro>, objetivo: &str, passos: Vec<Passo>, parcial: bool) -> Roteiro {
     let mesmo = |a: &[Passo], b: &[Passo]| a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| x.janela == y.janela && x.alvo == y.alvo && x.acao == y.acao);
     let mut variantes: Vec<Variante> = anterior.map(|r| r.variantes).unwrap_or_default();
-    variantes.retain(|v| !mesmo(&v.passos, &passos));
-    variantes.insert(0, Variante { passos });
+    variantes.retain(|v| !mesmo(&v.passos, &passos) && (parcial || !v.parcial));
+    let lugar = if parcial { variantes.iter().filter(|v| !v.parcial).count() } else { 0 };
+    variantes.insert(lugar, Variante { passos, parcial });
     variantes.truncate(MAX_VARIANTES);
     Roteiro { versao: VERSAO, objetivo: objetivo.to_owned(), variantes }
+}
+
+/// The `dados` keys a script types by reference: a run without one of them cannot replay it.
+fn chaves(roteiro: &Roteiro) -> impl Iterator<Item = &str> {
+    roteiro.variantes.iter().flat_map(|v| &v.passos).filter_map(|p| match &p.valor { Some(Valor::Dados(k)) => Some(k.as_str()), _ => None })
+}
+
+/// The desktop scripts of `pasta` this run could replay (every referenced `dados` key present), for Jev to match
+/// a goal said in other words. Unreadable files are skipped: the exact lookup already reports its own file.
+// ponytail: reads every file each run; an index when folders hold thousands.
+pub fn parecidos(pasta: &Path, dados: &Map<String, Value>, exceto: &Path) -> Vec<(PathBuf, Roteiro)> {
+    let Ok(lista) = std::fs::read_dir(pasta) else { return vec![]; };
+    let mut achados: Vec<(PathBuf, Roteiro)> = lista.filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p != exceto && p.extension().is_some_and(|x| x == "json")
+            && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("desktop-")))
+        .filter_map(|p| carregar(&p).ok().flatten().map(|r| (p, r)))
+        .filter(|(_, r)| chaves(r).all(|k| dados.contains_key(k)))
+        .collect();
+    achados.sort_by(|a, b| a.0.cmp(&b.0));
+    achados.truncate(200);
+    achados
 }
 
 pub fn salvar(arquivo: &Path, roteiro: &Roteiro) -> std::io::Result<()> {
@@ -320,7 +346,7 @@ mod tests {
         let cache = Path::new("/cache");
         assert_eq!(pasta(&sub, cache), cache);
         std::fs::create_dir(raiz.join(".git")).unwrap();
-        assert_eq!(pasta(&sub, cache), raiz.join(".hangar/roteiros"));
+        assert_eq!(pasta(&sub, cache), raiz.join("e2e/roteiros"));
         std::fs::remove_dir_all(raiz).unwrap();
     }
 
@@ -338,7 +364,7 @@ mod tests {
         let arquivo = pasta.join("r.json");
         let clique = Action { kind: ActionType::Invoke, target: Some("e0".into()), ..Default::default() };
         let p = passo(&clique, &com_botoes(1), &Map::new());
-        salvar(&arquivo, &juntar(None, "x", vec![p.clone()])).unwrap();
+        salvar(&arquivo, &juntar(None, "x", vec![p.clone()], false)).unwrap();
         assert_eq!(carregar(&arquivo).unwrap().map(|r| r.versao), Some(2));
         std::fs::write(&arquivo, json!({"versao": 1, "objetivo": "x", "passos": [p]}).to_string()).unwrap();
         let lido = carregar(&arquivo).unwrap().unwrap();
@@ -357,7 +383,7 @@ mod tests {
 
     #[test]
     fn replay_picks_the_variant_whose_first_step_fits_the_screen() {
-        let roteiro = juntar(Some(juntar(None, "x", vec![clique_em("TMS")])), "x", vec![clique_em("Outra")]);
+        let roteiro = juntar(Some(juntar(None, "x", vec![clique_em("TMS")], false)), "x", vec![clique_em("Outra")], false);
         assert_eq!(roteiro.variantes[0].passos[0].janela.classe, "Outra");
         let (i, passos) = escolher(&roteiro, &com_botoes(1), &Map::new()).unwrap();
         assert_eq!((i, passos[0].janela.classe.as_str()), (1, "TMS"));
@@ -368,7 +394,7 @@ mod tests {
     fn a_variant_that_fits_the_screen_beats_one_that_starts_by_launching_blindly() {
         let abrir = Action { kind: ActionType::Launch, application: Some("app".into()), ..Default::default() };
         let lancando = vec![passo(&abrir, &tela("Desktop"), &Map::new()), clique_em("Nova")];
-        let roteiro = juntar(Some(juntar(None, "x", vec![clique_em("TMS")])), "x", lancando);
+        let roteiro = juntar(Some(juntar(None, "x", vec![clique_em("TMS")], false)), "x", lancando, false);
         assert_eq!(escolher(&roteiro, &com_botoes(1), &Map::new()).map(|(i, _)| i), Some(1));
         assert_eq!(escolher(&roteiro, &tela("Desktop"), &Map::new()).map(|(i, _)| i), Some(0));
     }
@@ -376,9 +402,36 @@ mod tests {
     #[test]
     fn merging_puts_the_latest_first_drops_its_twin_and_keeps_five() {
         let mut r = None;
-        for j in ["A", "B", "C", "D", "E", "F"] { r = Some(juntar(r, "x", vec![clique_em(j)])); }
-        r = Some(juntar(r, "x", vec![clique_em("D")]));
+        for j in ["A", "B", "C", "D", "E", "F"] { r = Some(juntar(r, "x", vec![clique_em(j)], false)); }
+        r = Some(juntar(r, "x", vec![clique_em("D")], false));
         let ordem: Vec<_> = r.unwrap().variantes.iter().map(|v| v.passos[0].janela.classe.clone()).collect();
         assert_eq!(ordem, ["D", "F", "E", "C", "B"]);
+    }
+
+    #[test]
+    fn partial_start_goes_after_complete_ways_and_a_complete_run_retires_it() {
+        let classes = |r: &Roteiro| r.variantes.iter().map(|v| (v.passos[0].janela.classe.clone(), v.parcial)).collect::<Vec<_>>();
+        let r = juntar(Some(juntar(None, "x", vec![clique_em("A")], false)), "x", vec![clique_em("P")], true);
+        assert_eq!(classes(&r), [("A".into(), false), ("P".into(), true)]);
+        let r = juntar(Some(r), "x", vec![clique_em("B")], false);
+        assert_eq!(classes(&r), [("B".into(), false), ("A".into(), false)]);
+        let texto = serde_json::to_string(&juntar(None, "x", vec![clique_em("A")], false)).unwrap();
+        assert!(!texto.contains("parcial"), "complete variants keep the shared format unchanged: {texto}");
+    }
+
+    #[test]
+    fn similar_scripts_are_the_ones_this_run_can_type() {
+        let pasta = std::env::temp_dir().join(format!("hcc-parecidos-{}", std::process::id()));
+        std::fs::create_dir_all(&pasta).unwrap();
+        let mut com_nome = clique_em("A");
+        com_nome.valor = Some(Valor::Dados("nome".into()));
+        salvar(&pasta.join("desktop-a-1.json"), &juntar(None, "abrir a", vec![clique_em("A")], false)).unwrap();
+        salvar(&pasta.join("desktop-b-2.json"), &juntar(None, "preencher b", vec![com_nome], false)).unwrap();
+        salvar(&pasta.join("navegador-c-3.json"), &juntar(None, "web c", vec![clique_em("C")], false)).unwrap();
+        let objetivos = |d: Value, exceto: &str| parecidos(&pasta, d.as_object().unwrap(), &pasta.join(exceto))
+            .into_iter().map(|(_, r)| r.objetivo).collect::<Vec<_>>();
+        assert_eq!(objetivos(json!({}), "x.json"), ["abrir a"], "b needs dados.nome; the browser file is not a desktop one");
+        assert_eq!(objetivos(json!({"nome": "Ana"}), "desktop-a-1.json"), ["preencher b"]);
+        std::fs::remove_dir_all(pasta).unwrap();
     }
 }

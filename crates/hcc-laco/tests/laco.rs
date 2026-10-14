@@ -681,6 +681,108 @@ async fn repeated_warning_can_be_dismissed() {
     assert_eq!(con.state.lock().unwrap().acts.len(), 2);
 }
 
+// Slack: Ctrl+F put the focus in the message search, which the tree does not show as a field; the help's
+// untargeted text went to the sidebar filter, the only Edit in the tree, twice ("OpenRouterOpenRouter").
+#[tokio::test]
+async fn text_after_a_focus_shortcut_goes_to_the_focus() {
+    let tela = |id: &str| { let mut o = tree(id, ""); o.elements[0].name = "Nome do canal ou do usuário".into(); o.elements[0].focused = false; o };
+    let con = FakeConnector::new(vec![tela("o1"), tela("o2"), tela("o3")]);
+    let fraco = || Answer::Choice("0", 0.2, 0.05);
+    let (mut op, _server) = setup(vec![
+        fraco(), help(json!([{"type":"keys","keys":["ctrl","f"]}])), fraco(), Answer::Risk(0.05),
+        fraco(), help(json!([{"type":"text","value":"OpenRouter","rotulo":"campo de busca da conversa"}])), fraco(), Answer::Risk(0.05),
+        done()]).await;
+    op.texto = "na conversa, pesquisar OpenRouter com Ctrl+F".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts.len(), 2, "{}", r.resumo());
+    assert_eq!(acts[1].target, None, "typed where Ctrl+F left the focus, not in the sidebar filter: {:?}", acts[1]);
+}
+
+// The Junior DM was already open ("Junior (MD) - Acme - Slack"): the title is tree evidence, not just the print.
+#[tokio::test]
+async fn goal_names_in_the_front_title_confirm_an_open_conversation() {
+    for (titulo, ok) in [("Junior (MD) - Acme - 4 novos itens - Slack", true), ("programacao (Canal) - Acme - Slack", false)] {
+        let mut o1 = tree("o1", ""); o1.windows[0].name = titulo.into();
+        let con = FakeConnector::new(vec![o1]);
+        let (mut op, _server) = setup(vec![Answer::Choice("DONE", 0.57, 0.05), help(json!([])), Answer::Choice("DONE", 0.82, 0.05),
+            Answer::Choice("0", 0.57, 0.05)]).await;
+        op.texto = "abrir a conversa com o Junior no Slack".into();
+        op.dados = Map::new();
+        let r = run(op, &con).await;
+        assert_eq!(r.ok, ok, "{titulo}: {}", r.resumo());
+        assert!(con.state.lock().unwrap().acts.is_empty());
+    }
+}
+
+// Diagnosing the Slack runs needed the goal text and each cycle's screen; the folder kept only the last one.
+#[tokio::test]
+async fn record_keeps_the_goal_and_every_cycle_screen() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    let pasta = r.registro.clone().unwrap();
+    let primeira = std::fs::read_to_string(pasta.join("jev.jsonl")).unwrap().lines().next().unwrap().to_owned();
+    let primeira: Value = serde_json::from_str(&primeira).unwrap();
+    assert_eq!(primeira["objetivo"], "preencher Nome com Ana", "the goal as asked (secrets are masked by registrar)");
+    assert!(pasta.join("observacao-0.json").exists() && pasta.join("observacao-1.json").exists());
+}
+
+// The vision model sees secrets as "<senha>" and proposes typing that marker: the loop types the secret itself.
+#[tokio::test]
+async fn vision_secret_marker_is_typed_as_the_secret_or_dropped() {
+    for (dados, esperado) in [(json!({"senha":"x9"}), Some("x9")), (json!({"senha":"x9","pin":"77"}), None)] {
+        let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "")]);
+        let fraco = || Answer::Choice("0", 0.2, 0.05);
+        let (mut op, _server) = setup(vec![fraco(), help(json!([{"type":"text","target":"e0","value":"<senha>","rotulo":"campo Senha"}])), fraco(),
+            Answer::Risk(0.05), done()]).await;
+        op.texto = "entrar com a senha informada".into();
+        op.dados = dados.as_object().unwrap().clone();
+        let r = run(op, &con).await;
+        let digitado: Vec<String> = con.state.lock().unwrap().acts.iter().filter(|(a, _, _)| a.kind.to_string() == "text")
+            .filter_map(|(a, _, _)| a.value.clone()).collect();
+        assert!(!digitado.iter().any(|v| v.contains("<senha>")), "{}", r.resumo());
+        assert_eq!(digitado.first().map(String::as_str), esperado, "{}", r.resumo());
+    }
+}
+
+// A reading goal that forbids clicking ran invoke and scroll on the Slack conversation.
+#[tokio::test]
+async fn reading_only_goal_reads_without_acting() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (mut op, server) = setup(vec![help(json!([{"type":"keys","keys":["Tab"]}]))]).await;
+    op.texto = "leia as mensagens visíveis da conversa, sem clicar nem rolar".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(con.state.lock().unwrap().acts.is_empty());
+    assert!(r.motivo.contains("Leitura: tela vista"), "{}", r.motivo);
+    assert!(bodies(&server).await.iter().all(|b| b.get("questions").is_none()), "Jev is not asked to act");
+}
+
+#[test]
+fn reading_goal_with_an_action_is_not_reading_only() {
+    use hcc_laco::objetivo::so_leitura;
+    assert!(so_leitura("leia a tela; não clique em nada"));
+    assert!(!so_leitura("abra a conversa do Junior e leia as mensagens"));
+    assert!(!so_leitura("role a conversa e leia o que aparecer"));
+}
+
+// The second "OpenRouter" went into a filter that already held it.
+#[tokio::test]
+async fn text_already_in_the_field_is_not_typed_again() {
+    let mut o1 = tree("o1", "OpenRouter"); o1.elements[0].focused = false;
+    let con = FakeConnector::new(vec![o1]);
+    let fraco = || Answer::Choice("0", 0.2, 0.05);
+    let (mut op, _server) = setup(vec![fraco(), help(json!([{"type":"text","value":"OpenRouter"}])), fraco()]).await;
+    op.texto = "pesquisar OpenRouter".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(con.state.lock().unwrap().acts.is_empty(), "{}", r.resumo());
+    assert!(r.motivo.starts_with("sem ação segura"), "{}", r.motivo);
+}
+
 // The quoted page title only located the window: after "Voltar" it is gone, and that is the goal done, not missing.
 #[tokio::test]
 async fn quoted_text_already_on_screen_at_start_is_not_required_at_the_end() {
@@ -1866,11 +1968,11 @@ async fn stopped_goal_records_nothing() {
     let pasta = tempfile::tempdir().unwrap().keep();
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
     let (mut op, _server) = setup(vec![select("set_value"), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
-        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+        Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Pick("NONE", 0.9)]).await;
     op.roteiros = Some(pasta.clone());
     let r = run(op, &con).await;
     assert!(!r.ok, "{}", r.resumo());
-    assert!(roteiros(&pasta).is_empty());
+    assert!(roteiros(&pasta).is_empty(), "Jev saw no good start: nothing recorded");
 }
 
 #[tokio::test]
@@ -1914,4 +2016,60 @@ async fn replay_says_why_it_stopped() {
     op.config = Some(config);
     let r = run(op, &con).await;
     assert!(r.roteiro.as_deref().is_some_and(|t| t.starts_with("nenhuma variação gravada (1) começa nesta tela")), "{}", r.resumo());
+}
+
+// "abre o Slack e vai na conversa do Júnior" said another way next time: Jev matches it to the recorded goal.
+#[tokio::test]
+async fn similar_goal_replays_the_recorded_script_jev_picked() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let config = gravado(&pasta).await;
+    let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Bia")]);
+    let (mut op, server) = setup(vec![Answer::Pick("preencher Nome com Ana", 0.9), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.config = Some(config);
+    op.texto = "coloque o nome informado no campo Nome".into();
+    op.dados = json!({"nome":"Bia"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"set_value","target":"e0","value":"Bia"}))]);
+    assert!(r.passos[0].ends_with("[roteiro]"), "{}", r.resumo());
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("parecido com 'preencher Nome com Ana'")), "{:?}", r.roteiro);
+    assert_eq!(bodies(&server).await.len(), 2, "the pick and the final confirmation");
+}
+
+#[tokio::test]
+async fn unsure_or_no_match_runs_from_scratch() {
+    for (resposta, p) in [("NONE", 0.95), ("preencher Nome com Ana", 0.6)] {
+        let pasta = tempfile::tempdir().unwrap().keep();
+        let config = gravado(&pasta).await;
+        let con = FakeConnector::new(vec![tree("p1", ""), tree("p2", "Bia")]);
+        let (mut op, _server) = setup(vec![Answer::Pick(resposta, p), select("set_value"), done()]).await;
+        op.roteiros = Some(pasta.clone());
+        op.config = Some(config);
+        op.texto = "salvar o cadastro".into();
+        op.dados = json!({"nome":"Bia"}).as_object().unwrap().clone();
+        let r = run(op, &con).await;
+        assert!(r.ok, "{resposta}: {}", r.resumo());
+        assert!(!r.passos[0].ends_with("[roteiro]"), "{resposta}: {}", r.resumo());
+    }
+}
+
+// A goal that stopped keeps the start Jev judged right, as a partial variant to replay next time.
+#[tokio::test]
+async fn stopped_goal_keeps_the_good_start_as_partial() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let bloqueado = || Answer::Choice("BLOCKED", 0.9, 0.05);
+    let (mut op, _server) = setup(vec![select("set_value"), bloqueado(), help(json!([])), bloqueado(),
+        Answer::Pick("set_value Edit 'Nome'", 0.9)]).await;
+    op.roteiros = Some(pasta.clone());
+    let r = run(op, &con).await;
+    assert!(!r.ok);
+    let arquivos = roteiros(&pasta);
+    assert_eq!(arquivos.len(), 1, "{}", r.resumo());
+    let salvo: Value = serde_json::from_str(&std::fs::read_to_string(&arquivos[0]).unwrap()).unwrap();
+    assert_eq!(salvo["variantes"][0]["parcial"], true);
+    assert_eq!(salvo["variantes"][0]["passos"].as_array().unwrap().len(), 1);
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("parcial")), "{:?}", r.roteiro);
 }

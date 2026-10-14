@@ -199,8 +199,8 @@ fn monta_controles_no_vocabulario_da_uia() {
     let mut caixa = node("check box", "Lembrar"); caixa.info.states.extend(["checkable".into(), "checked".into()]); caixa.info.actions = vec!["Toggle".into(), "Press".into()];
     let mut item = node("list item", "Downloads"); item.info.states.push("selectable".into()); item.info.actions.push("Toggle".into());
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![campo,senha,botao,caixa,item])), ..Default::default() };
-    let (controls, nodes, cut) = walk(&tree, vec![0,1,2,3,4], Rect(100,100,600,500), Duration::from_secs(4),800).unwrap();
-    assert!(!cut); assert_eq!(nodes, vec![0,1,2,3,4]);
+    let (controls, nodes, cut) = walk(&tree, vec![0,1,2,3,4], Rect(100,100,600,500), 1.0, Duration::from_secs(4),800).unwrap();
+    assert!(!cut); assert_eq!(nodes.iter().map(|n| n.0).collect::<Vec<_>>(), vec![0,1,2,3,4]);
     assert_eq!(controls.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["e0","e1","e2","e3","e4"]);
     assert_eq!((controls[0].role.as_str(), controls[0].value.as_deref(), controls[0].rect), ("Edit",Some("Ana"),Some(Rect(100,100,110,110))));
     assert_eq!(controls[0].actions, vec![ElementAction::SetValue,ElementAction::Focus]);
@@ -216,7 +216,7 @@ fn subarvore_oculta_fora_da_janela_e_no_que_sumiu_ficam_de_fora() {
     let mut outside = node("push button", "Rolado"); outside.info.extents = Some((0,-200,50,20));
     let mut vanished = node("push button", "Fantasma"); vanished.vanish = true;
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![hidden,outside,vanished,node("label","Pronto"),node("push button","Escondido")])), ..Default::default() };
-    let (controls,_,_) = walk(&tree,vec![0,1,2,3],Rect(100,100,600,500),Duration::from_secs(4),800).unwrap();
+    let (controls,_,_) = walk(&tree,vec![0,1,2,3],Rect(100,100,600,500), 1.0,Duration::from_secs(4),800).unwrap();
     assert_eq!(controls.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),vec!["Pronto"]);
 }
 
@@ -229,7 +229,7 @@ fn secao_web_fora_da_janela_nao_esconde_os_filhos() {
     let mut campo = node("entry", "URL de callback"); campo.info.states.push("editable".into()); campo.info.extents = Some((50,50,300,30));
     let mut fora = node("push button", "Fora"); fora.info.extents = Some((2213,190,64,40));
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![secao, campo, fora])), ..Default::default() };
-    let (controls,_,_) = walk(&tree,vec![0],Rect(100,100,600,500),Duration::from_secs(4),800).unwrap();
+    let (controls,_,_) = walk(&tree,vec![0],Rect(100,100,600,500), 1.0,Duration::from_secs(4),800).unwrap();
     assert_eq!(controls.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),vec!["URL de callback"]);
 }
 
@@ -237,16 +237,16 @@ fn secao_web_fora_da_janela_nao_esconde_os_filhos() {
 fn no_cujos_filhos_somem_continua_valendo() {
     let mut list = node("list", "Lista"); list.children_vanish = true;
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![list])), ..Default::default() };
-    let (controls,_,_) = walk(&tree,vec![0],Rect(100,100,600,500),Duration::from_secs(4),800).unwrap();
+    let (controls,_,_) = walk(&tree,vec![0],Rect(100,100,600,500), 1.0,Duration::from_secs(4),800).unwrap();
     assert_eq!(controls[0].name, "Lista");
 }
 
 #[test]
 fn corte_por_limite_e_informado() {
     let tree = FakeTree { nodes: Rc::new(RefCell::new((0..5).map(|i| node("label", &i.to_string())).collect())), ..Default::default() };
-    let (controls,_,cut) = walk(&tree,vec![0,1,2,3,4],Rect(100,100,600,500),Duration::from_secs(4),3).unwrap();
+    let (controls,_,cut) = walk(&tree,vec![0,1,2,3,4],Rect(100,100,600,500), 1.0,Duration::from_secs(4),3).unwrap();
     assert!(cut); assert_eq!(controls.len(),3);
-    let (controls,_,cut) = walk(&tree,vec![0],Rect(100,100,600,500),Duration::ZERO,800).unwrap();
+    let (controls,_,cut) = walk(&tree,vec![0],Rect(100,100,600,500), 1.0,Duration::ZERO,800).unwrap();
     assert!(cut); assert!(controls.is_empty());
 }
 
@@ -446,7 +446,7 @@ fn failed_drag_still_releases_button() {
 fn traversal_keeps_children_after_the_fortieth() {
     let mut root = node("panel", ""); root.children = (1..=45).collect();
     let tree = FakeTree { nodes: Rc::new(RefCell::new([vec![root], (1..=45).map(|n| node("label", &n.to_string())).collect()].concat())), ..Default::default() };
-    let (controls,_,cut) = walk(&tree, vec![0], Rect(0,0,100,100), Duration::from_secs(4),800).unwrap();
+    let (controls,_,cut) = walk(&tree, vec![0], Rect(0,0,100,100), 1.0, Duration::from_secs(4),800).unwrap();
     assert_eq!(controls.len(),45); assert_eq!(controls[44].name,"45"); assert!(!cut);
 }
 
@@ -561,12 +561,12 @@ fn walk_skips_node_with_any_dbus_error() {
     for error in ["org.freedesktop.DBus.Error.Failed: x","org.freedesktop.DBus.Error.AccessDenied: x","AT-SPI excedeu 4 segundos","erro\nmultilinha"] {
         let mut failed = node("label","Indisponível"); failed.read_error = Some(error.into());
         let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![failed,node("label","Pronto")])), ..Default::default() };
-        let (elements, _, cut) = walk(&tree,vec![0,1],Rect(0,0,100,100),Duration::from_secs(4),800).unwrap();
+        let (elements, _, cut) = walk(&tree,vec![0,1],Rect(0,0,100,100), 1.0,Duration::from_secs(4),800).unwrap();
         assert_eq!(elements.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),vec!["Pronto"]); assert!(!cut);
     }
     let mut list = node("list","Lista"); list.children_error = Some("filhos indisponíveis".into());
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![list])), ..Default::default() };
-    let (elements, _, _) = walk(&tree,vec![0],Rect(0,0,100,100),Duration::from_secs(4),800).unwrap();
+    let (elements, _, _) = walk(&tree,vec![0],Rect(0,0,100,100), 1.0,Duration::from_secs(4),800).unwrap();
     assert_eq!(elements[0].name,"Lista");
 }
 
@@ -762,7 +762,7 @@ fn subarvore_fora_da_janela_nao_e_percorrida() {
     let mut fora = node("section", "Post rolado"); fora.info.extents = Some((0, -900, 500, 200)); fora.children = vec![1];
     let mut link = node("link", "Autor"); link.info.actions = vec!["jump".into()];
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![fora, link])), ..Default::default() };
-    let (controls, _, _) = walk(&tree, vec![0], Rect(100,100,600,500), Duration::from_secs(4), 800).unwrap();
+    let (controls, _, _) = walk(&tree, vec![0], Rect(100,100,600,500), 1.0, Duration::from_secs(4), 800).unwrap();
     assert!(controls.is_empty(), "{:?}", controls.iter().map(|e| &e.name).collect::<Vec<_>>());
 }
 
@@ -789,4 +789,24 @@ fn documento_rola_pela_roda_no_centro_visivel() {
     desktop.act(&observed, &rolar).unwrap();
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["hyprctl","dispatch","hl.dsp.cursor.move({ x = 1942, y = 351 })"]), "{:?}", commands.calls.borrow());
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","mousemove","--wheel","-x","0","-y","-3"]));
+}
+
+// Slack (Electron, Wayland) on eDP-1 at scale 1.25: frame 1524x742 logical, its web document 1905x890 physical.
+#[test]
+fn documento_web_em_pixel_fisico_volta_para_logico() {
+    let mut painel = node("panel", ""); painel.info.extents = Some((0, 0, 1524, 742)); painel.children = vec![1];
+    let mut doc = node("document web", "Junior (MD) - Acme"); doc.info.extents = Some((0, 37, 1905, 890)); doc.children = vec![2, 3];
+    let mut filtro = node("entry", "Nome do canal ou do usuário"); filtro.info.states.push("editable".into()); filtro.info.extents = Some((124, 157, 387, 20));
+    let mut caixa = node("entry", "Enviar mensagem para o canal Junior"); caixa.info.states.push("editable".into()); caixa.info.extents = Some((575, 792, 1298, 48));
+    let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![painel, doc, filtro, caixa])), ..Default::default() };
+    let janela = Rect(6, 51, 1530, 793);
+    let (controls, nodes, _) = walk(&tree, vec![0], janela, 1.25, Duration::from_secs(4), 800).unwrap();
+    let rect = |nome: &str| controls.iter().find(|e| e.name == nome).and_then(|e| e.rect);
+    assert_eq!(rect("Junior (MD) - Acme"), Some(Rect(6, 81, 1530, 793)));
+    assert_eq!(rect("Nome do canal ou do usuário"), Some(Rect(105, 177, 415, 193)));
+    assert_eq!(rect("Enviar mensagem para o canal Junior"), Some(Rect(466, 685, 1504, 723)), "inside the window, not below it");
+    assert!(nodes.iter().all(|(_, f)| (*f - 0.8).abs() < 1e-9));
+    // A Chrome window on a scale-1 monitor is left alone.
+    let (controls, _, _) = walk(&tree, vec![0], janela, 1.0, Duration::from_secs(4), 800).unwrap();
+    assert_eq!(controls.iter().find(|e| e.name == "Nome do canal ou do usuário").and_then(|e| e.rect), Some(Rect(130, 208, 517, 228)));
 }

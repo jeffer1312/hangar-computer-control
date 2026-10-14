@@ -116,7 +116,7 @@ a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir 
 
 ### Roteiros (gravar e repetir)
 
-Objetivo que termina `concluído` vira roteiro em `.hangar/roteiros/desktop-<objetivo>-<hash>.json` na raiz do repositório git
+Objetivo que termina `concluído` vira roteiro em `e2e/roteiros/desktop-<objetivo>-<hash>.json` na raiz do repositório git
 em que o MCP roda (a pasta da sessão do Claude); fora de um repositório, em `~/.cache/hangar-computer-control/roteiros/`.
 Commitado, serve a quem rodar o mesmo objetivo no mesmo aplicativo, em VM ou não.
 A chave é o texto do objetivo (sem diferença de maiúsculas e espaços) e os nomes das chaves de `dados`, sem máquina nem alvo;
@@ -131,6 +131,14 @@ O arquivo guarda até 5 variações que deram certo (`variantes`, a mais recente
 instalações (versão do app no título, outro build). Na repetição vale a primeira variação cujo passo 1 bate com a
 tela já lida; a escolha é feita antes de agir e não troca no meio. Ao concluir, o caminho da corrida vira a
 variação 1 e uma variação com os mesmos passos sai.
+
+Pedido dito com outras palavras: sem arquivo para o texto exato, o Jev escolhe entre os objetivos gravados na
+pasta (só os que esta chamada consegue repetir, com as chaves de `dados` que eles usam) qual é a mesma tarefa, ou
+nenhum; vale a escolha com 80% ou mais, e o resultado diz `parecido com '<objetivo gravado>'`.
+
+Objetivo que parou: o Jev escolhe até qual passo o caminho ia certo (80% ou mais), e esse começo é gravado como
+variação `parcial` (depois das completas). Na repetição ele é refeito e o Jev segue dali; quando o objetivo
+concluir, as variações parciais saem.
 
 Na próxima chamada igual, o laço repete os passos sem perguntar ao Jev: lê a tela, acha o controle, executa.
 Para na primeira divergência (janela diferente, controle ausente, ação recusada, tela que não mudou onde mudou

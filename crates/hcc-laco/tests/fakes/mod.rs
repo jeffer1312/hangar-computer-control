@@ -136,6 +136,8 @@ pub enum Answer {
     Select(&'static str, f64, f64),
     Risk(f64),
     Vision(Value),
+    /// Answers the `pick` question with the criterion containing this text ("NONE" picks none).
+    Pick(&'static str, f64),
 }
 
 #[derive(Clone)]
@@ -165,6 +167,14 @@ impl Respond for Script {
                 json!({"answers": {"risky": {"noul": risk}}})
             }
             Answer::Vision(help) => json!({"choices": [{"message": {"content": help.to_string()}}]}),
+            Answer::Pick(texto, p) => {
+                let criteria = body["questions"]["pick"]["criteria"].as_object().unwrap_or_else(|| panic!("no pick question: {body}"));
+                let k = if texto == "NONE" { "NONE".to_owned() } else {
+                    criteria.iter().find(|(k, v)| *k != "NONE" && v.as_str().is_some_and(|v| v.contains(texto)))
+                        .unwrap_or_else(|| panic!("missing pick {texto}: {criteria:?}")).0.clone()
+                };
+                json!({"answers": {"pick": {"choice": k, "probabilities": {k.clone(): p}}}})
+            }
         };
         ResponseTemplate::new(200).set_body_json(response)
     }

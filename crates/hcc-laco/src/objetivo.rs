@@ -42,6 +42,15 @@ pub fn pede_leitura(goal: &str) -> bool {
     LEITURA.is_match(goal) && !ACAO_DIRIGIDA.is_match(goal)
 }
 
+/// A reading goal whose affirmed part asks no action: the screen is read and returned, nothing is clicked.
+pub fn so_leitura(goal: &str) -> bool {
+    static ACAO: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+        r"(?i)\b(abr|clic|clique|rol|ir\b|vá|va\b|entr|pesquis|busc|procur|digit|escrev|preench|selecion|naveg|volt|fech|apert|press|ativ|toc|marc|lig|deslig|expand|envi|mand|open|click|scroll|go\b|search|type|press|select)\w*",
+    ).unwrap());
+    let afirmado = crate::candidatos::afirmado(goal);
+    LEITURA.is_match(&afirmado) && !ACAO.is_match(&afirmado)
+}
+
 /// Visible text of the front window, in tree order, once each: what a reading goal returns.
 pub fn texto_janela(obs: &Observation) -> String {
     let mut vistos = HashSet::new();
@@ -85,6 +94,17 @@ fn distancia(a: &[char], b: &[char]) -> usize {
 /// ("Juno" from speech, "Junior" on screen): the hint names it so navigation and reading go on.
 // ponytail: same first two letters and at most a third of the longer word changed; a second close name means
 // real ambiguity, so no hint and the loop asks.
+/// Every proper name of the goal (not a sentence-opening verb) is a word of the front window's title: the open
+/// conversation or document is on the tree, not only in the print. Never for goals that send, delete or pay.
+pub fn nomes_no_titulo(goal: &str, obs: &Observation) -> bool {
+    if ACAO_DIRIGIDA.is_match(goal) { return false; }
+    let Some(titulo) = obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| &w.name) else { return false; };
+    let palavras: HashSet<String> = PALAVRA.find_iter(titulo).map(|m| normal(m.as_str())).collect();
+    let inicio = |i: usize| goal[..i].trim_end().is_empty() || goal[..i].trim_end().ends_with(['.', '!', '?', ':']);
+    let nomes: Vec<String> = NOME.find_iter(goal).filter(|m| !inicio(m.start())).map(|m| normal(m.as_str())).collect();
+    !nomes.is_empty() && nomes.iter().all(|n| palavras.contains(n))
+}
+
 pub fn nome_parecido(goal: &str, obs: &Observation) -> Option<(String, String)> {
     if ACAO_DIRIGIDA.is_match(goal) { return None; }
     let nomes: Vec<&str> = obs.elements.iter().map(|e| e.name.as_str())

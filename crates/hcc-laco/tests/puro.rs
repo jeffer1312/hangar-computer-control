@@ -782,3 +782,4 @@ fn revisao_digitar_estrito_super_q_e_app_de_mesma_marca() {
         .filter(|c| c.acao.kind == ActionType::Launch).filter_map(|c| c.acao.rotulo).collect();
     assert_eq!(lancados, ["Google Calendar"]);
 }
+

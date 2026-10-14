@@ -93,6 +93,21 @@ impl Jev {
         risco(&r)
     }
 
+    /// One `choice` among `opcoes` plus NONE: the index picked (None for NONE) and its probability.
+    pub async fn escolher(&self, estado: &Value, instrucoes: &str, opcoes: &[String], timeout: Duration) -> Result<(Option<usize>, f64), String> {
+        let mut criterios = Map::new();
+        for (i, o) in opcoes.iter().take(LOTE).enumerate() { criterios.insert(i.to_string(), json!(o)); }
+        criterios.insert("NONE".into(), json!("None of the options."));
+        let r = self.perguntar(estado, json!({"pick": {"type": "choice", "instructions": instrucoes, "criteria": criterios}}), timeout).await?;
+        let r = r.get("pick");
+        let opcao = r.and_then(|r| r.get("choice")).and_then(Value::as_str);
+        let p = prob(opcao.and_then(|o| r?.get("probabilities")?.get(o)));
+        match opcao {
+            Some("NONE") | None => Ok((None, p)),
+            Some(o) => indice(o).filter(|&i| i < opcoes.len().min(LOTE)).map(|i| (Some(i), p)).ok_or_else(|| FORA.into()),
+        }
+    }
+
     pub async fn decidir(&self, estado: &Value, cands: &[Candidato], timeout: Duration) -> Result<Decisao, String> {
         let mut restantes: Vec<usize> = (0..cands.len()).collect();
         loop {

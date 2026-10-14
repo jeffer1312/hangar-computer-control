@@ -5,7 +5,7 @@ pub mod comandos;
 pub mod entrada;
 pub mod hypr;
 
-use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, role_name, walk};
+use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, escalar, role_name, walk};
 use comandos::{Comandos, ComandosSistema};
 use hcc_protocolo::{Action, ActionType, Button, Desktop, DesktopError, ErrorKind, MouseMode, Observation, Rect, Screen, Window, dividir_comando};
 use serde_json::Value;
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
-struct ObservedElement<N> { node: N, name: String, role: String }
+struct ObservedElement<N> { node: N, name: String, role: String, fator: f64 }
 
 pub struct LinuxDesktop<C: Comandos = ComandosSistema, T: Arvore = AtspiTree> {
     commands: C,
@@ -281,7 +281,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         }
         let active = hypr::query(&self.commands, "activewindow").map_err(runtime)?;
         let window = hypr::client_rect(&active, (self.area.0, self.area.1)).map_err(runtime)?;
-        let rect = info.extents.and_then(|extents| element_rect(extents, window)).ok_or_else(|| runtime("aplicativo recusou o foco e o campo não tem posição na tela"))?;
+        let rect = info.extents.and_then(|extents| element_rect(escalar(extents, element.fator), window)).ok_or_else(|| runtime("aplicativo recusou o foco e o campo não tem posição na tela"))?;
         let (x, y) = center(rect);
         self.point(Some(x), Some(y))?;
         self.commands.run(&["ydotool", "click", "0xc0"], None).map_err(runtime)?;
@@ -323,7 +323,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         }
         let active = hypr::query(&self.commands, "activewindow").map_err(runtime)?;
         let window = hypr::client_rect(&active, (self.area.0, self.area.1)).map_err(runtime)?;
-        let rect = info.extents.and_then(|extents| element_rect(extents, window));
+        let rect = info.extents.and_then(|extents| element_rect(escalar(extents, element.fator), window));
         let on_screen = rect.map(center).filter(|(x, y)| window.0 <= *x && *x < window.2 && window.1 <= *y && *y < window.3);
         if let Some((x, y)) = on_screen.filter(|_| (action.kind == ActionType::Invoke && !ITEMS.contains(&element.role.as_str())) || matches!(action.kind, ActionType::Select | ActionType::Toggle)) {
             return self.mouse(&Action { kind: ActionType::Mouse, x: Some(x), y: Some(y), ..Default::default() });
@@ -378,7 +378,8 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
     fn observe(&mut self) -> Result<Observation, DesktopError> {
         self.available()?;
         self.observed_at = None; self.elements.clear(); self.windows.clear();
-        let (active, area, _) = self.current()?;
+        let (active, area, monitor) = self.current()?;
+        let escala = monitor["scale"].as_f64().filter(|s| *s > 0.0).unwrap_or(1.0);
         let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
         let mut windows = hypr::windows_from(&clients, (area.0, area.1)).map_err(runtime)?;
         for client in clients.as_array().ok_or_else(|| runtime("hyprctl retornou clients inválido"))? {
@@ -391,9 +392,9 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         let screen = Screen { width: (area.2 - area.0) as u32, height: (area.3 - area.1) as u32 };
         let (elements, truncated) = if self.foreground != "desktop" {
             let window = windows.iter().find(|w| w.id == self.foreground).ok_or_else(|| runtime("a janela ativa mudou durante a observação"))?;
-            let (elements, nodes, cut) = walk(&self.tree, self.roots(&active)?, window.rect, Duration::from_secs(4), 800).map_err(runtime)?;
-            for (element, node) in elements.iter().zip(nodes) {
-                self.elements.insert(element.id.clone(), ObservedElement { node, name: element.name.clone(), role: element.role.clone() });
+            let (elements, nodes, cut) = walk(&self.tree, self.roots(&active)?, window.rect, escala, Duration::from_secs(4), 800).map_err(runtime)?;
+            for (element, (node, fator)) in elements.iter().zip(nodes) {
+                self.elements.insert(element.id.clone(), ObservedElement { node, name: element.name.clone(), role: element.role.clone(), fator });
             }
             (elements, cut)
         } else {
