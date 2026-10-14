@@ -164,7 +164,10 @@ visão); quem chama decide quando avisar o usuário. A última notificação sem
 ## Quando ele para sozinho
 
 - Ação arriscada (apagar, sobrescrever, enviar, fechar sem salvar) que o texto do objetivo não autorizou.
-  Repita o objetivo dizendo explicitamente ("…substituindo se já existir").
+  Repita o objetivo dizendo explicitamente ("…substituindo se já existir"). Fechar a janela (o botão Fechar
+  no canto da janela, Alt+F4, Ctrl+Q, Ctrl+Shift+W) só acontece se o objetivo pedir para fechar.
+- Navegador só é aberto quando o objetivo nomeia esse navegador ou diz "navegador"; um app cujo nome repete
+  o de uma janela já aberta ("Chrome (CDP)" com o Chrome aberto) não é oferecido, salvo "nova"/"outra janela".
 - A tela pede algo que não foi dado (login, credencial de rede): devolve isso como impedimento.
 - O mesmo aviso do aplicativo volta duas vezes: devolve o texto do aviso.
 - Três ações seguidas sem efeito, ou `max_passos`/`limite_segundos`. Com a árvore vazia o efeito é

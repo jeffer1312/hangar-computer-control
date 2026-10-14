@@ -221,6 +221,17 @@ fn subarvore_oculta_fora_da_janela_e_no_que_sumiu_ficam_de_fora() {
 }
 
 #[test]
+fn secao_web_fora_da_janela_nao_esconde_os_filhos() {
+    // Chromium: a primeira section da página do Meta for Developers vem em x=2213 e contém o formulário inteiro.
+    let mut secao = node("section", ""); secao.info.extents = Some((2213,190,64,40)); secao.children = vec![1, 2];
+    let mut campo = node("entry", "URL de callback"); campo.info.states.push("editable".into()); campo.info.extents = Some((50,50,300,30));
+    let mut fora = node("push button", "Fora"); fora.info.extents = Some((2213,190,64,40));
+    let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![secao, campo, fora])), ..Default::default() };
+    let (controls,_,_) = walk(&tree,vec![0],Rect(100,100,600,500),Duration::from_secs(4),800).unwrap();
+    assert_eq!(controls.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),vec!["URL de callback"]);
+}
+
+#[test]
 fn no_cujos_filhos_somem_continua_valendo() {
     let mut list = node("list", "Lista"); list.children_vanish = true;
     let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![list])), ..Default::default() };

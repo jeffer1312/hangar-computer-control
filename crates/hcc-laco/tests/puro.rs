@@ -2,8 +2,8 @@
 
 use std::collections::HashSet;
 
-use hcc_laco::barreiras::{Barreiras, aviso, itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
-use hcc_laco::candidatos::{apps_do_objetivo, candidatos, descrever_acao, segredos, texto_no_editavel};
+use hcc_laco::barreiras::{Barreiras, aviso, fecha_janela,itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
+use hcc_laco::candidatos::{apps_do_objetivo, candidatos, descrever_acao, segredos, sem_app_aberto, texto_no_editavel};
 use hcc_laco::descrever::intencao;
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
 use hcc_laco::geometria::para_tela;
@@ -664,7 +664,7 @@ fn goal_naming_an_app_offers_only_that_launch() {
     assert_eq!(launches("abrir a Calculadora (gnome-calculator) e calcular 2+2"), ["Calculator"]);
     assert_eq!(launches("abrir o NOTEPAD e digitar oi"), ["Bloco de Notas"]);
     assert_eq!(launches("abrir o navegador e ir para o gitlab").len(), 5, "no app named: keep every launch");
-    assert_eq!(launches("abrir o Firefoxzinho").len(), 5, "partial word is not a name");
+    assert_eq!(launches("abrir o Firefoxzinho"), ["Calculator", "Bloco de Notas"], "partial word is not a name, and no browser was asked for");
     let outras = |v: Vec<hcc_laco::tipos::Candidato>| v.into_iter().filter(|c| c.acao.kind != ActionType::Launch).map(|c| c.acao).collect::<Vec<_>>();
     assert_eq!(outras(apps_do_objetivo(all.clone(), "no Google Chrome")), outras(all.clone()));
 }
@@ -680,6 +680,40 @@ fn launch_filter_keeps_what_the_goal_needs() {
     };
     assert_eq!(launches("abre o Firefox e fecha a janela"), ["Firefox"]);
     assert_eq!(launches("Use o Firefox e feche o popup"), ["Firefox"]);
-    assert_eq!(launches("fechar a Calculadora").len(), 3, "closing is decided by the loop, not by the goal's verbs");
+    assert_eq!(launches("fechar a Calculadora"), ["Calculator"], "closing is decided by the loop, not by the goal's verbs; browsers only when asked");
     assert_eq!(launches("abrir o Chrome e calcular na calculator"), ["Google Chrome", "Calculator"]);
+}
+
+// Linux has no TitleBar: Chrome's "Fechar" sits in the window's top-right corner, and Ctrl+Q / Ctrl+Shift+W close too.
+#[test]
+fn fechar_no_canto_da_janela_e_atalhos_fecham_a_janela() {
+    let tela = obs(vec![
+        el("e1", "Fechar", "Button", &[ElementAction::Invoke], None, Some(Rect(765, 0, 800, 40))),
+        el("e2", "Fechar", "Button", &[ElementAction::Invoke], None, Some(Rect(400, 300, 460, 330))),
+    ]);
+    let invoke = |id: &str| Action { kind: ActionType::Invoke, target: Some(id.into()), ..Default::default() };
+    let keys = |k: &[&str]| Action { kind: ActionType::Keys, keys: Some(k.iter().map(|s| s.to_string()).collect()), ..Default::default() };
+    assert!(fecha_janela(&invoke("e1"), &tela), "canto superior direito da janela");
+    assert!(!fecha_janela(&invoke("e2"), &tela), "Fechar de um diálogo da página");
+    for k in [&["ctrl", "q"][..], &["ctrl", "shift", "w"], &["alt", "f4"]] { assert!(fecha_janela(&keys(k), &tela), "{k:?}"); }
+    assert!(!fecha_janela(&keys(&["ctrl", "w"]), &tela), "Ctrl+W fecha só a aba");
+}
+
+// "Chrome (CDP)" was launched while the user's Chrome was open, and later closed it.
+#[test]
+fn navegador_so_e_lancado_quando_o_objetivo_pede() {
+    let mut wire = serde_json::to_value(obs(vec![])).unwrap();
+    wire["apps"] = json!(["Firefox => firefox", "Google Chrome => google-chrome-stable", "Chrome (CDP) => /home/x/chrome-cdp", "Calculator => gnome-calculator"]);
+    let installed: Observation = serde_json::from_value(wire).unwrap();
+    let all = candidatos(&installed, &Map::new(), &HashSet::new());
+    let launches = |goal: &str| -> Vec<String> {
+        apps_do_objetivo(all.clone(), goal).into_iter().filter(|c| c.acao.kind == ActionType::Launch).filter_map(|c| c.acao.rotulo).collect()
+    };
+    assert_eq!(launches("preencher o campo URL de callback com https://x.dev"), ["Calculator"]);
+    assert_eq!(launches("abrir o navegador e ir para o gitlab").len(), 4);
+    let mut chrome_aberto = installed.clone();
+    chrome_aberto.windows[0].class_name = "google-chrome".into();
+    let abertos: Vec<String> = sem_app_aberto(all.clone(), &chrome_aberto, "no Chrome, ir para o gitlab").into_iter()
+        .filter(|c| c.acao.kind == ActionType::Launch).filter_map(|c| c.acao.rotulo).collect();
+    assert_eq!(abertos, ["Firefox", "Calculator"]);
 }

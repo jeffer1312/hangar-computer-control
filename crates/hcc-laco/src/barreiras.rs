@@ -110,11 +110,12 @@ pub(crate) fn pendencia(objetivo: &str, obs: &Observation, recentes: &[Registro]
     None
 }
 
-/// Alt+F4, or the Close button of the title bar: closes the whole window, not a tab.
+/// Alt+F4, Ctrl+Q, Ctrl+Shift+W, or the Close button of the title bar: closes the whole window, not a tab.
 pub fn fecha_janela(acao: &Action, obs: &Observation) -> bool {
     if acao.kind == ActionType::Keys {
         let teclas: HashSet<String> = acao.keys.iter().flatten().map(|k| casefold(k)).collect();
-        return teclas.contains("alt") && teclas.contains("f4");
+        let tem = |k: &str| teclas.contains(k) || (k == "ctrl" && teclas.contains("control"));
+        return (tem("alt") && tem("f4")) || (tem("ctrl") && tem("q")) || (tem("ctrl") && tem("shift") && tem("w"));
     }
     let Some(alvo) = acao.target.as_deref().and_then(|id| obs.elements.iter().rev().find(|e| e.id == id)) else {
         return false;
@@ -123,7 +124,10 @@ pub fn fecha_janela(acao: &Action, obs: &Observation) -> bool {
     else {
         return false;
     };
-    obs.elements.iter().any(|t| {
+    // Linux exposes no TitleBar: the window's own Close button touches its top-right corner.
+    let canto = obs.windows.iter().find(|w| w.id == obs.foreground)
+        .is_some_and(|w| i64::from(r.1) <= i64::from(w.rect.1) + 8 && i64::from(r.2) >= i64::from(w.rect.2) - 8);
+    canto || obs.elements.iter().any(|t| {
         t.role == "TitleBar"
             && t.rect.is_some_and(|t| {
                 let folga = |a: i32, b: i32| i64::from(a) <= i64::from(b) + 1;

@@ -1366,8 +1366,9 @@ async fn drawn_screen_text_with_two_fields_is_jev_choice() {
 #[tokio::test]
 async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     let mut aberto = tree("o1", "");
-    aberto.apps = vec!["Calculator => gnome-calculator".into(), "Firefox => firefox".into()];
-    aberto.windows[0].class_name = "org.gnome.Calculator".into();
+    aberto.apps = vec!["Calculator => gnome-calculator".into(), "Text Editor => gedit".into()];
+    // A class that does not spell the app's name, so the open window alone does not hide its launch.
+    aberto.windows[0].class_name = "calc".into();
     let mut fechado = aberto.clone();
     fechado.observation_id = "o2".into();
     fechado.windows[0].id = "w2".into();
@@ -1385,7 +1386,7 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     let tem_launch = |b: &Value| lanca(b, "Calculator");
     assert!(tem_launch(&decisoes[0]), "before closing, launching is still an option");
     assert!(!tem_launch(&decisoes[1]), "the app the loop just closed must not be reopened");
-    assert!(lanca(&decisoes[1], "Firefox"), "other apps can still be launched");
+    assert!(lanca(&decisoes[1], "Text Editor"), "other apps can still be launched");
 
     // A dialog closing leaves its app's main window: launching stays available.
     let mut com_dialogo = aberto.clone();

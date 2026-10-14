@@ -281,9 +281,12 @@ pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, budget: Dura
         visited += 1;
         let info = match tree.read(&node) { Ok(info) => info, Err(error) => { crate::ignorado("walk.read", &error); continue; } };
         if !info.has("showing") { continue; }
-        // Scrolled-away content can be most of a feed: skip its whole subtree, not just the node.
-        if info.extents.and_then(|e| element_rect(e, window)).is_some_and(|rect| !intersects(rect, window)) { continue; }
+        let outside = info.extents.and_then(|e| element_rect(e, window)).is_some_and(|rect| !intersects(rect, window));
+        // Scrolled-away content can be most of a feed: skip its whole subtree. A nameless web container is the
+        // exception: its CSS box does not bound its children (Chromium puts a whole page under one at x=2213).
+        if outside && (!info.name.is_empty() || !info.actions.is_empty()) { continue; }
         match tree.children(&node) { Ok(children) => pending.extend(children), Err(error) => crate::ignorado("walk.children", &error) }
+        if outside { continue; }
         if let Some(mut element) = element_from(&info, window) {
             element.id = format!("e{}", controls.len());
             controls.push(element); nodes.push(node);

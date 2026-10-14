@@ -55,6 +55,16 @@ async fn llm_invalid_answer_degrades_to_hint() {
 }
 
 #[tokio::test]
+async fn llm_answer_after_a_sentence_is_read() {
+    let objeto = r#"{"interpretacao": "formulário de webhook", "acoes": [{"type": "keys", "keys": ["Tab"]}]}"#;
+    for texto in [format!("Vejo o formulário {{campo}}.\n```json\n{objeto}\n```"), format!("Vejo o formulário.\n{objeto}")] {
+        let s = responde(conteudo(&texto)).await;
+        let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;
+        assert_eq!((a.interpretacao.as_str(), a.acoes.len()), ("formulário de webhook", 1), "{texto}");
+    }
+}
+
+#[tokio::test]
 async fn llm_without_key_is_unavailable() {
     let s = responde(conteudo("{}")).await;
     for key in [None, Some("")] {
@@ -118,7 +128,7 @@ async fn llm_answer_shape_errors_name_the_python_exception() {
         (json!({"choices": []}), "IndexError: list index out of range"),
         (json!({"choices": [{}]}), "KeyError: 'message'"),
         (json!({"choices": [{"message": {"content": null}}]}), "AttributeError: 'NoneType' object has no attribute 'strip'"),
-        (json!({"choices": [{"message": {"content": "```sem quebra"}}]}), "IndexError: list index out of range"),
+        (json!({"choices": [{"message": {"content": "```sem quebra"}}]}), "ValidationError: expected value at line 1 column 1"),
     ] {
         let s = responde(ResponseTemplate::new(200).set_body_json(resposta)).await;
         let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;

@@ -94,17 +94,14 @@ impl Llm {
             .as_str()
             .ok_or_else(|| Falha::new("AttributeError", "'NoneType' object has no attribute 'strip'"))?
             .trim();
-        let bruto = match bruto.strip_prefix("```") {
-            Some(_) => {
-                let (_, resto) = bruto.split_once('\n').ok_or_else(|| Falha::new("IndexError", "list index out of range"))?;
-                resto.rsplit_once("```").map_or(resto, |(antes, _)| antes).trim()
-            }
-            None => bruto,
+        // Models wrap the object in a sentence or a ``` block, before or after: the answer is the first `{` that
+        // parses as Ajuda; without one, the error of parsing from the start.
+        let ler = |s: &str| serde_json::Deserializer::from_str(s).into_iter::<Ajuda>().next();
+        let ajuda = match bruto.match_indices('{').find_map(|(i, _)| ler(&bruto[i..]).and_then(Result::ok)) {
+            Some(ajuda) => ajuda,
+            None => ler(bruto).ok_or_else(|| Falha::new("ValidationError", "resposta vazia"))?
+                .map_err(|e| Falha::new("ValidationError", e.to_string()))?,
         };
-        // Models add a sentence after the object; only the first JSON value is the answer.
-        let ajuda: Ajuda = serde_json::Deserializer::from_str(bruto).into_iter().next()
-            .ok_or_else(|| Falha::new("ValidationError", "resposta vazia"))?
-            .map_err(|e| Falha::new("ValidationError", e.to_string()))?;
         validar(&ajuda).map_err(|e| Falha::new("ValidationError", e))?;
         Ok(ajuda)
     }

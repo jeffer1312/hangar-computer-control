@@ -149,7 +149,10 @@ pub fn sem_app_aberto(cands: Vec<Candidato>, obs: &Observation, goal: &str) -> V
     cands.into_iter().filter(|c| {
         let exe = c.acao.application.as_deref().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_lowercase();
         let exe = exe.strip_suffix(".exe").unwrap_or(&exe);
-        c.acao.kind != ActionType::Launch || !abertos.contains(exe)
+        // "Chrome (CDP)" while google-chrome is open: a distinctive word of the name already names an open window.
+        let palavra_aberta = c.acao.rotulo.as_deref().unwrap_or_default().split(|ch: char| !ch.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 5).any(|w| { let w = w.to_lowercase(); abertos.iter().any(|a| a.contains(&w)) });
+        c.acao.kind != ActionType::Launch || !(abertos.contains(exe) || palavra_aberta)
     }).collect()
 }
 
@@ -180,9 +183,18 @@ pub fn apps_do_objetivo(cands: Vec<Candidato>, goal: &str) -> Vec<Candidato> {
     let cobertas: HashSet<String> = launches.iter().filter(|a| inteiro(a)).flat_map(|a| palavras(a)).collect();
     let citado = |a: &Action| inteiro(a) || palavras(a).iter().any(|w| !cobertas.contains(w) && nomeado(&goal, w));
     if !launches.iter().any(|a| citado(a)) {
-        return cands;
+        // Nothing named: any app may still be launched, except a browser the goal did not ask for.
+        let pede = ["navegador", "browser"].iter().any(|w| nomeado(&goal, w));
+        return cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch || pede || !navegador(&c.acao)).collect();
     }
     cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch || citado(&c.acao)).collect()
+}
+
+fn navegador(a: &Action) -> bool {
+    static NAVEGADOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+        r"(?i)chrom|firefox|brave|msedge|microsoft edge|opera|vivaldi|librewolf|waterfox|epiphany|zen-browser|browser|navegador",
+    ).unwrap());
+    NAVEGADOR.is_match(a.application.as_deref().unwrap_or_default()) || NAVEGADOR.is_match(a.rotulo.as_deref().unwrap_or_default())
 }
 
 fn editavel(e: &Element) -> bool {
