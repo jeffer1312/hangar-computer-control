@@ -2143,3 +2143,23 @@ async fn piece_jev_does_not_pick_or_that_does_not_fit_leaves_the_run_to_jev() {
         assert!(!r.passos[0].ends_with("[trecho]"), "{texto}: {}", r.resumo());
     }
 }
+
+// gnome-calculator opened floating, without focus: the window that appeared with the goal's name is the evidence.
+#[tokio::test]
+async fn goal_names_in_a_window_that_appeared_confirm_an_app_opened_without_focus() {
+    for (ja_existia, ok) in [(false, true), (true, false)] {
+        let calculadora = hcc_protocolo::Window { id: "w9".into(), name: "Calculadora".into(), process_id: 9,
+            class_name: "org.gnome.Calculator".into(), rect: Rect(0, 0, 10, 10) };
+        let mut o1 = tree("o1", "");
+        if ja_existia { o1.windows.push(calculadora.clone()); }
+        let mut o2 = tree("o2", "");
+        o2.windows.push(calculadora);
+        let con = FakeConnector::new(vec![o1, o2]);
+        let (mut op, _server) = setup(vec![select("invoke Button 'Salvar'"), Answer::Choice("DONE", 0.57, 0.05), help(json!([])),
+            Answer::Choice("DONE", 0.88, 0.05), Answer::Choice("0", 0.76, 0.05)]).await;
+        op.texto = "abrir a Calculadora".into();
+        op.dados = Map::new();
+        let r = run(op, &con).await;
+        assert_eq!(r.ok, ok, "já existia={ja_existia}: {}", r.resumo());
+    }
+}

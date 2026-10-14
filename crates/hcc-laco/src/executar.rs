@@ -20,7 +20,7 @@ use crate::geometria::{dentro, para_tela};
 use crate::http::py_dumps;
 use crate::jev::Jev;
 use crate::llm::Llm;
-use crate::objetivo::{literais, nome_parecido, nomes_no_titulo, pede_leitura, so_leitura, texto_janela, valores_do_objetivo};
+use crate::objetivo::{literais, nome_parecido, nomes_em_janela_nova, nomes_no_titulo, pede_leitura, so_leitura, texto_janela, valores_do_objetivo};
 use crate::trecho;
 use crate::resultado::Resultado;
 use crate::roteiro;
@@ -341,12 +341,13 @@ async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, c
 
 /// The pieces of a run that went right, under `trechos/` of the scripts folder: each cut is a new piece file or
 /// one more use of the same way. A piece with a click by coordinate cannot be replayed with a check, so it stays out.
-fn gravar_trechos(op: &Opcoes, secretos: &Segredos, passos: &[roteiro::Passo]) -> String {
+fn gravar_trechos(op: &Opcoes, secretos: &Segredos, passos: &[roteiro::Passo], fim: Option<&Observation>) -> String {
     let Some(dir) = op.roteiros.as_deref() else { return String::new(); };
     let pasta = dir.join("trechos");
     let valores = valores_do_objetivo(&op.texto, &op.dados, &secretos.valores);
     let (mut gravados, mut falhas) = (0, Vec::new());
-    for r in trecho::cortar(passos, &valores) {
+    let classe_final = fim.and_then(|o| o.windows.iter().find(|w| w.id == o.foreground)).map(|w| w.class_name.as_str());
+    for r in trecho::cortar(passos, &valores, classe_final) {
         if r.passos.is_empty() || r.passos.iter().any(|p| p.acao.kind == ActionType::Mouse) { continue; }
         let descricao = trecho::resumo(&r.passos);
         let arquivo = trecho::arquivo(&pasta, &descricao, &r.contexto);
@@ -399,7 +400,7 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let Some(fim) = i.filter(|_| p >= 0.8) else { return Ok(()); };
     let arquivo = roteiro::arquivo(dir, &op.texto, &op.dados);
     let passos: Vec<roteiro::Passo> = feitos.into_iter().take(fim + 1).map(|(p, _)| p).collect();
-    let pecas = gravar_trechos(op, secretos, &passos);
+    let pecas = gravar_trechos(op, secretos, &passos, None);
     let gravado = roteiro::anteriores(&arquivo).map(|a| roteiro::juntar(a, &op.texto, passos, true)).and_then(|novo| {
         if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) { Err("contém um valor secreto".to_owned()) }
         else { roteiro::salvar(&arquivo, &novo).map_err(|e| e.to_string()) }
@@ -423,6 +424,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     let mut barreiras = Barreiras::default();
     let mut recusas = HashSet::new();
     let mut conferir: Option<String> = None;
+    // Windows of the run's first screen: one that appears later may be the app the goal opened.
+    let mut iniciais: Option<HashSet<String>> = None;
     let mut foco_escolhido = false;
     let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
     let mut fechados: Vec<String> = Vec::new();
@@ -467,6 +470,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 let vista = controle.medir("observacao", Progresso::Observacao,
                     async { observar(s).await.map_err(erro_sessao) }).await?;
                 let atual = assinatura_tela(&vista);
+                iniciais.get_or_insert_with(|| vista.windows.iter().map(|w| w.id.clone()).collect());
                 if !pulou {
                     if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
                 }
@@ -535,6 +539,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let vista = controle.medir("observacao", Progresso::Observacao, async { observar(s).await.map_err(erro_sessao) }).await?;
             let atual = assinatura_tela(&vista);
+            iniciais.get_or_insert_with(|| vista.windows.iter().map(|w| w.id.clone()).collect());
             if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) && ultima.screen_changed.is_none() {
                 ultima.screen_changed = mudou(a, &atual);
             }
@@ -600,6 +605,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let obs = controle.medir("observacao", Progresso::Observacao,
             async { observar(s).await.map_err(erro_sessao) }).await?;
         let atual = assinatura_tela(&obs);
+        iniciais.get_or_insert_with(|| obs.windows.iter().map(|w| w.id.clone()).collect());
         let conferir = &*conferir.get_or_insert_with(|| sem_localizadores(&op.texto, &obs));
         if let Some(ultima) = recentes.last_mut().filter(|r| r.screen_changed.is_none()) {
             ultima.screen_changed = anterior.as_ref().map_or(Some(true), |a| mudou(a, &atual));
@@ -720,7 +726,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         leitura_forte = true;
                     } else if d2.escolha == Escolha::Done && d2.p >= 0.75 { confirmado = Some(d2.p); }
                     // The print reading plus every explicit item of the goal on screen is evidence enough.
-                    else if (itens_pendentes(conferir, &obs) > 0 || nomes_no_titulo(&op.texto, &obs))
+                    else if (itens_pendentes(conferir, &obs) > 0 || nomes_no_titulo(&op.texto, &obs)
+                        || iniciais.as_ref().is_some_and(|i| nomes_em_janela_nova(&op.texto, &obs, i)))
                         && pendencia(conferir, &obs, &recentes, &secretos.valores).is_none() {
                         confirmado = Some(d.p);
                     }
@@ -741,7 +748,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         r.ok = true;
                         if let Some(arquivo) = arquivo.as_deref().filter(|_| !gravados.is_empty()) {
                             let passos: Vec<roteiro::Passo> = gravados.drain(..).map(|(mut p, i)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
-                            let pecas = gravar_trechos(op, secretos, &passos);
+                            let pecas = gravar_trechos(op, secretos, &passos, Some(&obs));
                             // `refazer` asked to forget the recorded ways, not to keep them beside the new one.
                             let anteriores = if op.refazer { Ok(None) } else { roteiro::anteriores(arquivo) };
                             let gravado = anteriores.map(|a| roteiro::juntar(a, &op.texto, passos, false)).and_then(|novo| {

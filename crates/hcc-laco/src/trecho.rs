@@ -142,7 +142,7 @@ pub struct Rascunho {
 /// its window, so it is matched by window class and controls.
 // ponytail: value found by plain substring, longest first; a name that also prints on an unrelated control is
 // taken as a slot there too, and replay's per-step check is the net.
-pub fn cortar(passos: &[Passo], valores: &[String]) -> Vec<Rascunho> {
+pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) -> Vec<Rascunho> {
     let escapar = |t: &str| t.replace('{', "{{").replace('}', "}}");
     let nomes = |p: &Passo| -> Vec<String> { match &p.alvo {
         Some(Alvo::Elemento { name, text, placeholder, .. }) => [Some(name), text.as_ref(), placeholder.as_ref()].into_iter().flatten().cloned().collect(),
@@ -191,10 +191,11 @@ pub fn cortar(passos: &[Passo], valores: &[String]) -> Vec<Rascunho> {
             p
         }).collect();
         let contexto = if trecho.first().is_some_and(|p| p.acao.kind == ActionType::Launch) {
-            passos.get(ini + 1).map(|p| p.janela.classe.clone()).unwrap_or_default()
+            passos.get(ini + 1).map(|p| p.janela.classe.clone()).or_else(|| classe_final.map(str::to_owned)).unwrap_or_default()
         } else { trecho.first().map(|p| p.janela.classe.clone()).unwrap_or_default() };
         Rascunho { contexto, parametros, passos: trecho }
-    }).collect()
+    // A piece with no context would fit everywhere: an app opener would open the app again and again.
+    }).filter(|r| !r.contexto.is_empty()).collect()
 }
 
 /// A piece that fits the screen now, with the goal values in its slots.
@@ -300,7 +301,7 @@ mod tests {
             passo_em("app", "Junior - App 4", atalho, None, None, true),
             passo_em("app", "Junior - App 5", texto, None, Some(Valor::Literal("OpenRouter".into())), true),
         ];
-        let pedacos = cortar(&corrida, &["OpenRouter".into(), "Junior".into(), "App".into()]);
+        let pedacos = cortar(&corrida, &["OpenRouter".into(), "Junior".into(), "App".into()], None);
         assert_eq!(pedacos.len(), 3, "{pedacos:#?}");
         assert_eq!((pedacos[0].contexto.as_str(), pedacos[0].passos.len(), pedacos[0].parametros.len()), ("app", 1, 0),
             "opening the app: its context is the window it brought up");
@@ -340,6 +341,15 @@ mod tests {
         let mut outra = tela(&["Rafael"]);
         outra.windows[0].class_name = "outra".into();
         assert!(textos(&outra).is_empty(), "a piece fits only in a window of its context");
+    }
+
+    // A run that only opened the app: the window in front at the end is the app it opened.
+    #[test]
+    fn opening_the_app_as_the_last_piece_takes_the_final_window_or_is_dropped() {
+        let abrir = || vec![passo_em("term", "~", Action { kind: ActionType::Launch, application: Some("calc".into()), ..Default::default() }, None, None, true)];
+        let fim = cortar(&abrir(), &[], Some("org.gnome.Calculator"));
+        assert_eq!(fim.iter().map(|p| p.contexto.as_str()).collect::<Vec<_>>(), ["org.gnome.Calculator"]);
+        assert!(cortar(&abrir(), &[], None).is_empty(), "without knowing the app's window it would reopen it every time");
     }
 
     #[test]

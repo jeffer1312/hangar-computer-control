@@ -122,8 +122,16 @@ fn distancia(a: &[char], b: &[char]) -> usize {
 /// Every proper name of the goal (not a sentence-opening verb) is a word of the front window's title: the open
 /// conversation or document is on the tree, not only in the print. Never for goals that send, delete or pay.
 pub fn nomes_no_titulo(goal: &str, obs: &Observation) -> bool {
+    obs.windows.iter().find(|w| w.id == obs.foreground).is_some_and(|w| nomes_em(goal, &w.name))
+}
+
+/// The same evidence from a window that appeared during the run: an app opened without taking the focus.
+pub fn nomes_em_janela_nova(goal: &str, obs: &Observation, iniciais: &HashSet<String>) -> bool {
+    obs.windows.iter().filter(|w| !iniciais.contains(&w.id)).any(|w| nomes_em(goal, &w.name))
+}
+
+fn nomes_em(goal: &str, titulo: &str) -> bool {
     if ACAO_DIRIGIDA.is_match(goal) { return false; }
-    let Some(titulo) = obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| &w.name) else { return false; };
     let palavras: HashSet<String> = PALAVRA.find_iter(titulo).map(|m| normal(m.as_str())).collect();
     let inicio = |i: usize| goal[..i].trim_end().is_empty() || goal[..i].trim_end().ends_with(['.', '!', '?', ':']);
     let nomes: Vec<String> = NOME.find_iter(goal).filter(|m| !inicio(m.start())).map(|m| normal(m.as_str())).collect();
