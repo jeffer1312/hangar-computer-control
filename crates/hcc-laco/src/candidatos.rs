@@ -20,6 +20,11 @@ pub fn afirmado(goal: &str) -> String {
     NEGADO.replace_all(goal, " ").into_owned()
 }
 
+/// Byte ranges of the negated clauses of `goal`.
+pub fn negados(goal: &str) -> Vec<std::ops::Range<usize>> {
+    NEGADO.find_iter(goal).map(|m| m.range()).collect()
+}
+
 static CHAVE_SECRETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)senha|password|passwd|pin|token").unwrap());
 
 /// Roles whose real click is offered when UIA has no pattern for them (laco_uia.py:159).

@@ -98,8 +98,13 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   se fosse pra uma pessoa. `dados` leva valores que o laço pode digitar (usuário, senha, caminho, texto):
   qualquer valor em `dados` vira candidato de "digitar isso em cada campo editável", e o mesmo vale para
   URL escrita no próprio `texto`, e texto entre aspas quando o objetivo pede para digitar, preencher ou buscar
-  (fora disso, aspas só nomeiam o controle ou a página). Texto entre aspas que já é nome de um controle na
-  primeira tela localiza e não é cobrado na conferência final. Controles de mesmo papel e nome (um interruptor
+  (fora disso, aspas só nomeiam o controle ou a página). Na conferência final só se cobra texto entre aspas de
+  objetivo que pede digitar, e só se ele não aparece na tela nem foi usado por uma ação da corrida (digitado ou
+  clicado); texto citado em trecho negado ("não clicar em 'X'") e nome de controle ou janela da primeira tela nunca
+  são cobrados. Pedido para agir num controle citado que continua na tela sem nenhuma ação feita: o "concluído" é
+  recusado uma vez; se o Jev insistir, o resultado diz `nenhuma ação executada`. Depois de cada digitação num campo
+  com nome, o laço confere o valor do campo na tela seguinte: valor diferente vira falha da ação (não progresso),
+  o próximo passo passa pela ajuda visual e o motivo final diz com que valor o campo ficou. Controles de mesmo papel e nome (um interruptor
   por linha de tabela) aparecem pro Jev com o rótulo da linha: `Button 'X' [linha: messages]`. No Linux o
   documento da página rola pela roda do mouse (`scroll` up/down). Retorna um texto com
   `concluído: …` ou `parou: …`, a lista de passos executados com a confiança do Jev, os tempos por etapa,
@@ -116,9 +121,9 @@ a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir 
 
 ### Roteiros (gravar e repetir)
 
-Objetivo que termina `concluído` vira roteiro em `e2e/roteiros/desktop-<objetivo>-<hash>.json` na raiz do repositório git
-em que o MCP roda (a pasta da sessão do Claude); fora de um repositório, em `~/.cache/hangar-computer-control/roteiros/`.
-Commitado, serve a quem rodar o mesmo objetivo no mesmo aplicativo, em VM ou não.
+Objetivo que termina `concluído` vira roteiro em `~/.cache/hangar-computer-control/roteiros/desktop-<objetivo>-<hash>.json`,
+ou na pasta de `HCC_ROTEIROS` quando definida (para versionar num repositório, aponte para ele de propósito). Nunca no
+repositório de quem chamou.
 A chave é o texto do objetivo (sem diferença de maiúsculas e espaços) e os nomes das chaves de `dados`, sem máquina nem alvo;
 os valores podem mudar entre execuções. Cada passo guarda a janela da frente (classe e título), o controle por
 papel, nome e ordem entre iguais (`{indice, de}`: se a tela tiver outro número de iguais, diverge), e o valor como
@@ -159,7 +164,7 @@ e os passos repetidos aparecem com `[roteiro]`. Apagar o arquivo ou `refazer=tru
 
 Além do roteiro do objetivo, toda corrida que concluiu (e o começo certo de uma que parou) é cortada em pedaços
 que servem a outros objetivos: abrir um app, abrir um item pelo nome, pesquisar um termo. Ficam em
-`e2e/roteiros/trechos/trecho-<descrição>-<hash>.json`, formato combinado com o gravador do navegador do Hangar:
+`<pasta dos roteiros>/trechos/trecho-<descrição>-<hash>.json`, formato combinado com o gravador do navegador do Hangar:
 
 ```json
 {"versao": 3, "tipo": "trecho", "descricao": "invoke ListItem '{p1}'", "parametros": {"p1": {"exemplo": "Ana"}},
@@ -220,6 +225,8 @@ visão); quem chama decide quando avisar o usuário. A última notificação sem
 ## Limites conhecidos
 
 - Texto de console (Windows Terminal) ainda não é lido: comando roda, mas o resultado não é conferido.
+- Linux: o Chrome perde teclas digitadas em velocidade máxima (popup de preenchimento automático abrindo no meio
+  da palavra). `set_value` confere o campo e, se não bater, apaga e redigita uma vez com 30 ms entre teclas.
 - Leitura da árvore em IDE Delphi leva 10 a 13 s por ciclo (VCL via MSAA); no resto, 1 s.
 - Um objetivo por vez por Windows alvo (trava na pasta temporária, por usuário e por alvo).
 - Linux, apps Chromium/Electron abertos sem leitor de tela (Slack, Discord): o agente pede os atributos do

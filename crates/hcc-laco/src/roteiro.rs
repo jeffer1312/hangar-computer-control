@@ -130,12 +130,6 @@ pub(crate) fn slug(texto: &str) -> String {
     s[..s.len().min(60)].trim_end_matches('-').to_owned()
 }
 
-/// `e2e/roteiros` at the root of the git repository holding `cwd`, so scripts travel with the project; `cache` outside one.
-pub fn pasta(cwd: &Path, cache: &Path) -> PathBuf {
-    cwd.ancestors().find(|d| d.join(".git").exists())
-        .map_or_else(|| cache.to_path_buf(), |raiz| raiz.join("e2e/roteiros"))
-}
-
 fn janela(obs: &Observation) -> Janela {
     let w = obs.windows.iter().find(|w| w.id == obs.foreground);
     Janela {
@@ -397,18 +391,6 @@ mod tests {
         let outra = json!({"usuario": "bia"}).as_object().unwrap().clone();
         assert_eq!(arquivo(Path::new("r"), "abrir o bloco de notas e salvar o relatório!", &outra), Path::new("r").join(nome));
         assert!(arquivo(Path::new("r"), "!!", &dados).to_str().unwrap().starts_with("r/desktop-roteiro-"));
-    }
-
-    #[test]
-    fn scripts_live_in_the_repository_of_the_session() {
-        let raiz = std::env::temp_dir().join(format!("hcc-roteiro-pasta-{}", std::process::id()));
-        let sub = raiz.join("a/b");
-        std::fs::create_dir_all(&sub).unwrap();
-        let cache = Path::new("/cache");
-        assert_eq!(pasta(&sub, cache), cache);
-        std::fs::create_dir(raiz.join(".git")).unwrap();
-        assert_eq!(pasta(&sub, cache), raiz.join("e2e/roteiros"));
-        std::fs::remove_dir_all(raiz).unwrap();
     }
 
     #[test]

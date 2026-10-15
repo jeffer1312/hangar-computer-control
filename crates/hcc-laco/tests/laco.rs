@@ -871,9 +871,11 @@ async fn reasoning_effort_is_optional() {
 #[tokio::test]
 async fn three_without_effect_stops() {
     let con = FakeConnector::new(vec![tree("o1", "")]);
-    let (op, _server) = setup(vec![select("set_value"), select("invoke"), select("keys Enter")]).await;
+    // The field stayed empty after the typing: that cycle goes through the vision model before picking.
+    let (op, _server) = setup(vec![select("set_value"), select("invoke"), help(json!([])), select("invoke"), select("keys Enter")]).await;
     let r = run(op, &con).await;
     assert!(r.motivo.starts_with("três ações seguidas sem efeito na tela:"), "{}", r.resumo());
+    assert!(r.motivo.ends_with("o campo Edit 'Nome' ficou com '', não com o valor pedido"), "{}", r.motivo);
     assert_eq!(con.state.lock().unwrap().acts.len(), 3);
 }
 
@@ -914,10 +916,10 @@ async fn wait_three_times_calls_llm() {
 }
 
 #[tokio::test]
-async fn truncated_tree_calls_llm_even_when_confident() {
+async fn truncated_tree_calls_llm_when_jev_is_unsure() {
     let mut obs = tree("o1", ""); obs.truncated = true;
     let con = FakeConnector::new(vec![obs, tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![select("set_value"), help(json!([])), select("set_value"), done()]).await;
+    let (op, _server) = setup(vec![Answer::Select("set_value", 0.4, 0.05), help(json!([])), select("set_value"), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     assert_eq!(con.state.lock().unwrap().captures, 1);
@@ -2218,4 +2220,83 @@ async fn shortcut_without_focus_purpose_still_aims_text_at_a_field() {
     let r = run(op, &con).await;
     let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect();
     assert_eq!(acts.get(1).and_then(|a| a.target.as_deref()), Some("e0"), "Ctrl+A does not place the focus for typing: {}", r.resumo());
+}
+
+// /tmp/hcu-aE9uKG: a big page comes truncated, and every cycle paid the vision model even with Jev at 96%.
+#[tokio::test]
+async fn truncated_tree_with_a_sure_pick_skips_the_vision_model() {
+    let mut cortada = tree("o1", "");
+    cortada.truncated = true;
+    let con = FakeConnector::new(vec![cortada, tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().captures, 0);
+}
+
+// /tmp/hcu-byF4iu: "clicar no botão 'Criar Página'" came back done at 85% without a single action.
+#[tokio::test]
+async fn done_without_acting_on_the_named_control_is_refused_once() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", ""), tree("o3", "")]);
+    let (mut op, server) = setup(vec![done(), select("invoke"), done()]).await;
+    op.texto = "clicar uma vez no botão \"Salvar\"".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    let requests = bodies(&server).await;
+    assert!(requests[1]["state"]["recentActions"][0]["action"].as_str().unwrap().starts_with("DONE recusado: nada foi feito ainda"), "{}", requests[1]["state"]);
+}
+
+#[tokio::test]
+async fn done_insisted_without_action_reports_that_nothing_was_done() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "")]);
+    let (mut op, _server) = setup(vec![done(), done()]).await;
+    op.texto = "ligar o botão \"Salvar\"".into();
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(r.motivo.contains("nenhuma ação executada"), "{}", r.motivo);
+    assert!(con.state.lock().unwrap().acts.is_empty());
+}
+
+// /tmp/hcu-tcgN0l: the field showed 'jeffer1315@gmaicom' and Jev kept repeating the same set_value.
+#[tokio::test]
+async fn a_field_left_with_another_value_is_a_failure_that_goes_to_the_vision_model() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "An"), tree("o3", "An")]);
+    let (op, server) = setup(vec![select("set_value"), Answer::Choice("WAIT", 0.9, 0.05), help(json!([])),
+        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    let r = run(op, &con).await;
+    assert!(!r.ok);
+    assert_eq!(con.state.lock().unwrap().captures, 1, "{}", r.resumo());
+    let requests = bodies(&server).await;
+    let resultado = requests[1]["state"]["recentActions"][0]["result"].as_str().unwrap();
+    assert!(resultado.starts_with("NOT confirmed: o campo Edit 'Nome' ficou com 'An'"), "{resultado}");
+    assert!(r.motivo.contains("ficou com 'An'"), "{}", r.motivo);
+}
+
+// A mask (CPF, phone) reformats what was typed: the same characters are the same value.
+#[tokio::test]
+async fn a_masked_field_with_the_typed_digits_is_not_a_divergence() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "123.456.789-00"), tree("o3", "123.456.789-00")]);
+    let (mut op, _server) = setup(vec![select("set_value"), Answer::Choice("WAIT", 0.9, 0.05), done()]).await;
+    op.texto = "preencher Nome com o cpf".into();
+    op.dados = json!({"cpf":"12345678900"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().captures, 0);
+}
+
+// A secret typed wrong would show its partial echo in the message: the check stays off for secret values.
+#[tokio::test]
+async fn a_secret_typed_wrong_never_shows_the_partial_value() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "s3gre"), tree("o3", "s3gre")]);
+    let (mut op, server) = setup(vec![select("set_value"), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    op.texto = "preencher Nome com o token".into();
+    op.dados = json!({"token":"s3gredo"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(!r.motivo.contains("s3gre") && !r.resumo().contains("s3gre"), "{}", r.resumo());
+    // The field itself is on screen and goes in `elements`; what this check writes must not repeat it.
+    assert!(!bodies(&server).await.iter().any(|b| b["state"]["recentActions"].to_string().contains("s3gre")));
 }

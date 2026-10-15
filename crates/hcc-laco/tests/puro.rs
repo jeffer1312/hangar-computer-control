@@ -239,7 +239,7 @@ fn pendente_combo_apos_oferta_de_reclique() {
 #[test]
 fn pendente_fragmento_cruza_segredo_literal() {
     let o = obs(vec![el("e0", "Nome", "Edit", &[], Some(""), None)]);
-    assert_eq!(pendente("abc 'zzq12'xy", &o, &[], &HashSet::from(["q12'xy".into()])).as_deref(),
+    assert_eq!(pendente("digitar abc 'zzq12'xy", &o, &[], &HashSet::from(["q12'xy".into()])).as_deref(),
         Some("ainda falta: o texto '<senha>' não aparece na tela"));
 }
 
@@ -256,7 +256,7 @@ fn pendente_apostrofo_nao_abre_literal() {
     assert_eq!(pendente("clicar em Don't Save e fechar o user's arquivo", &o, &[], &HashSet::new()), None);
     assert_eq!(pendente("copo d'água e digitar 'Bia'", &o, &[], &HashSet::new()).as_deref(),
         Some("ainda falta: o texto 'Bia' não aparece na tela"));
-    assert_eq!(pendente("'Ana' 'Bia'", &o, &[], &HashSet::new()).as_deref(),
+    assert_eq!(pendente("digitar 'Ana' 'Bia'", &o, &[], &HashSet::new()).as_deref(),
         Some("ainda falta: o texto 'Ana' não aparece na tela"));
 }
 
@@ -783,3 +783,44 @@ fn revisao_digitar_estrito_super_q_e_app_de_mesma_marca() {
     assert_eq!(lancados, ["Google Calendar"]);
 }
 
+
+// /tmp/hcu-aE9uKG: the table rows were further down, and the third scroll was barred as "ran twice".
+#[test]
+fn scrolling_again_is_never_a_repeat_while_it_moves_the_screen() {
+    let rolar = candidato(Action { kind: ActionType::Scroll, target: Some("e0".into()), direction: Some(hcc_protocolo::Direction::Down), ..Default::default() });
+    let hist = [reg(&rolar.descricao, Some(true)), reg(&rolar.descricao, Some(true))];
+    assert_eq!(Barreiras::barrar(vec![rolar.clone()], &hist).len(), 1);
+    let roda = candidato(Action { delta: Some(5), ..mouse(830, 450, MouseMode::Scroll) });
+    let hist = [Registro { clique: Some((MouseMode::Scroll, 830, 450)), ..reg("roda", Some(true)) },
+        Registro { clique: Some((MouseMode::Scroll, 832, 452)), ..reg("roda 2", Some(true)) }];
+    assert_eq!(Barreiras::barrar(vec![roda], &hist).len(), 1);
+    // A scroll that stopped moving the screen (end of the page) still goes.
+    assert!(Barreiras::barrar(vec![rolar.clone()], &[reg(&rolar.descricao, Some(false))]).is_empty());
+}
+
+// /tmp/hcu-n4UFzK, hcu-UHaPKO, hcu-ZhR6ZG: quoted texts that only located a row, a button or the window
+// were demanded on the final screen.
+#[test]
+fn quoted_names_of_a_click_goal_are_not_proof_of_completion() {
+    let o = obs(vec![el("e0", "Assinado", "Button", &[], None, None)]);
+    let goal = "Na janela \"Webhooks - Chrome\", a tabela está rolada até as linhas \"marketing_message_...\". Ligar o interruptor da linha \"messages\" (atenção: \"marketing_message_reads\" é OUTRA linha, não ligar essa).";
+    assert_eq!(pendente(goal, &o, &[], &HashSet::new()), None);
+    let goal = "Clicar no botão \"Criar Página\" (o formulário já está preenchido com ProChat Teste). Cumprido quando o formulário \"Criar uma Página\" sumir.";
+    assert_eq!(pendente(goal, &o, &[], &HashSet::new()), None);
+}
+
+#[test]
+fn a_typed_value_counts_once_typed_even_after_the_field_clears() {
+    let o = obs(vec![el("e0", "Mensagem", "Edit", &[], Some(""), None)]);
+    let goal = "digitar 'bom dia' no campo e apertar Enter; não clicar em 'Apagar'";
+    assert_eq!(pendente(goal, &o, &[], &HashSet::new()).as_deref(), Some("ainda falta: o texto 'bom dia' não aparece na tela"));
+    let feito = [reg("set_value Edit 'Mensagem' = 'bom dia'", Some(true)), reg("keys Enter", Some(true))];
+    assert_eq!(pendente(goal, &o, &feito, &HashSet::new()), None);
+}
+
+#[test]
+fn a_state_word_is_not_a_request_to_act() {
+    let o = obs(vec![el("e1", "Salvar", "Button", &[ElementAction::Invoke], None, None)]);
+    assert_eq!(hcc_laco::barreiras::sem_acao_pedida("verificar se \"Salvar\" está ativo e marcado", &o, &[]), None);
+    assert!(hcc_laco::barreiras::sem_acao_pedida("ativar \"Salvar\"", &o, &[]).is_some());
+}

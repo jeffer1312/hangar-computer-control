@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use crate::barreiras::{Barreiras, aviso, escolhe_foco, sem_localizadores, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
+use crate::barreiras::{Barreiras, aviso, escolhe_foco, literais_atendidos, sem_acao_pedida, sem_localizadores, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
 use crate::candidatos::{apps_do_objetivo, candidatos, descrever_acao, py_str, segredos, sem_app_aberto, texto_no_editavel};
 use crate::descrever::{intencao, py_repr};
 use crate::estado::{AssinaturaTela, assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
@@ -215,6 +215,27 @@ fn sem_reabrir(cands: Vec<Candidato>, fechados: &[String]) -> Vec<Candidato> {
     cands.into_iter().filter(|c| c.acao.kind != ActionType::Launch || !reabre(&c.acao)).collect()
 }
 
+/// A typing aimed at a named field: its role, name and the value it should leave there.
+/// A secret is never checked: a field left with part of it would echo that part in the messages.
+fn digitacao(acao: &Action, obs: &Observation, segredos: &HashSet<String>) -> Option<(String, String, String)> {
+    if !matches!(acao.kind, ActionType::SetValue | ActionType::Text) { return None; }
+    let valor = acao.value.as_deref().filter(|v| !v.trim().is_empty())?;
+    if segredos.iter().any(|s| !s.is_empty() && valor.contains(s.as_str())) { return None; }
+    let e = acao.target.as_ref().and_then(|id| obs.elements.iter().find(|e| &e.id == id))?;
+    (!e.password && !e.name.is_empty()).then(|| (e.role.clone(), e.name.clone(), valor.to_owned()))
+}
+
+/// What the field shows when it is not the typed value. Fields that hide their value, or that are gone, say nothing.
+fn campo_diferente(obs: &Observation, papel: &str, nome: &str, valor: &str) -> Option<String> {
+    let lidos: Vec<&str> = obs.elements.iter().filter(|e| e.role == papel && e.name == nome && !e.password)
+        .filter_map(|e| e.value.as_deref()).collect();
+    // Masks (CPF, phone, date) add punctuation: only letters and digits are compared.
+    let normal = |t: &str| t.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    // ponytail: `contains` lets a text appended to an existing value pass; an exact check would fail those goals.
+    if lidos.is_empty() || lidos.iter().any(|l| normal(l).contains(&normal(valor))) { return None; }
+    Some(lidos[0].to_owned())
+}
+
 /// `None` when the tree is empty on both sides: an unchanged title then proves nothing either way.
 fn mudou(antes: &AssinaturaTela, depois: &AssinaturaTela) -> Option<bool> {
     if antes != depois { Some(true) } else if depois.2.is_empty() { None } else { Some(false) }
@@ -401,6 +422,11 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     let mut gravados = Vec::new();
     let mut recentes = Vec::new();
     ciclo_passos(op, conector, sessao, controle, r, secretos, &mut gravados, &mut recentes).await?;
+    // A field left with another value is the likely cause of a stop: the caller must see it.
+    if !r.ok && let Some(falha) = recentes.iter().rev().find(|x| x.action.starts_with("set_value ") || x.action.starts_with("text "))
+        .and_then(|x| x.result.strip_prefix("NOT confirmed: ")).filter(|f| !r.motivo.contains(*f)) {
+        r.motivo = format!("{}; {falha}", r.motivo);
+    }
     let (Some(dir), Some(pasta), false) = (op.roteiros.as_deref(), r.registro.clone(), r.ok) else { return Ok(()); };
     // Like a confirmed run: each step keeps whether it changed the screen, the check its replay relies on.
     let feitos: Vec<(roteiro::Passo, String)> = gravados.into_iter()
@@ -452,6 +478,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     let mut foco_escolhido = false;
     let mut em_foco_nas_acoes: Vec<hcc_protocolo::Window> = Vec::new();
     let mut fechados: Vec<String> = Vec::new();
+    let mut recusou_sem_acao = false;
+    // The last typing into a named field (registry index, role, name, value): checked on the next screen.
+    let mut digitado: Option<(usize, String, String, String)> = None;
     controle.rodar(registrar(&pasta, json!({"objetivo": op.texto, "dados": op.dados.keys().collect::<Vec<_>>()}), secretos)).await?;
     let arquivo = op.roteiros.as_deref().map(|p| roteiro::arquivo(p, &op.texto, &op.dados));
     let mut lido = arquivo.as_deref().filter(|_| !op.refazer).map(roteiro::carregar).transpose().map(Option::flatten);
@@ -636,6 +665,14 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             ultima.screen_changed = anterior.as_ref().map_or(Some(true), |a| mudou(a, &atual));
         }
         anterior = Some(atual.clone());
+        let divergencia = digitado.take().and_then(|(i, papel, nome, valor)| {
+            let lido = campo_diferente(&obs, &papel, &nome, &valor)?;
+            let texto = secretos.texto(&format!("o campo {papel} {} ficou com {}, não com o valor pedido",
+                py_repr(&nome), py_repr(&lido.chars().take(80).collect::<String>())));
+            // Not progress: the same typing is not offered again, and the next pick goes through the vision model.
+            if let Some(reg) = recentes.get_mut(i) { reg.result = format!("NOT confirmed: {texto}"); reg.screen_changed = Some(false); }
+            Some(texto)
+        });
         fechados.extend(apps_fechados(&std::mem::take(&mut em_foco_nas_acoes), &obs));
         let mut gravada = serde_json::to_value(&obs).map_err(|e| format!("ValueError: {e}"))?;
         secretos.valor(&mut gravada);
@@ -676,11 +713,11 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let parecido = nome_parecido(&op.texto, &obs);
         let nome = parecido.as_ref().map(|(dita, tela)| format!(
             "'{dita}' in the goal is likely a speech transcription of '{tela}', the only similar name on screen; treat it as '{tela}'."));
-        let (mut dica, mut ajudou, mut direta) = (com_dica(&nome, String::new()), false, None);
+        let (mut dica, mut ajudou, mut direta) = (com_dica(&nome, divergencia.clone().unwrap_or_default()), false, None);
         let mut leitura_valida = false;
         let mut leitura = String::new();
         let mut fila: Vec<Candidato> = Vec::new();
-        let mut falta_dica = None;
+        let mut falta_dica = divergencia.clone();
         let mut primeira_ajuda: Option<Candidato> = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, recentes, None);
@@ -751,7 +788,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         leitura_forte = true;
                     } else if d2.escolha == Escolha::Done && d2.p >= 0.75 { confirmado = Some(d2.p); }
                     // The print reading plus every explicit item of the goal on screen is evidence enough.
-                    else if (itens_pendentes(conferir, &obs) > 0 || nomes_no_titulo(&op.texto, &obs)
+                    else if ((itens_pendentes(conferir, &obs) > 0 && literais_atendidos(conferir, &obs, recentes)) || nomes_no_titulo(&op.texto, &obs)
                         || iniciais.as_ref().is_some_and(|i| nomes_em_janela_nova(&op.texto, &obs, i)))
                         && pendencia(conferir, &obs, recentes, &secretos.valores).is_none() {
                         confirmado = Some(d.p);
@@ -759,6 +796,15 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 }
                 match confirmado {
                     Some(p) => {
+                        // Nothing done yet while the control the goal names is still there: asked once more with that
+                        // said; if Jev insists, it is reported as already done before any action.
+                        if !recusou_sem_acao && let Some(falta) = sem_acao_pedida(&op.texto, &obs, recentes) {
+                            recusou_sem_acao = true;
+                            recentes.push(Registro { action: format!("DONE recusado: {falta}"), result: "não confirmado".into(),
+                                screen_changed: Some(false), target_rect: None, clique: None, executada: false });
+                            dica = if dica.is_empty() { falta } else { format!("{falta}\n{dica}") };
+                            continue;
+                        }
                         if let Some((indice, falta)) = pendencia(conferir, &obs, recentes, &secretos.valores) {
                             recentes.push(Registro { action: format!("DONE recusado: {falta}"), result: "não confirmado".into(),
                                 screen_changed: Some(false), target_rect: None, clique: None, executada: false });
@@ -790,6 +836,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         r.motivo = if leitura_forte {
                             format!("objetivo confirmado pela leitura da tela ({}) na janela {janela}. Leitura: {leitura}", percentual(p))
                         } else { format!("objetivo confirmado ({}) na janela {janela}", percentual(p)) };
+                        if recusou_sem_acao && !recentes.iter().any(|x| x.executada && x.result.starts_with("ok")) { r.motivo.push_str("; nenhuma ação executada: o Jev considera que já estava feito"); }
                         if let Some((dita, tela)) = &parecido {
                             r.motivo.push_str(&format!(". Nome '{dita}' do pedido tratado como '{tela}', o único parecido na tela"));
                         }
@@ -807,7 +854,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 .take(3).filter(|r| r.action == "WAIT").count() >= 3;
             let fraco = d.escolha == Escolha::Blocked || d.p < if d.escolha == Escolha::Done { 0.75 } else { 0.25 }
                 || (d.escolha == Escolha::Wait && esperando);
-            if !fraco && (!obs.elements.is_empty() && !obs.truncated || ajudou) { break d; }
+            // A truncated tree may hide the control the goal needs, but a sure pick was found in what came.
+            if !fraco && (!obs.elements.is_empty() && (!obs.truncated || d.p >= 0.6) && divergencia.is_none() || ajudou) { break d; }
             if ajudou {
                 // Jev still unsure: the help's first action decides, after the risk question.
                 if let Some(proposta) = primeira_ajuda.take() {
@@ -884,6 +932,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 }
             };
             r.passos.push(format!("{}. {nome} [{}]", r.passos.len() + 1, percentual(decisao.p)));
+            if let Some((papel, nome, valor)) = digitacao(acao, &vista, &secretos.valores).filter(|_| !falhou) {
+                digitado = Some((recentes.len() - 1, papel, nome, valor));
+            }
             if !falhou && op.roteiros.is_some() {
                 gravados.push((roteiro::passo(acao, &vista, &op.dados), Some(recentes.len() - 1)));
             }

@@ -43,6 +43,8 @@ struct FakeTree {
     nodes: Rc<RefCell<Vec<FakeNo>>>,
     events: Rc<RefCell<Vec<String>>>,
     readback: Rc<RefCell<Option<String>>>,
+    /// Read before `readback`, one per call: a field that changes between two readings.
+    readbacks: Rc<RefCell<std::collections::VecDeque<String>>>,
 }
 
 impl Arvore for FakeTree {
@@ -86,6 +88,7 @@ impl Arvore for FakeTree {
     }
     fn text(&self, node: &usize) -> Result<String, TreeError> {
         self.events.borrow_mut().push(format!("text:{node}"));
+        if let Some(lido) = self.readbacks.borrow_mut().pop_front() { return Ok(lido); }
         Ok(self.readback.borrow().clone().unwrap_or_else(|| self.nodes.borrow()[*node].info.text.clone().unwrap_or_default()))
     }
 }
@@ -134,7 +137,7 @@ impl Comandos for FakeCommands {
             ["ydotool", "click", "0x80"] if self.fail_release.replace(false) => Err("ydotool falhou (3): release falhou".into()),
             ["ydotool", "key", ..] if self.fail_keys.replace(false) => Err("ydotool falhou (2): falhou".into()),
             ["ydotool", "click", "0x40"] if self.fail_press.replace(false) => Err("ydotool falhou (2): press falhou".into()),
-            ["ydotool", ..] | ["wtype", "-"] => Ok(vec![]),
+            ["ydotool", ..] | ["wtype", "-"] | ["wtype", "-d", _, "-"] => Ok(vec![]),
             ["grim", ..] => Ok(b"PNG".to_vec()),
             _ => panic!("comando inesperado: {argv:?}"),
         }
@@ -809,4 +812,17 @@ fn documento_web_em_pixel_fisico_volta_para_logico() {
     // A Chrome window on a scale-1 monitor is left alone.
     let (controls, _, _) = walk(&tree, vec![0], janela, 1.0, Duration::from_secs(4), 800).unwrap();
     assert_eq!(controls.iter().find(|e| e.name == "Nome do canal ou do usuário").and_then(|e| e.rect), Some(Rect(130, 208, 517, 228)));
+}
+
+// /tmp/hcu-HQzzwj: Chrome lost "l." of "jeffer1315@gmail.com" typed at full speed.
+#[test]
+fn set_value_retypes_slowly_once_when_the_field_lost_characters() {
+    let mut field = node("entry","Email"); field.info.states.push("editable".into()); field.info.text = Some(String::new());
+    let (mut desktop, commands, tree) = desktop(vec![field]);
+    tree.readbacks.borrow_mut().extend(["a@gmaicom".to_owned(), "a@gmail.com".to_owned()]);
+    let observed = desktop.observe().unwrap();
+    let set = Action { value:Some("a@gmail.com".into()), ..action(ActionType::SetValue,Some("e0")) };
+    desktop.act(&observed,&set).unwrap();
+    let wtypes: Vec<Vec<String>> = commands.calls.borrow().iter().filter(|c| c.0[0] == "wtype").map(|c| c.0.clone()).collect();
+    assert_eq!(wtypes, vec![vec!["wtype","-"], vec!["wtype","-d","30","-"]]);
 }

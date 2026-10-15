@@ -37,7 +37,9 @@ pub fn literais(goal: &str) -> Vec<String> {
 }
 
 pub(crate) fn pede_digitar(goal: &str) -> bool {
-    DIGITAR.is_match(&crate::candidatos::afirmado(goal))
+    // A participle ("já preenchido", "digitado antes") describes the screen, it asks for nothing.
+    let participio = |w: &str| ["ado", "ada", "ados", "adas", "ido", "ida", "idos", "idas"].iter().any(|f| w.to_lowercase().ends_with(f));
+    DIGITAR.find_iter(&crate::candidatos::afirmado(goal)).any(|m| !participio(m.as_str()))
 }
 
 pub fn pede_leitura(goal: &str) -> bool {
@@ -201,5 +203,12 @@ mod tests {
         assert!(literais("ligar o interruptor da linha \"messages\". NÃO usar a caixa \"Pesquisar\"").is_empty());
         assert_eq!(literais("na página \"X\", ir para https://y.dev/a"), vec!["https://y.dev/a"]);
         assert_eq!(literais("preencher o campo \"URL\" com 'abc'"), vec!["URL", "abc"]);
+    }
+
+    // "o formulário já está preenchido" describes the screen; it asks nothing to be typed.
+    #[test]
+    fn a_participle_is_not_a_request_to_type() {
+        assert!(!pede_digitar("Clicar em \"Criar Página\" (o formulário já está preenchido, dados digitados antes)"));
+        assert!(pede_digitar("preencher o nome e digite a senha"));
     }
 }

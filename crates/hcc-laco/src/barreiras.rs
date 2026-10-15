@@ -81,11 +81,15 @@ pub fn itens_pendentes(objetivo: &str, obs: &Observation) -> usize {
 /// they are not something the goal must make appear.
 pub fn sem_localizadores(objetivo: &str, inicial: &Observation) -> String {
     // A goal that types something: its quoted texts may be the values, and a value may start a name on screen.
-    if crate::objetivo::pede_digitar(objetivo) { return objetivo.to_owned(); }
+    // A goal that types: its quoted texts may be the values, and a value may start a name on screen, so only a
+    // whole name locates there.
+    let digita = crate::objetivo::pede_digitar(objetivo);
     LITERAIS.replace_all(objetivo, |c: &regex::Captures| {
         let texto = c.iter().skip(1).flatten().next().map_or("", |m| m.as_str());
+        let casa = |nome: &str| if digita { nome.trim() == texto.trim() } else { nome.contains(texto) };
         // Names only (titles, labels): a field's value on the first screen may be the very thing to type.
-        let visto = texto.chars().count() >= 2 && inicial.elements.iter().any(|e| e.name.contains(texto));
+        let visto = texto.chars().count() >= 2
+            && (inicial.elements.iter().any(|e| casa(&e.name)) || inicial.windows.iter().any(|w| casa(&w.name)));
         if !visto { return c[0].to_owned(); }
         let inteiro = &c[0];
         let antes = &inteiro[..inteiro.find(['\'', '"', '“']).unwrap_or(0)];
@@ -104,11 +108,14 @@ pub(crate) fn pendencia(objetivo: &str, obs: &Observation, recentes: &[Registro]
     let ocultos: Vec<std::ops::Range<usize>> = crate::estado::padrao_segredos(segredos)
         .map(|r| r.find_iter(objetivo).map(|m| m.range()).collect()).unwrap_or_default();
     let toca = |r: std::ops::Range<usize>| ocultos.iter().any(|o| o.start < r.end && r.start < o.end);
-    if !obs.elements.is_empty() {
+    // Only a goal that types has quoted values to demand; elsewhere quotes name a control, a row or a window to
+    // find, and that name may rightly be gone once the goal is done (a button that disappears after the click).
+    if !obs.elements.is_empty() && crate::objetivo::pede_digitar(objetivo) {
+        let negados = crate::candidatos::negados(objetivo);
         for (indice, literal) in LITERAIS.captures_iter(objetivo).filter_map(|c| c.iter().skip(1).flatten().next()).enumerate() {
             let texto = literal.as_str();
-            if texto.chars().count() < 2 { continue; }
-            if !obs.elements.iter().any(|e| e.name.contains(texto) || e.value.as_deref().is_some_and(|v| v.contains(texto))) {
+            if texto.chars().count() < 2 || negados.iter().any(|n| n.start <= literal.start() && literal.end() <= n.end) { continue; }
+            if !atendido(texto, obs, recentes) {
                 let nome = if toca(literal.range()) { "<senha>".into() } else { publico(texto) };
                 return Some((indice, format!("ainda falta: o texto '{nome}' não aparece na tela")));
             }
@@ -124,6 +131,39 @@ pub(crate) fn pendencia(objetivo: &str, obs: &Observation, recentes: &[Registro]
         }
     }
     None
+}
+
+/// On screen (a control, a value, a window title), or already used by an action of this run: typed, or the control acted on.
+fn atendido(texto: &str, obs: &Observation, recentes: &[Registro]) -> bool {
+    obs.elements.iter().any(|e| e.name.contains(texto) || e.value.as_deref().is_some_and(|v| v.contains(texto)))
+        || obs.windows.iter().any(|w| w.name.contains(texto))
+        || recentes.iter().any(|r| r.executada && r.result.starts_with("ok") && r.action.contains(texto))
+}
+
+/// Every quoted text the goal affirms is on screen or was used by the run: evidence for a DONE the hint suggested.
+pub fn literais_atendidos(objetivo: &str, obs: &Observation, recentes: &[Registro]) -> bool {
+    let negados = crate::candidatos::negados(objetivo);
+    LITERAIS.captures_iter(objetivo).filter_map(|c| c.iter().skip(1).flatten().next())
+        .filter(|l| l.as_str().chars().count() >= 2 && !negados.iter().any(|n| n.start <= l.start() && l.end() <= n.end))
+        .all(|l| atendido(l.as_str(), obs, recentes))
+}
+
+// Imperative or infinitive only: "ativo", "ligação", "marcado" describe the screen.
+static AGIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?i)\b(?:clic(?:ar|a|ue)|clique|apert(?:ar|e|a)|pression(?:ar|e|a)|toqu?(?:ar|e|a)|ativ(?:ar|e|a)|(?:des)?lig(?:ar|ue|a)|(?:des)?marc(?:ar|a)|(?:des)?marque|selecion(?:ar|e|a)|escolh(?:er|a)|click|tap|press|select|toggle|check)\b").unwrap());
+
+/// The goal asks to act on a quoted control that is still on screen, and no action of the run went through.
+pub fn sem_acao_pedida(objetivo: &str, obs: &Observation, recentes: &[Registro]) -> Option<String> {
+    if recentes.iter().any(|r| r.executada && r.result.starts_with("ok")) || crate::objetivo::pede_leitura(objetivo)
+        || !AGIR.is_match(&crate::candidatos::afirmado(objetivo)) {
+        return None;
+    }
+    let negados = crate::candidatos::negados(objetivo);
+    LITERAIS.captures_iter(objetivo).filter_map(|c| c.iter().skip(1).flatten().next())
+        .filter(|l| !negados.iter().any(|n| n.start <= l.start() && l.end() <= n.end))
+        .map(|l| l.as_str().trim())
+        .find(|l| l.chars().count() >= 2 && obs.elements.iter().any(|e| e.enabled && casefold(e.name.trim()) == casefold(l)))
+        .map(|l| format!("nada foi feito ainda nesta execução: o objetivo pede agir em '{l}', que continua na tela"))
 }
 
 /// Alt+F4, Ctrl+Q, Ctrl+Shift+W, or the Close button of the title bar: closes the whole window, not a tab.
@@ -220,12 +260,14 @@ impl Barreiras {
         cands
             .into_iter()
             .filter(|c| {
-                if sem_efeito.contains(c.descricao.as_str()) || vezes(&c.descricao) >= 2 {
+                let a = &c.acao;
+                // Scrolling again is how a long page is read, not a repeat: only a scroll without effect stops.
+                let rola = a.kind == ActionType::Scroll || (a.kind == ActionType::Mouse && a.mode == Some(hcc_protocolo::MouseMode::Scroll));
+                if sem_efeito.contains(c.descricao.as_str()) || (!rola && vezes(&c.descricao) >= 2) {
                     return false;
                 }
                 // The LLM's click drifts a few pixels per cycle: count the region, not the point.
-                let a = &c.acao;
-                let (Some(modo), Some(x), Some(y)) = (a.mode.filter(|_| a.kind == ActionType::Mouse), a.x, a.y) else {
+                let (Some(modo), Some(x), Some(y)) = (a.mode.filter(|_| a.kind == ActionType::Mouse && !rola), a.x, a.y) else {
                     return true;
                 };
                 feitas

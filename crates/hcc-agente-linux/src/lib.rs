@@ -302,13 +302,20 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         if info.text.is_none() && !self.tree.read(&element.node).map_err(tree_error)?.has("focused") {
             return Err(runtime("campo não recebeu o foco; nada foi digitado"));
         }
-        entrada::keys(&self.commands, &["ctrl".into(), "a".into()]).map_err(runtime)?;
-        entrada::keys(&self.commands, &["delete".into()]).map_err(runtime)?;
-        self.type_text(Some(value), "texto inválido")?;
-        std::thread::sleep(Duration::from_millis(150));
-        if info.role != "password text" && info.text.is_some() {
+        // Chromium drops keystrokes typed at full speed (an autofill popup opening mid-word): one slow retype.
+        for atraso in [None, Some("30")] {
+            entrada::keys(&self.commands, &["ctrl".into(), "a".into()]).map_err(runtime)?;
+            entrada::keys(&self.commands, &["delete".into()]).map_err(runtime)?;
+            match atraso {
+                None => self.type_text(Some(value), "texto inválido")?,
+                Some(ms) => { self.commands.run(&["wtype", "-d", ms, "-"], Some(value.as_bytes())).map_err(runtime)?; }
+            }
+            std::thread::sleep(Duration::from_millis(150));
+            if info.role == "password text" || info.text.is_none() { return Ok(()); }
             let readback = self.tree.text(&element.node).map_err(tree_error)?;
-            if readback.replace("\r\n", "\n").trim() != value.replace("\r\n", "\n").trim() {
+            if readback.replace("\r\n", "\n").trim() == value.replace("\r\n", "\n").trim() { return Ok(()); }
+            // ponytail: slow retype only for short values; 30 ms per key on a long text outlasts the action timeout.
+            if atraso.is_some() || value.chars().count() > 200 {
                 return Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&readback.chars().take(80).collect::<String>()))));
             }
         }
