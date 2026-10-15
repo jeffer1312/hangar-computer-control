@@ -2249,14 +2249,15 @@ async fn done_without_acting_on_the_named_control_is_refused_once() {
 }
 
 #[tokio::test]
-async fn done_insisted_without_action_reports_that_nothing_was_done() {
+async fn done_insisted_without_action_is_not_a_success() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "")]);
     let (mut op, _server) = setup(vec![done(), done()]).await;
     op.texto = "ligar o botão \"Salvar\"".into();
     op.dados = Map::new();
     let r = run(op, &con).await;
-    assert!(r.ok, "{}", r.resumo());
-    assert!(r.motivo.contains("nenhuma ação executada"), "{}", r.motivo);
+    assert!(!r.ok, "{}", r.resumo());
+    assert!(r.motivo.starts_with("não confirmado: nada foi feito ainda"), "{}", r.motivo);
+    assert!(r.motivo.contains("o Jev diz que já estava feito"), "{}", r.motivo);
     assert!(con.state.lock().unwrap().acts.is_empty());
 }
 

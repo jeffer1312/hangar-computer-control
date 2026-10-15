@@ -231,6 +231,8 @@ fn campo_diferente(obs: &Observation, papel: &str, nome: &str, valor: &str) -> O
         .filter_map(|e| e.value.as_deref()).collect();
     // Masks (CPF, phone, date) add punctuation: only letters and digits are compared.
     let normal = |t: &str| t.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    // A value made only of punctuation ("---") would compare as empty and always match.
+    let normal = |t: &str| if normal(valor).is_empty() { t.trim().to_owned() } else { normal(t) };
     // ponytail: `contains` lets a text appended to an existing value pass; an exact check would fail those goals.
     if lidos.is_empty() || lidos.iter().any(|l| normal(l).contains(&normal(valor))) { return None; }
     Some(lidos[0].to_owned())
@@ -805,6 +807,11 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                             dica = if dica.is_empty() { falta } else { format!("{falta}\n{dica}") };
                             continue;
                         }
+                        // Insisted with nothing done: the caller decides, a success here would be the false "concluído".
+                        if let Some(falta) = sem_acao_pedida(&op.texto, &obs, recentes) {
+                            r.motivo = format!("não confirmado: {falta}; o Jev diz que já estava feito ({})", percentual(p));
+                            return Ok(());
+                        }
                         if let Some((indice, falta)) = pendencia(conferir, &obs, recentes, &secretos.valores) {
                             recentes.push(Registro { action: format!("DONE recusado: {falta}"), result: "não confirmado".into(),
                                 screen_changed: Some(false), target_rect: None, clique: None, executada: false });
@@ -836,7 +843,6 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         r.motivo = if leitura_forte {
                             format!("objetivo confirmado pela leitura da tela ({}) na janela {janela}. Leitura: {leitura}", percentual(p))
                         } else { format!("objetivo confirmado ({}) na janela {janela}", percentual(p)) };
-                        if recusou_sem_acao && !recentes.iter().any(|x| x.executada && x.result.starts_with("ok")) { r.motivo.push_str("; nenhuma ação executada: o Jev considera que já estava feito"); }
                         if let Some((dita, tela)) = &parecido {
                             r.motivo.push_str(&format!(". Nome '{dita}' do pedido tratado como '{tela}', o único parecido na tela"));
                         }

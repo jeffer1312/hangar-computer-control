@@ -102,7 +102,7 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   objetivo que pede digitar, e só se ele não aparece na tela nem foi usado por uma ação da corrida (digitado ou
   clicado); texto citado em trecho negado ("não clicar em 'X'") e nome de controle ou janela da primeira tela nunca
   são cobrados. Pedido para agir num controle citado que continua na tela sem nenhuma ação feita: o "concluído" é
-  recusado uma vez; se o Jev insistir, o resultado diz `nenhuma ação executada`. Depois de cada digitação num campo
+  recusado uma vez; se o Jev insistir, volta `parou: não confirmado: nada foi feito ainda…` (quem chamou decide). Depois de cada digitação num campo
   com nome, o laço confere o valor do campo na tela seguinte: valor diferente vira falha da ação (não progresso),
   o próximo passo passa pela ajuda visual e o motivo final diz com que valor o campo ficou. Controles de mesmo papel e nome (um interruptor
   por linha de tabela) aparecem pro Jev com o rótulo da linha: `Button 'X' [linha: messages]`. No Linux o
