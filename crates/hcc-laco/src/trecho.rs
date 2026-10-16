@@ -259,7 +259,11 @@ pub fn opcoes(pecas: &[(PathBuf, Trecho)], obs: &Observation, dados: &Map<String
         let chaves: Vec<&String> = peca.parametros.keys().collect();
         let mut ligacoes: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
         for k in &chaves {
-            ligacoes = ligacoes.into_iter().flat_map(|l| valores.iter().map(move |v| {
+            // A slot whose recorded value this goal also names keeps it: only what differs between goals is bound anew.
+            let exemplo = peca.parametros.get(*k).map(|p| &p.exemplo);
+            let fixo: Vec<&String> = valores.iter().copied().filter(|v| Some(*v) == exemplo).collect();
+            let valores = if fixo.is_empty() { valores.clone() } else { fixo };
+            ligacoes = ligacoes.into_iter().flat_map(|l| valores.clone().into_iter().map(move |v| {
                 let mut l = l.clone(); l.insert((*k).clone(), (*v).clone()); l
             })).take(200).collect();
         }
@@ -309,7 +313,7 @@ pub fn bons(feitos: &[Feito], tela_final: u64) -> Vec<usize> {
             // Erased by keys right after: the typing and the keys up to the delete go.
             let seguintes: Vec<usize> = (a + 1..ficam.len()).take(3).take_while(|&b| feitos[ficam[b]].passo.acao.kind == ActionType::Keys).collect();
             if let Some(&fim) = seguintes.iter().find(|&&b| apaga(&feitos[ficam[b]].passo)) {
-                for b in a..=fim { fora[b] = true; }
+                fora[a..=fim].fill(true);
             }
             continue;
         }

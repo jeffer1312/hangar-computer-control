@@ -2358,3 +2358,90 @@ async fn an_open_confirmation_is_never_offered_and_jev_is_told_to_cancel() {
     assert!(!primeiro["questions"]["action"]["criteria"].to_string().contains("Sim, tenho certeza"));
     assert!(primeiro["state"].to_string().contains("never confirm it, close it with 'Cancelar'"), "{}", primeiro["state"]);
 }
+
+/// A page with a button that opens a form dialog; `dialogo` = (title, description typed, agreement checked).
+fn pagina(id: &str, dialogo: Option<(&str, &str, bool)>) -> Observation {
+    let el = |id: &str, nome: &str, papel: &str, valor: Value, r: [i32; 4], acoes: Value| json!({"id":id, "name":nome, "role":papel,
+        "value":valor, "enabled":true, "rect":r, "focused":false, "actions":acoes});
+    let mut elementos = vec![el("a1", "Abrir motivo", "Button", Value::Null, [10, 10, 100, 40], json!(["invoke"]))];
+    if let Some((titulo, descricao, marcado)) = dialogo {
+        elementos.extend([
+            el("d1", titulo, "Dialog", Value::Null, [100, 100, 500, 400], json!([])),
+            el("c1", "Descrição", "Edit", json!(descricao), [120, 150, 480, 200], json!(["set_value"])),
+            el("c2", "Concordo", "CheckBox", json!(if marcado { "on" } else { "off" }), [120, 220, 300, 240], json!(["toggle"])),
+            el("b1", "Cancelar", "Button", Value::Null, [300, 350, 390, 380], json!(["invoke"])),
+            el("b2", "Salvar", "Button", Value::Null, [400, 350, 480, 380], json!(["invoke"])),
+        ]);
+    }
+    serde_json::from_value(json!({
+        "observation_id": id, "connected": true, "session_id": 1, "foreground": "w1",
+        "windows": [{"id": "w1", "name": "Painel", "process_id": 10, "class_name": "TMainForm", "rect": [0,0,800,600]}],
+        "elements": elementos, "truncated": false, "timestamp": 1.0, "screen": {"width": 800, "height": 600},
+    })).unwrap()
+}
+
+/// Run 1 fills the dialog of one item by hand, through Jev.
+async fn preenchido_uma_vez(pasta: &std::path::Path) {
+    let con = FakeConnector::new(vec![pagina("o1", Some(("Motivo para Ana", "", false))), pagina("o2", Some(("Motivo para Ana", "texto A", false))),
+        pagina("o3", Some(("Motivo para Ana", "texto A", true))), pagina("o4", None)]);
+    let (mut op, _server) = setup(vec![select("= 'texto A'"), select("toggle CheckBox 'Concordo'"), select("invoke Button 'Salvar'"), done()]).await;
+    op.roteiros = Some(pasta.to_path_buf());
+    op.texto = "preencher o diálogo do Motivo para Ana com a descrição, marcar Concordo e salvar".into();
+    op.dados = json!({"descricao": "texto A"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(roteiros(&pasta.join("trechos")).len(), 1, "{:?}", r.roteiro);
+}
+
+fn atos(con: &FakeConnector) -> Vec<Action> { con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.clone()).collect() }
+
+// Same dialog for another item, another value: the piece learned from the first one fills it, Jev only picks it.
+#[tokio::test]
+async fn a_dialog_of_the_same_shape_is_filled_by_the_piece_learned_on_another() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    preenchido_uma_vez(&pasta).await;
+    let con = FakeConnector::new(vec![pagina("p1", Some(("Motivo para Bia", "", false))), pagina("p2", Some(("Motivo para Bia", "texto B", false))),
+        pagina("p3", Some(("Motivo para Bia", "texto B", true))), pagina("p4", None)]);
+    let (mut op, server) = setup(vec![Answer::Pick("NONE", 0.9), Answer::Pick("Descrição", 0.9), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.texto = "preencher o diálogo do Motivo para Bia com a descrição, marcar Concordo e salvar".into();
+    op.dados = json!({"descricao": "texto B"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(atos(&con), vec![action(json!({"type":"set_value","target":"c1","value":"texto B"})),
+        action(json!({"type":"toggle","target":"c2"})), action(json!({"type":"invoke","target":"b2"}))], "{:?}", r.roteiro);
+    assert!(r.passos.iter().all(|p| p.ends_with("[trecho]")), "{}", r.resumo());
+    assert_eq!(bodies(&server).await.len(), 3, "similar-goal pick, piece pick, final DONE");
+}
+
+// The dialog opens in the middle of the run: the piece is offered then, not only before the first step.
+#[tokio::test]
+async fn a_piece_is_offered_when_a_dialog_opens_mid_run() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    preenchido_uma_vez(&pasta).await;
+    let con = FakeConnector::new(vec![pagina("p0", None), pagina("p1", Some(("Motivo para Bia", "", false))),
+        pagina("p2", Some(("Motivo para Bia", "texto B", false))), pagina("p3", Some(("Motivo para Bia", "texto B", true))), pagina("p4", None)]);
+    let (mut op, _server) = setup(vec![Answer::Pick("NONE", 0.9), select("invoke Button 'Abrir motivo'"), Answer::Pick("Descrição", 0.9), done()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.texto = "abrir o Motivo para Bia, preencher a descrição, marcar Concordo e salvar".into();
+    op.dados = json!({"descricao": "texto B"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(atos(&con).len(), 4, "{}", r.resumo());
+    assert!(r.passos[1..].iter().all(|p| p.ends_with("[trecho]")), "{}", r.resumo());
+}
+
+// A run that stops after filling part of the dialog still leaves what it learned.
+#[tokio::test]
+async fn a_failed_run_still_leaves_its_piece_on_disk() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let con = FakeConnector::new(vec![pagina("o1", Some(("Motivo para Ana", "", false))), pagina("o2", Some(("Motivo para Ana", "texto A", false)))]);
+    let bloqueado = || Answer::Choice("BLOCKED", 0.9, 0.05);
+    let (mut op, _server) = setup(vec![select("= 'texto A'"), bloqueado(), help(json!([])), bloqueado()]).await;
+    op.roteiros = Some(pasta.clone());
+    op.texto = "preencher o diálogo do Motivo para Ana com a descrição".into();
+    op.dados = json!({"descricao": "texto A"}).as_object().unwrap().clone();
+    let r = run(op, &con).await;
+    assert!(!r.ok, "{}", r.resumo());
+    assert_eq!(roteiros(&pasta.join("trechos")).len(), 1, "{:?}", r.roteiro);
+}
