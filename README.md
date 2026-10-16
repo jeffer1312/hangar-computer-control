@@ -94,7 +94,9 @@ Ou `claude mcp add` com os mesmos valores.
 
 Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGENT_CONFIG`.
 
-- `objetivo(texto, dados={}, max_passos=12, limite_segundos=240)`: a principal. `texto` é o pedido como
+- `objetivo(texto, dados={}, max_passos=300, limite_segundos=14400)`: a principal. Segue até concluir, até um
+  impedimento real ou até ficar sem progresso; os dois limites são só tetos contra travamento, passe-os apenas
+  para cortar antes. `texto` é o pedido como
   se fosse pra uma pessoa. `dados` leva valores que o laço pode digitar (usuário, senha, caminho, texto):
   qualquer valor em `dados` vira candidato de "digitar isso em cada campo editável", e o mesmo vale para
   URL escrita no próprio `texto`, e texto entre aspas quando o objetivo pede para digitar, preencher ou buscar
@@ -106,7 +108,9 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   com nome, o laço confere o valor do campo na tela seguinte: valor diferente vira falha da ação (não progresso),
   o próximo passo passa pela ajuda visual e o motivo final diz com que valor o campo ficou. Controles de mesmo papel e nome (um interruptor
   por linha de tabela) aparecem pro Jev com o rótulo da linha: `Button 'X' [linha: messages]`. No Linux o
-  documento da página rola pela roda do mouse (`scroll` up/down). Retorna um texto com
+  documento da página rola pela roda do mouse (`scroll` up/down); com um diálogo aberto por cima, a roda vai no
+  diálogo. Um caminho de arquivo em `dados` vira a opção de duplo clique no arquivo com esse nome em qualquer
+  lista (seletor de arquivos KDE/GTK/Windows). Controle sem nome não ganha clique por coordenada. Retorna um texto com
   `concluído: …` ou `parou: …`, a lista de passos executados com a confiança do Jev, os tempos por etapa,
   o caminho do último print (se o LLM foi chamado) e a pasta de registro (`observacao.json`, `jev.jsonl`).
   Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print
@@ -213,20 +217,30 @@ visão); quem chama decide quando avisar o usuário. A última notificação sem
 ## Quando ele para sozinho
 
 - Ação arriscada (apagar, sobrescrever, enviar, fechar sem salvar) que o texto do objetivo não autorizou.
+  Regra fixa, sem depender do Jev: o botão de confirmação de um diálogo (o que fica ao lado do Cancelar) e
+  controle de apagar/excluir/remover/desconectar nunca entram nas opções se o objetivo não citar o diálogo, o
+  botão ou o verbo; o Jev recebe a dica de cancelar o diálogo. Aviso só com Fechar/OK cobrindo a tela vira dica
+  de fechá-lo antes.
   Repita o objetivo dizendo explicitamente ("…substituindo se já existir"). Fechar a janela (o botão Fechar
   no canto da janela, Alt+F4, Ctrl+Q, Ctrl+Shift+W) só acontece se o objetivo pedir para fechar.
 - Navegador só é aberto quando o objetivo nomeia esse navegador ou diz "navegador"; um app cujo nome repete
   o de uma janela já aberta ("Chrome (CDP)" com o Chrome aberto) não é oferecido, salvo "nova"/"outra janela".
 - A tela pede algo que não foi dado (login, credencial de rede): devolve isso como impedimento.
 - O mesmo aviso do aplicativo volta duas vezes: devolve o texto do aviso.
-- Três ações seguidas sem efeito, ou `max_passos`/`limite_segundos`. Com a árvore vazia o efeito é
-  desconhecido (não conta como "sem efeito"): o próximo ciclo olha o print e decide.
+- Sem progresso: 6 ciclos seguidos sem tela nova nesta execução (`parou: sem progresso: …`). Três ações
+  seguidas sem efeito não param: o próximo passo passa pela ajuda visual pedindo outro caminho, e as mesmas
+  ações não voltam. Com a árvore vazia o efeito é desconhecido (não conta como "sem efeito").
+- `max_passos`/`limite_segundos`, só se quem chamou passar valores menores que os tetos.
 
 ## Limites conhecidos
 
 - Texto de console (Windows Terminal) ainda não é lido: comando roda, mas o resultado não é conferido.
 - Linux: o Chrome perde teclas digitadas em velocidade máxima (popup de preenchimento automático abrindo no meio
-  da palavra). `set_value` confere o campo e, se não bater, apaga e redigita uma vez com 30 ms entre teclas.
+  da palavra), e o `wtype` perde `, { } > ' ( )` com teclado de teclas mortas (br ABNT2). `set_value` cola pela
+  área de transferência (`wl-copy` + Ctrl+V) texto com mais de 40 caracteres ou com símbolos; texto curto é
+  digitado, redigitado a 30 ms e só então colado. Sempre confere o campo depois. Colar substitui o conteúdo da
+  área de transferência do usuário; senha nunca é colada. Antes de clicar, o agente confere que o cursor chegou
+  ao ponto (`hyprctl cursorpos`) e falha em vez de clicar em outro lugar.
 - Leitura da árvore em IDE Delphi leva 10 a 13 s por ciclo (VCL via MSAA); no resto, 1 s.
 - Um objetivo por vez por Windows alvo (trava na pasta temporária, por usuário e por alvo).
 - Linux, apps Chromium/Electron abertos sem leitor de tela (Slack, Discord): o agente pede os atributos do
