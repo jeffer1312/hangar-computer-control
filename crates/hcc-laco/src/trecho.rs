@@ -40,6 +40,9 @@ pub struct Trecho {
     #[serde(default)]
     pub parametros: BTreeMap<String, Parametro>,
     pub contexto: String,
+    /// Shape of the screen the piece starts on (see `forma`): it is offered only on a screen of a close shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forma: Vec<String>,
     /// Alternative ways of the same piece, latest first: the first whose first step fits the screen is replayed.
     pub variantes: Vec<VarianteTrecho>,
 }
@@ -85,6 +88,7 @@ pub fn juntar(anterior: Option<Trecho>, novo: Trecho) -> Trecho {
         for v in &mut novo.variantes { v.usos = v.usos.max(1); }
         return novo;
     };
+    if base.forma.is_empty() { base.forma = novo.forma; }
     for mut v in novo.variantes {
         let usos = base.variantes.iter().find(|a| mesmo(&a.passos, &v.passos)).map_or(0, |a| a.usos.max(1));
         base.variantes.retain(|a| !mesmo(&a.passos, &v.passos));
@@ -129,6 +133,8 @@ pub fn mesmo_titulo(gravado: &str, agora: &str) -> bool {
 /// A piece before its description is written: steps already templated, the slots it uses with their examples.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rascunho {
+    /// Index of its first step in the run.
+    pub inicio: usize,
     pub contexto: String,
     pub parametros: BTreeMap<String, Parametro>,
     pub passos: Vec<Passo>,
@@ -143,10 +149,13 @@ pub struct Rascunho {
 // taken as a slot there too, and replay's per-step check is the net.
 pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) -> Vec<Rascunho> {
     let escapar = |t: &str| t.replace('{', "{{").replace('}', "}}");
-    let nomes = |p: &Passo| -> Vec<String> { match &p.alvo {
-        Some(Alvo::Elemento { name, text, placeholder, .. }) => [Some(name), text.as_ref(), placeholder.as_ref()].into_iter().flatten().cloned().collect(),
-        _ => vec![],
-    } };
+    let nomes = |p: &Passo| -> Vec<String> {
+        let mut n: Vec<String> = p.dialogo.iter().cloned().collect();
+        if let Some(Alvo::Elemento { name, text, placeholder, .. }) = &p.alvo {
+            n.extend([Some(name), text.as_ref(), placeholder.as_ref()].into_iter().flatten().cloned());
+        }
+        n
+    };
     let literal = |p: &Passo| match &p.valor { Some(Valor::Literal(v)) => Some(v.clone()), _ => None };
     let mut variaveis: Vec<&String> = valores.iter().filter(|v| v.chars().count() >= 3)
         .filter(|v| passos.iter().any(|p| nomes(p).iter().any(|n| n.contains(v.as_str())) || literal(p).is_some_and(|l| l.contains(v.as_str()))))
@@ -155,7 +164,8 @@ pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) 
     let mut inicios = vec![0];
     for i in 0..passos.len().saturating_sub(1) {
         let (a, b) = (&passos[i], &passos[i + 1]);
-        if a.janela.classe != b.janela.classe || (a.mudou_tela == Some(true) && !mesmo_titulo(&a.janela.titulo, &b.janela.titulo)) {
+        if a.janela.classe != b.janela.classe || a.dialogo != b.dialogo
+            || (a.mudou_tela == Some(true) && !mesmo_titulo(&a.janela.titulo, &b.janela.titulo)) {
             inicios.push(i + 1);
         }
     }
@@ -173,8 +183,12 @@ pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) 
         let trecho: Vec<Passo> = passos[ini..fim].iter().map(|p| {
             let mut p = p.clone();
             p.janela.titulo = String::new();
+            let mut campos: Vec<&mut String> = p.dialogo.iter_mut().collect();
             if let Some(Alvo::Elemento { name, text, placeholder, .. }) = &mut p.alvo {
-                for campo in [Some(name), text.as_mut(), placeholder.as_mut()].into_iter().flatten() {
+                campos.extend([Some(name), text.as_mut(), placeholder.as_mut()].into_iter().flatten());
+            }
+            {
+                for campo in campos {
                     let mut t = escapar(campo);
                     for v in &variaveis {
                         let e = escapar(v);
@@ -192,9 +206,31 @@ pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) 
         let contexto = if trecho.first().is_some_and(|p| p.acao.kind == ActionType::Launch) {
             passos.get(ini + 1).map(|p| p.janela.classe.clone()).or_else(|| classe_final.map(str::to_owned)).unwrap_or_default()
         } else { trecho.first().map(|p| p.janela.classe.clone()).unwrap_or_default() };
-        Rascunho { contexto, parametros, passos: trecho }
+        Rascunho { inicio: ini, contexto, parametros, passos: trecho }
     // A piece with no context would fit everywhere: an app opener would open the app again and again.
     }).filter(|r| !r.contexto.is_empty()).collect()
+}
+
+/// Shape of a screen: role and lowercased words of each control in the open dialog (or the whole window), digit runs
+/// collapsed. A control whose name holds one of the goal's values is left out, so screens that differ only by those
+/// values (a person, an item, a permission) have the same shape.
+pub fn forma(obs: &Observation, valores: &[String]) -> Vec<String> {
+    let escopo = crate::estado::dialogo_aberto(obs).map(|(_, r)| r);
+    let valores: Vec<String> = valores.iter().filter(|v| v.chars().count() >= 3).map(|v| v.to_lowercase()).collect();
+    let palavras = |t: &str| t.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    let mut f: Vec<String> = obs.elements.iter()
+        .filter(|e| escopo.is_none_or(|r| crate::estado::dentro_de(r, e)))
+        .filter(|e| { let n = e.name.to_lowercase(); !valores.iter().any(|v| n.contains(v.as_str())) })
+        .map(|e| format!("{}|{}", e.role, contexto_normal(&palavras(&e.name)))).collect();
+    f.sort();
+    f.dedup();
+    f
+}
+
+fn parecida(a: &[String], b: &[String]) -> bool {
+    let comuns = a.iter().filter(|t| b.contains(t)).count();
+    let todos = a.len() + b.len() - comuns;
+    todos > 0 && comuns * 10 >= todos * 7
 }
 
 /// A piece that fits the screen now, with the goal values in its slots.
@@ -211,9 +247,11 @@ pub struct Opcao {
 // ponytail: every binding of the goal's values is tried (capped); fine for the few slots a piece has.
 pub fn opcoes(pecas: &[(PathBuf, Trecho)], obs: &Observation, dados: &Map<String, Value>, valores: &[String]) -> Vec<Opcao> {
     let frente = obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| contexto_normal(&w.class_name)).unwrap_or_default();
+    let agora = forma(obs, valores);
     let valores: Vec<&String> = valores.iter().take(12).collect();
     let mut saida: Vec<Opcao> = Vec::new();
     for (t, (_, peca)) in pecas.iter().enumerate() {
+        if !peca.forma.is_empty() && !parecida(&peca.forma, &agora) { continue; }
         let abre = peca.variantes.iter().any(|v| v.passos.first().is_some_and(|p| p.acao.kind == ActionType::Launch));
         let cabe = if abre { !obs.windows.iter().any(|w| contexto_normal(&w.class_name) == contexto_normal(&peca.contexto)) }
             else { contexto_normal(&peca.contexto) == frente };
@@ -221,7 +259,11 @@ pub fn opcoes(pecas: &[(PathBuf, Trecho)], obs: &Observation, dados: &Map<String
         let chaves: Vec<&String> = peca.parametros.keys().collect();
         let mut ligacoes: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
         for k in &chaves {
-            ligacoes = ligacoes.into_iter().flat_map(|l| valores.iter().map(move |v| {
+            // A slot whose recorded value this goal also names keeps it: only what differs between goals is bound anew.
+            let exemplo = peca.parametros.get(*k).map(|p| &p.exemplo);
+            let fixo: Vec<&String> = valores.iter().copied().filter(|v| Some(*v) == exemplo).collect();
+            let valores = if fixo.is_empty() { valores.clone() } else { fixo };
+            ligacoes = ligacoes.into_iter().flat_map(|l| valores.clone().into_iter().map(move |v| {
                 let mut l = l.clone(); l.insert((*k).clone(), (*v).clone()); l
             })).take(200).collect();
         }
@@ -234,6 +276,55 @@ pub fn opcoes(pecas: &[(PathBuf, Trecho)], obs: &Observation, dados: &Map<String
         }
     }
     saida
+}
+
+/// A step as it ran: `tela` identifies the screen right before it (a hash of the screen signature).
+#[derive(Clone, Debug)]
+pub struct Feito {
+    pub passo: Passo,
+    pub ok: bool,
+    pub tela: u64,
+}
+
+/// The steps worth learning, by index: ran ok and changed the screen, and were not undone later. Undone: a typing
+/// erased right after (select all, delete) or typed again into the same field; something opened and closed at once
+/// by a cancel, close or Escape that brought back the screen it was opened from.
+pub fn bons(feitos: &[Feito], tela_final: u64) -> Vec<usize> {
+    let tela_depois = |i: usize| feitos.get(i + 1).map_or(tela_final, |f| f.tela);
+    let mut ficam: Vec<usize> = (0..feitos.len()).filter(|&i| feitos[i].ok && feitos[i].passo.mudou_tela == Some(true)).collect();
+    let digita = |p: &Passo| matches!(p.acao.kind, ActionType::SetValue | ActionType::Text) && matches!(p.alvo, Some(Alvo::Elemento { .. }));
+    let teclas = |p: &Passo| p.acao.keys.as_deref().unwrap_or_default().iter().map(|k| k.to_lowercase()).collect::<Vec<_>>();
+    let apaga = |p: &Passo| p.acao.kind == ActionType::Keys && teclas(p).iter().any(|k| k == "delete" || k == "backspace");
+    let cancela = |p: &Passo| match (&p.alvo, p.acao.kind) {
+        (_, ActionType::Keys) => teclas(p) == ["escape"],
+        (Some(Alvo::Elemento { role, name, .. }), ActionType::Invoke | ActionType::Mouse) => role == "Button" && {
+            let n: String = name.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+            ["cancelar", "cancel", "fechar", "close", "não", "nao", "no"].contains(&n.trim())
+        },
+        _ => false,
+    };
+    let mut fora = vec![false; ficam.len()];
+    for a in 0..ficam.len() {
+        let p = &feitos[ficam[a]].passo;
+        if fora[a] { continue; }
+        if digita(p) {
+            // Retyped in the same field: only the last typing counts.
+            if ficam[a + 1..].iter().take(3).any(|&j| digita(&feitos[j].passo) && feitos[j].passo.alvo == p.alvo) { fora[a] = true; continue; }
+            // Erased by keys right after: the typing and the keys up to the delete go.
+            let seguintes: Vec<usize> = (a + 1..ficam.len()).take(3).take_while(|&b| feitos[ficam[b]].passo.acao.kind == ActionType::Keys).collect();
+            if let Some(&fim) = seguintes.iter().find(|&&b| apaga(&feitos[ficam[b]].passo)) {
+                fora[a..=fim].fill(true);
+            }
+            continue;
+        }
+        if let Some(b) = (a + 1 < ficam.len()).then_some(a + 1)
+            && cancela(&feitos[ficam[b]].passo) && !cancela(p) && tela_depois(ficam[b]) == feitos[ficam[a]].tela {
+            fora[a] = true; fora[b] = true;
+        }
+    }
+    let mut n = 0;
+    ficam.retain(|_| { n += 1; !fora[n - 1] });
+    ficam
 }
 
 /// The piece's description: its steps, slots kept. Deterministic, so the same way always lands in the same file.
@@ -271,12 +362,12 @@ mod tests {
         Passo { janela: Janela { classe: "app".into(), titulo: "App".into() },
             alvo: Some(Alvo::Elemento { role: "Button".into(), name: nome.into(), text: None, placeholder: None, test_id: None,
                 ordem: Ordem { indice: 0, de: 1 } }),
-            acao: Action { kind: ActionType::Invoke, ..Default::default() }, valor: None, mudou_tela: Some(true) }
+            acao: Action { kind: ActionType::Invoke, ..Default::default() }, valor: None, mudou_tela: Some(true), dialogo: None }
     }
 
     fn trecho(passos: Vec<Passo>) -> Trecho {
         Trecho { versao: VERSAO_TRECHO, tipo: "trecho".into(), descricao: "abrir {p1}".into(),
-            parametros: BTreeMap::from([("p1".into(), Parametro { exemplo: "Ana".into() })]), contexto: "app".into(),
+            parametros: BTreeMap::from([("p1".into(), Parametro { exemplo: "Ana".into() })]), contexto: "app".into(), forma: vec![],
             variantes: vec![VarianteTrecho { passos, usos: 0 }] }
     }
 
@@ -284,7 +375,7 @@ mod tests {
         Passo { janela: Janela { classe: classe.into(), titulo: titulo.into() },
             alvo: alvo.map(|n| Alvo::Elemento { role: "ListItem".into(), name: n.into(), text: None, placeholder: None, test_id: None,
                 ordem: Ordem { indice: 0, de: 1 } }),
-            acao, valor, mudou_tela: Some(mudou) }
+            acao, valor, mudou_tela: Some(mudou), dialogo: None }
     }
 
     // Generic: open an app, open an item by a name from the goal, search a term from the goal.

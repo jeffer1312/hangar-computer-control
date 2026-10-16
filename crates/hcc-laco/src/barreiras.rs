@@ -3,11 +3,12 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use hcc_protocolo::{Action, ActionType, Observation, Rect};
+use hcc_protocolo::{Action, ActionType, Observation};
 use regex::Regex;
 
 use crate::candidatos::{centro, clique};
 use crate::descrever::{casefold, descrever, intencao};
+use crate::estado::{dentro_de, dialogos};
 use crate::tipos::{Candidato, Registro};
 
 static PEDE_FECHAR: LazyLock<Regex> = LazyLock::new(|| {
@@ -17,7 +18,6 @@ static PEDE_FECHAR: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-const DIALOGOS: [&str; 4] = ["Window", "Dialog", "Alert", "AlertDialog"];
 const CAMPOS: [&str; 6] = ["Edit", "CheckBox", "ComboBox", "RadioButton", "List", "Document"];
 static CANCELAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(cancelar|cancel|não|nao|no|voltar|back)$").unwrap());
 static FECHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(fechar|close|x|×|dispensar|dismiss)$").unwrap());
@@ -256,14 +256,9 @@ impl Barreiras {
     pub fn sem_confirmar(cands: Vec<Candidato>, obs: &Observation, objetivo: &str) -> (Vec<Candidato>, Option<String>) {
         let pedido = palavras(objetivo);
         let pede = |nome: &str| { let n = palavras(nome); !n.is_empty() && pedido.contains(&n) };
-        let dentro_de = |r: Rect, e: &hcc_protocolo::Element| e.rect.is_some_and(|q| { let (x, y) = centro(q); r.0 <= x && x < r.2 && r.1 <= y && y < r.3 });
         let mut proibidos: Vec<&hcc_protocolo::Element> = Vec::new();
         let mut dica = None;
-        let area = |r: Rect| i64::from(r.2 - r.0) * i64::from(r.3 - r.1);
-        let janela = obs.windows.iter().find(|w| w.id == obs.foreground).map_or(i64::MAX, |w| area(w.rect));
-        for d in obs.elements.iter().filter(|e| DIALOGOS.contains(&e.role.as_str())) {
-            // A "window" as big as the app is the app itself, not a dialog over it.
-            let Some(r) = d.rect.filter(|r| area(*r) * 10 < janela * 8) else { continue };
+        for (d, r) in dialogos(obs) {
             let botoes: Vec<&hcc_protocolo::Element> = obs.elements.iter().filter(|e| e.role == "Button" && dentro_de(r, e)).collect();
             let Some(cancelar) = botoes.iter().find(|b| CANCELAR.is_match(&palavras(&b.name))) else {
                 // Only dismiss buttons and nothing to fill: a notice covering the screen, closed before going on.

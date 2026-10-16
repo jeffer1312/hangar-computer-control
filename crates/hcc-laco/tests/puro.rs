@@ -887,3 +887,125 @@ fn a_file_named_in_the_data_gets_a_double_click_in_any_file_list() {
         .filter(|a| a.mode == Some(MouseMode::Double)).collect();
     assert_eq!(duplos, vec![Action { target: Some("e1".into()), ..mouse(200, 210, MouseMode::Double) }]);
 }
+
+// A click by coordinate is learned as a click on the named control under it, and replayed at its new place.
+#[test]
+fn a_click_is_learned_on_the_control_under_it_and_replayed_where_it_is_now() {
+    let i = [ElementAction::Invoke];
+    let antes = obs(vec![
+        el("e1", "Painel", "Group", &[], None, Some(Rect(0, 0, 800, 600))),
+        el("e2", "Começar", "Button", &i, None, Some(Rect(100, 100, 200, 140))),
+    ]);
+    let p = hcc_laco::roteiro::passo(&mouse(150, 120, MouseMode::Click), &antes, &Map::new());
+    let depois = obs(vec![el("e9", "Começar", "Button", &i, None, Some(Rect(300, 400, 400, 440)))]);
+    assert_eq!(hcc_laco::roteiro::resolver(&p, &depois, &Map::new()),
+        Some(Action { target: Some("e9".into()), ..mouse(350, 420, MouseMode::Click) }));
+    let vazio = hcc_laco::roteiro::passo(&mouse(700, 500, MouseMode::Click), &obs(vec![]), &Map::new());
+    assert_eq!(hcc_laco::roteiro::resolver(&vazio, &depois, &Map::new()), None);
+}
+
+fn com_dialogo(nome: &str) -> Observation {
+    let i = [ElementAction::Invoke];
+    obs(vec![
+        el("p1", "Salvar", "Button", &i, None, Some(Rect(10, 10, 60, 30))),
+        el("d1", nome, "Dialog", &[], None, Some(Rect(100, 100, 500, 400))),
+        el("c1", "Descrição", "Edit", &[ElementAction::SetValue], Some(""), Some(Rect(120, 150, 480, 200))),
+        el("b1", "Salvar", "Button", &i, None, Some(Rect(400, 350, 480, 380))),
+    ])
+}
+
+// Opening or closing a dialog ends a sub-task: a run is cut there, and the dialog's name takes the goal's values as slots.
+#[test]
+fn a_run_is_cut_where_a_dialog_opens_or_closes() {
+    use hcc_laco::roteiro::passo;
+    let invoke = |id: &str| Action { kind: ActionType::Invoke, target: Some(id.into()), ..Default::default() };
+    let sem = obs(vec![el("a1", "Abrir permissão", "Button", &[ElementAction::Invoke], None, Some(Rect(10, 10, 60, 30)))]);
+    let dentro = com_dialogo("Motivo para Ana");
+    let mut passos = vec![passo(&invoke("a1"), &sem, &Map::new()),
+        passo(&Action { value: Some("x".into()), ..invoke("c1") }, &dentro, &Map::new()), passo(&invoke("b1"), &dentro, &Map::new())];
+    for p in &mut passos { p.mudou_tela = Some(true); }
+    assert_eq!(passos[1].dialogo.as_deref(), Some("Motivo para Ana"));
+    assert_eq!(passos[0].dialogo, None);
+    let pecas = hcc_laco::trecho::cortar(&passos, &["Ana".to_owned()], None);
+    assert_eq!(pecas.iter().map(|p| p.passos.len()).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(pecas[1].passos[0].dialogo.as_deref(), Some("Motivo para {p1}"));
+}
+
+// The page behind has another "Salvar" now: the one inside the open dialog is the recorded one.
+#[test]
+fn a_twin_inside_the_open_dialog_is_the_recorded_one() {
+    use hcc_laco::roteiro::{passo, resolver};
+    let invoke = Action { kind: ActionType::Invoke, target: Some("b1".into()), ..Default::default() };
+    let mut gravado = com_dialogo("Motivo");
+    gravado.elements.remove(0);
+    let p = passo(&invoke, &gravado, &Map::new());
+    assert_eq!(resolver(&p, &com_dialogo("Motivo"), &Map::new()), Some(invoke));
+}
+
+// A piece is offered on a screen of the same shape (the open dialog's controls), whatever the names the goal changes.
+#[test]
+fn a_piece_is_offered_only_on_a_screen_of_the_same_shape() {
+    use hcc_laco::roteiro::passo;
+    use hcc_laco::trecho::{Trecho, VarianteTrecho, VERSAO_TRECHO, forma, opcoes};
+    let gravada = com_dialogo("Motivo para Ana");
+    let f = forma(&gravada, &["Ana".to_owned()]);
+    assert!(f.contains(&"Edit|descrição".to_owned()) && f.contains(&"Button|salvar".to_owned()), "{f:?}");
+    assert!(!f.iter().any(|t| t.contains("ana")), "a goal value is not part of the shape: {f:?}");
+    let mut p = passo(&Action { kind: ActionType::Invoke, target: Some("b1".into()), ..Default::default() }, &gravada, &Map::new());
+    p.mudou_tela = Some(true);
+    let peca = Trecho { versao: VERSAO_TRECHO, tipo: "trecho".into(), descricao: "invoke Button 'Salvar'".into(), parametros: Default::default(),
+        contexto: "TMainForm".into(), forma: f, variantes: vec![VarianteTrecho { passos: vec![p], usos: 1 }] };
+    let pecas = vec![(std::path::PathBuf::from("x"), peca)];
+    assert_eq!(opcoes(&pecas, &com_dialogo("Motivo para Bia"), &Map::new(), &["Bia".to_owned()]).len(), 1);
+    let mut outra = com_dialogo("Excluir conta");
+    outra.elements.retain(|e| e.id != "c1");
+    for (n, nome) in ["Senha", "Confirmar senha", "Motivo"].iter().enumerate() {
+        outra.elements.push(el(&format!("x{n}"), nome, "Edit", &[ElementAction::SetValue], Some(""), Some(Rect(120, 210 + 30 * n as i32, 480, 230 + 30 * n as i32))));
+    }
+    assert!(opcoes(&pecas, &outra, &Map::new(), &[]).is_empty());
+}
+
+mod passos_bons {
+    use super::*;
+    use hcc_laco::roteiro::passo;
+    use hcc_laco::trecho::{Feito, bons};
+
+    fn feito(acao: Action, tela: u64, ok: bool, mudou: bool) -> Feito {
+        let i = [ElementAction::Invoke, ElementAction::SetValue];
+        let o = obs(vec![
+            el("e1", "Entrada da pesquisa", "Edit", &i, Some(""), Some(Rect(0, 0, 100, 20))),
+            el("e2", "Começar", "Button", &i, None, Some(Rect(0, 40, 100, 60))),
+            el("e3", "Cancelar", "Button", &i, None, Some(Rect(0, 70, 100, 90))),
+            el("e4", "Mais opções", "Button", &i, None, Some(Rect(0, 100, 100, 120))),
+        ]);
+        let mut p = passo(&acao, &o, &Map::new());
+        p.mudou_tela = Some(mudou);
+        Feito { passo: p, ok, tela }
+    }
+    fn alvo(kind: ActionType, id: &str) -> Action { Action { kind, target: Some(id.into()), ..Default::default() } }
+    fn teclas(k: &[&str]) -> Action { Action { kind: ActionType::Keys, keys: Some(k.iter().map(|s| s.to_string()).collect()), ..Default::default() } }
+
+    // A text typed into the wrong box and erased, a menu opened and cancelled, a step without effect: none is learned.
+    #[test]
+    fn undone_or_ineffective_steps_are_not_learned() {
+        let digitar = Action { value: Some("descrição longa".into()), ..alvo(ActionType::SetValue, "e1") };
+        let feitos = vec![
+            feito(digitar, 1, true, true),
+            feito(teclas(&["ctrl", "a"]), 2, true, true),
+            feito(teclas(&["Delete"]), 3, true, true),
+            feito(alvo(ActionType::Invoke, "e4"), 4, true, true),
+            feito(alvo(ActionType::Invoke, "e3"), 5, true, true),
+            feito(alvo(ActionType::Invoke, "e2"), 4, true, false),
+            feito(alvo(ActionType::Invoke, "e2"), 4, true, true),
+        ];
+        assert_eq!(bons(&feitos, 9), vec![6]);
+    }
+
+    #[test]
+    fn a_field_typed_again_keeps_only_the_last_typing() {
+        let digitar = |v: &str| Action { value: Some(v.into()), ..alvo(ActionType::SetValue, "e1") };
+        let feitos = vec![feito(digitar("Ana"), 1, true, true), feito(digitar("Ana Maria"), 2, true, true),
+            feito(alvo(ActionType::Invoke, "e2"), 3, false, true)];
+        assert_eq!(bons(&feitos, 9), vec![1]);
+    }
+}

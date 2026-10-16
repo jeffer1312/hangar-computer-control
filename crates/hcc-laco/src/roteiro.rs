@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use hcc_protocolo::{Action, ActionType, Observation};
+use hcc_protocolo::{Action, ActionType, MouseMode, Observation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -64,6 +64,9 @@ pub struct Passo {
     pub acao: Action,
     pub valor: Option<Valor>,
     pub mudou_tela: Option<bool>,
+    /// Name of the dialog open over the window when the step ran: a dialog opening or closing ends a sub-task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogo: Option<String>,
 }
 
 /// One way the goal was done; installations differ (app version in a title, another build), so a file keeps several.
@@ -139,7 +142,15 @@ fn janela(obs: &Observation) -> Janela {
 }
 
 pub fn passo(acao: &Action, obs: &Observation, dados: &Map<String, Value>) -> Passo {
-    let alvo = acao.target.as_deref().and_then(|id| {
+    // A click by coordinate is anchored to the smallest named control under it: replay clicks that control wherever it is.
+    let sob_o_clique = match (acao.kind, acao.target.as_deref(), acao.x, acao.y) {
+        (ActionType::Mouse, None, Some(x), Some(y)) => obs.elements.iter()
+            .filter(|e| !e.name.trim().is_empty())
+            .filter_map(|e| e.rect.filter(|r| r.0 <= x && x < r.2 && r.1 <= y && y < r.3).map(|r| (e, i64::from(r.2 - r.0) * i64::from(r.3 - r.1))))
+            .min_by_key(|(_, area)| *area).map(|(e, _)| e.id.as_str()),
+        _ => None,
+    };
+    let alvo = acao.target.as_deref().or(sob_o_clique).and_then(|id| {
         if let Some(i) = obs.elements.iter().position(|e| e.id == id) {
             let e = &obs.elements[i];
             let gemeo = |o: &&hcc_protocolo::Element| o.role == e.role && o.name == e.name;
@@ -154,7 +165,8 @@ pub fn passo(acao: &Action, obs: &Observation, dados: &Map<String, Value>) -> Pa
     let valor = acao.value.as_ref().map(|v| {
         dados.iter().find(|(_, d)| py_str(d) == *v).map_or_else(|| Valor::Literal(v.clone()), |(k, _)| Valor::Dados(k.clone()))
     });
-    Passo { janela: janela(obs), alvo, acao: Action { target: None, value: None, ..acao.clone() }, valor, mudou_tela: None }
+    Passo { janela: janela(obs), alvo, acao: Action { target: None, value: None, ..acao.clone() }, valor, mudou_tela: None,
+        dialogo: crate::estado::dialogo_aberto(obs).map(|(d, _)| d.name.clone()) }
 }
 
 pub fn resolver(passo: &Passo, obs: &Observation, dados: &Map<String, Value>) -> Option<Action> {
@@ -169,8 +181,11 @@ pub fn resolver_com(passo: &Passo, obs: &Observation, dados: &Map<String, Value>
 /// The action for this screen, or `None` when the screen diverged from the recording.
 fn resolver_em(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, params: Option<&BTreeMap<String, String>>) -> Option<Action> {
     let agora = janela(obs);
-    // A click by coordinate cannot tell whether the same thing is still under it: Jev decides it again.
-    if passo.acao.kind == ActionType::Mouse { return None; }
+    // A click with no control under it cannot tell whether the same thing is still there: Jev decides it again.
+    let clica = passo.acao.kind == ActionType::Mouse;
+    if clica && (!matches!(passo.acao.mode, Some(MouseMode::Click | MouseMode::Double)) || !matches!(passo.alvo, Some(Alvo::Elemento { .. }))) {
+        return None;
+    }
     // Names and titles are templates: `{pN}` is filled, counters in titles are free.
     // A goal script (format 2) holds plain names: a brace there is text, not a slot.
     let modelo = |t: &str| match params { Some(p) => preencher(t, p), None => Some(t.to_owned()) };
@@ -188,8 +203,13 @@ fn resolver_em(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, par
         Some(Alvo::Elemento { role, name, ordem, .. }) => {
             let name = modelo(name)?;
             let gemeos: Vec<_> = obs.elements.iter().filter(|e| &e.role == role && e.name == name).collect();
-            if gemeos.len() != ordem.de { return None; }
-            Some(gemeos.get(ordem.indice)?.id.clone())
+            if gemeos.len() == ordem.de { Some(gemeos.get(ordem.indice)?.id.clone()) } else {
+                // The screen behind changed its count of twins: recorded inside a dialog, the twin inside the open one.
+                let (_, r) = crate::estado::dialogo_aberto(obs).filter(|_| passo.dialogo.is_some())?;
+                let dentro: Vec<_> = gemeos.iter().filter(|e| crate::estado::dentro_de(r, e)).collect();
+                if dentro.len() != 1 { return None; }
+                Some(dentro[0].id.clone())
+            }
         }
         Some(Alvo::Janela(j)) => {
             let titulo = modelo(&j.titulo)?;
@@ -203,6 +223,11 @@ fn resolver_em(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, par
         Some(Valor::Literal(v)) => Some(v.clone()),
         Some(Valor::Parametro(k)) => Some(params?.get(k)?.clone()),
     };
+    if clica {
+        let r = obs.elements.iter().find(|e| Some(&e.id) == target.as_ref())?.rect?;
+        let (x, y) = crate::candidatos::centro(r);
+        return Some(Action { target, value, x: Some(x), y: Some(y), ..passo.acao.clone() });
+    }
     Some(Action { target, value, ..passo.acao.clone() })
 }
 
@@ -326,7 +351,7 @@ mod tests {
             alvo: Some(Alvo::Elemento { role: "ListItem".into(), name: "{p1}, Mensagem direta".into(), text: None, placeholder: None,
                 test_id: None, ordem: Ordem { indice: 0, de: 1 } }),
             acao: Action { kind: ActionType::Text, ..Default::default() },
-            valor: Some(Valor::Parametro("p1".into())), mudou_tela: None,
+            valor: Some(Valor::Parametro("p1".into())), mudou_tela: None, dialogo: None,
         };
         let params = BTreeMap::from([("p1".to_owned(), "Rafael".to_owned())]);
         let acao = resolver_com(&gravado, &agora, &Map::new(), &params).unwrap();
@@ -355,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_click_is_never_replayed() {
+    fn mouse_click_on_no_named_control_is_never_replayed() {
         let clique = Action { kind: ActionType::Mouse, x: Some(1), y: Some(1), button: Some(hcc_protocolo::Button::Left),
             mode: Some(hcc_protocolo::MouseMode::Click), ..Default::default() };
         assert_eq!(resolver(&passo(&clique, &tela("TMS"), &Map::new()), &tela("TMS"), &Map::new()), None);
