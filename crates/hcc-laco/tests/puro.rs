@@ -875,3 +875,15 @@ fn a_notice_over_the_screen_is_dismissed_first() {
     let (_, dica) = Barreiras::sem_confirmar(vec![], &obs(vec![aviso, fechar, campo]), "salvar o formulário");
     assert_eq!(dica, None);
 }
+
+#[test]
+fn a_file_named_in_the_data_gets_a_double_click_in_any_file_list() {
+    let o = obs(vec![
+        el("e1", "video.mp4", "DataItem", &[ElementAction::Select], None, Some(Rect(100, 200, 300, 220))),
+        el("e2", "outro.mp4", "ListItem", &[ElementAction::Select], None, Some(Rect(100, 230, 300, 250))),
+    ]);
+    let dados = json!({"video": "/home/ana/Vídeos/video.mp4"}).as_object().unwrap().clone();
+    let duplos: Vec<Action> = candidatos(&o, &dados, &HashSet::new()).into_iter().map(|c| c.acao)
+        .filter(|a| a.mode == Some(MouseMode::Double)).collect();
+    assert_eq!(duplos, vec![Action { target: Some("e1".into()), ..mouse(200, 210, MouseMode::Double) }]);
+}

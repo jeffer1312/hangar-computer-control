@@ -28,6 +28,7 @@ pub fn negados(goal: &str) -> Vec<std::ops::Range<usize>> {
 static CHAVE_SECRETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)senha|password|passwd|pin|token").unwrap());
 
 /// Roles whose real click is offered when UIA has no pattern for them (laco_uia.py:159).
+const ARQUIVOS: [&str; 4] = ["DataItem", "ListItem", "TreeItem", "Cell"];
 const CLICAVEIS: [&str; 7] = ["ListItem", "TreeItem", "Hyperlink", "Button", "MenuItem", "TabItem", "Image"];
 
 pub fn chave_secreta(chave: &str) -> bool {
@@ -116,7 +117,13 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
     }));
     let valores: Vec<String> =
         dados.values().filter(|v| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_))).map(py_str).collect();
+    // A path from the data names a file: in any file chooser the sure way to pick it is a double click on it.
+    let arquivos: Vec<&str> = valores.iter().filter(|v| v.contains(['/', '\\'])).filter_map(|v| v.rsplit(['/', '\\']).next()).filter(|n| !n.is_empty()).collect();
     for e in obs.elements.iter().filter(|e| e.enabled) {
+        if let Some(r) = e.rect.filter(|_| ARQUIVOS.contains(&e.role.as_str()) && arquivos.contains(&e.name.trim())) {
+            let (x, y) = centro(r);
+            acoes.push(Action { mode: Some(MouseMode::Double), ..clique(Some(e.id.clone()), x, y) });
+        }
         let sem_padrao = e.actions.iter().all(|a| *a == ElementAction::Focus);
         // Menu VCL ignores UIA Invoke/Expand, and a link inside a list item has no pattern: real click.
         // A control with no name gets none: nobody can tell what a blind click there does.
