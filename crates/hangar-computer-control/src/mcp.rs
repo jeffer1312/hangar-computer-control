@@ -24,7 +24,7 @@ use crate::alvos;
 use crate::motor::{Motor, PedidoObjetivo};
 use crate::progresso;
 
-const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    limite_segundos é o orçamento total; max_passos limita os ciclos internos.\n\n    Objetivo concluído vira roteiro: a mesma frase, com as mesmas chaves em `dados`,\n    no mesmo alvo repete os passos sem consultar o Jev a cada um e volta ao Jev se a\n    tela divergir. refazer=true ignora o roteiro gravado.";
+const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    Segue até concluir, até um impedimento real ou até ficar sem progresso (ciclos\n    sem tela nova). limite_segundos e max_passos são tetos opcionais: só passe se\n    quiser cortar antes.\n\n    Objetivo concluído vira roteiro: a mesma frase, com as mesmas chaves em `dados`,\n    no mesmo alvo repete os passos sem consultar o Jev a cada um e volta ao Jev se a\n    tela divergir. refazer=true ignora o roteiro gravado.";
 const DESC_VER_TELA: &str = "Captura a tela do desktop e devolve o caminho do arquivo PNG.\n\n    Para quando o `objetivo` parou e você precisa olhar o que há na tela.\n    Cite o caminho devolvido na sua resposta para que o usuário veja a imagem.";
 const DESC_ESTADO: &str = "Diz se o desktop está acessível e em qual resolução.";
 
@@ -67,10 +67,10 @@ fn ferramentas() -> Vec<Tool> {
             json!({
                 "properties": {
                     "texto": {"title": "Texto", "type": "string"},
-                    "max_passos": {"default": 12, "title": "Max Passos", "type": "integer"},
+                    "max_passos": {"default": 300, "title": "Max Passos", "type": "integer"},
                     "dados": {"anyOf": [{"additionalProperties": true, "type": "object"},
                         {"type": "null"}], "default": null, "title": "Dados"},
-                    "limite_segundos": {"default": 240, "title": "Limite Segundos", "type": "number"},
+                    "limite_segundos": {"default": 14400, "title": "Limite Segundos", "type": "number"},
                     "refazer": {"default": false, "title": "Refazer", "type": "boolean"},
                     "alvo": alvo_schema()
                 },
@@ -82,12 +82,13 @@ fn ferramentas() -> Vec<Tool> {
     ]
 }
 
+// No budget by default: these are only ceilings against a hang; the loop stops on lack of progress.
 fn max_passos_padrao() -> i64 {
-    12
+    300
 }
 
 fn limite_padrao() -> f64 {
-    240.0
+    14400.0
 }
 
 #[derive(Deserialize)]

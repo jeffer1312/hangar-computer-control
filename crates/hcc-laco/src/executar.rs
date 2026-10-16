@@ -27,6 +27,7 @@ use crate::roteiro;
 use crate::tipos::{Ajuda, Candidato, Decisao, Escolha, Progresso, Registro};
 
 const CANCELADO: &str = "RuntimeError: objetivo cancelado; nenhuma nova ação será enviada";
+const SEM_PROGRESSO: u32 = 6;
 const LIMITE: &str = "TimeoutError: limite de duração atingido; objetivo não confirmado";
 
 pub struct Opcoes {
@@ -168,8 +169,8 @@ impl Segredos {
 }
 
 fn validar(op: &Opcoes) -> Result<&Jev, String> {
-    if op.texto.trim().is_empty() || !(1..=50).contains(&op.max_passos) {
-        return Err("ValueError: objetivo vazio ou max_passos fora de 1..50".into());
+    if op.texto.trim().is_empty() || !(1..=300).contains(&op.max_passos) {
+        return Err("ValueError: objetivo vazio ou max_passos fora de 1..300".into());
     }
     op.jev.as_ref().filter(|j| !j.key.is_empty()).filter(|_| op.config.is_some())
         .ok_or_else(|| "ValueError: faltam TYPESAFE_API_KEY ou HCC_AGENT_CONFIG".into())
@@ -483,6 +484,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     let mut recusou_sem_acao = false;
     // The last typing into a named field (registry index, role, name, value): checked on the next screen.
     let mut digitado: Option<(usize, String, String, String)> = None;
+    // No step budget: the run stops when it keeps coming back to screens it has already seen.
+    let mut vistas: HashSet<AssinaturaTela> = HashSet::new();
+    let mut sem_tela_nova = 0u32;
     controle.rodar(registrar(&pasta, json!({"objetivo": op.texto, "dados": op.dados.keys().collect::<Vec<_>>()}), secretos)).await?;
     let arquivo = op.roteiros.as_deref().map(|p| roteiro::arquivo(p, &op.texto, &op.dados));
     let mut lido = arquivo.as_deref().filter(|_| !op.refazer).map(roteiro::carregar).transpose().map(Option::flatten);
@@ -661,6 +665,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let obs = controle.medir("observacao", Progresso::Observacao,
             async { observar(s).await.map_err(erro_sessao) }).await?;
         let atual = assinatura_tela(&obs);
+        sem_tela_nova = if vistas.insert(atual.clone()) { 0 } else { sem_tela_nova + 1 };
         iniciais.get_or_insert_with(|| obs.windows.iter().map(|w| w.id.clone()).collect());
         let conferir = &*conferir.get_or_insert_with(|| sem_localizadores(&op.texto, &obs));
         if let Some(ultima) = recentes.last_mut().filter(|r| r.screen_changed.is_none()) {
@@ -703,9 +708,16 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let cands = sem_reabrir(apps_do_objetivo(sem_app_aberto(candidatos(&obs, &valores, &secretos.valores), &obs, &op.texto), &op.texto), &fechados).into_iter().map(|mut c| {
             c.descricao = secretos.descricao(&c.acao, &obs, true); c
         }).collect();
-        if let Some(motivo) = Barreiras::tres_sem_efeito(recentes) {
-            r.motivo = motivo; return Ok(());
+        if sem_tela_nova >= SEM_PROGRESSO {
+            let ultimas: Vec<&str> = recentes.iter().rev().take(3).map(|x| x.action.as_str()).collect();
+            r.motivo = format!("sem progresso: {sem_tela_nova} ciclos seguidos sem tela nova; últimas ações: {}", ultimas.join("; "));
+            return Ok(());
         }
+        // Nothing changed three times: not a stop, the vision model is asked for another route.
+        let divergencia = match (divergencia, Barreiras::tres_sem_efeito(recentes).map(|m| format!("{m}; take another route, never these actions again"))) {
+            (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+            (a, b) => a.or(b),
+        };
         let mut acoes: Vec<Candidato> = segurar_segredos(Barreiras::barrar(cands, recentes), &op.texto, recentes, &secretos.valores)
             .into_iter().filter(|c| !texto_sem_alvo_barrado(&c.acao, foco_escolhido)).collect();
         if let Some(mut clique) = Barreiras::reclique(recentes, &obs) {

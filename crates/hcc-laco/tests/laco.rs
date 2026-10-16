@@ -869,14 +869,34 @@ async fn reasoning_effort_is_optional() {
 }
 
 #[tokio::test]
-async fn three_without_effect_stops() {
+async fn three_without_effect_asks_for_another_route_instead_of_stopping() {
     let con = FakeConnector::new(vec![tree("o1", "")]);
     // The field stayed empty after the typing: that cycle goes through the vision model before picking.
-    let (op, _server) = setup(vec![select("set_value"), select("invoke"), help(json!([])), select("invoke"), select("keys Enter")]).await;
+    let (mut op, server) = setup(vec![select("set_value"), select("invoke"), help(json!([])), select("invoke"), select("keys Enter"),
+        select("keys Escape"), help(json!([])), Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    op.max_passos = 6;
     let r = run(op, &con).await;
-    assert!(r.motivo.starts_with("três ações seguidas sem efeito na tela:"), "{}", r.resumo());
-    assert!(r.motivo.ends_with("o campo Edit 'Nome' ficou com '', não com o valor pedido"), "{}", r.motivo);
+    assert!(!r.motivo.starts_with("três ações seguidas sem efeito"), "{}", r.resumo());
     assert_eq!(con.state.lock().unwrap().acts.len(), 3);
+    assert_eq!(con.state.lock().unwrap().captures, 2, "{}", r.resumo());
+    let pedidos = bodies(&server).await;
+    assert!(pedidos.iter().any(|b| b.to_string().contains("três ações seguidas sem efeito")), "a dica precisa dizer que nada mudou");
+}
+
+#[tokio::test]
+async fn coming_back_to_seen_screens_stops_for_lack_of_progress() {
+    let views: Vec<Observation> = (0..12).map(|i| tree(&format!("o{i}"), if i % 2 == 0 { "" } else { "x" })).collect();
+    let con = FakeConnector::new(views);
+    let mut answers = Vec::new();
+    for x in [100, 200, 300, 400, 500, 600, 700, 750, 50, 150] {
+        let clique: &'static str = Box::leak(format!("click ({x},300)").into_boxed_str());
+        answers.extend([Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([{"type":"mouse","x":x,"y":300,"button":"left","mode":"click"}])), select(clique)]);
+    }
+    let (mut op, _server) = setup(answers).await;
+    op.max_passos = 20;
+    let r = run(op, &con).await;
+    assert!(r.motivo.starts_with("sem progresso: 6 ciclos seguidos sem tela nova"), "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 7);
 }
 
 #[tokio::test]
@@ -1136,12 +1156,12 @@ async fn broken_config_is_parou_value_error() {
 
 #[tokio::test]
 async fn validation_precedes_connection_and_keeps_summary() {
-    for (text, count) in [("   ", 12), ("preencher", 0), ("preencher", 51)] {
+    for (text, count) in [("   ", 12), ("preencher", 0), ("preencher", 301)] {
         let con = FakeConnector::new(vec![tree("o1", "")]);
         let (mut op, _server) = setup(vec![]).await;
         op.texto = text.into(); op.max_passos = count;
         let r = run(op, &con).await;
-        assert_eq!(r.motivo, "ValueError: objetivo vazio ou max_passos fora de 1..50");
+        assert_eq!(r.motivo, "ValueError: objetivo vazio ou max_passos fora de 1..300");
         assert_eq!(con.state.lock().unwrap().connects, 0);
         assert!(r.registro.is_none());
         assert_eq!(r.tempos.len(), 1);
@@ -1350,7 +1370,7 @@ async fn invalid_goal_precedes_oversized_secret_mask() {
     op.texto.clear();
     op.dados = json!({"password":"x".repeat(1_000_000)}).as_object().unwrap().clone();
     let r = run(op, &con).await;
-    assert_eq!(r.motivo, "ValueError: objetivo vazio ou max_passos fora de 1..50");
+    assert_eq!(r.motivo, "ValueError: objetivo vazio ou max_passos fora de 1..300");
     assert_eq!(con.state.lock().unwrap().connects, 0);
 }
 
