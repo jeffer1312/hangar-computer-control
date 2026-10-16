@@ -425,7 +425,10 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     r: &mut Resultado, secretos: &Segredos) -> Result<(), String> {
     let mut gravados = Vec::new();
     let mut recentes = Vec::new();
-    let res = ciclo_passos(op, conector, sessao, controle, r, secretos, &mut gravados, &mut recentes).await;
+    let mut barrado = None;
+    let res = ciclo_passos(op, conector, sessao, controle, r, secretos, &mut gravados, &mut recentes, &mut barrado).await;
+    // A stop while the fixed rule held an option back: the caller must know the rule, not only Jev, decided.
+    if !r.ok && let Some(b) = barrado { r.motivo = format!("{}; barrado pela regra de confirmação: {b}", r.motivo); }
     // A field left with another value is the likely cause of a stop: the caller must see it.
     if !r.ok && let Some(falha) = recentes.iter().rev().find(|x| x.action.starts_with("set_value ") || x.action.starts_with("text "))
         .and_then(|x| x.result.strip_prefix("NOT confirmed: ")).filter(|f| !r.motivo.contains(*f)) {
@@ -473,7 +476,7 @@ fn hash_tela(tela: &AssinaturaTela) -> u64 {
 }
 
 /// Steps whose effect is now known go to `<roteiros>/diario/diario.jsonl` at once: a crash or a kill loses none.
-fn anotar_diario(op: &Opcoes, r: &Resultado, secretos: &Segredos, gravados: &[Gravado],
+fn anotar_diario(op: &Opcoes, r: &mut Resultado, secretos: &Segredos, gravados: &[Gravado],
     recentes: &[Registro], ate: &mut usize) {
     let (Some(dir), Some(pasta)) = (op.roteiros.as_deref(), r.registro.as_deref()) else { return; };
     let execucao = pasta.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -493,7 +496,8 @@ fn anotar_diario(op: &Opcoes, r: &Resultado, secretos: &Segredos, gravados: &[Gr
     let arquivo = dir.join("diario").join("diario.jsonl");
     let escrito = std::fs::create_dir_all(dir.join("diario")).and_then(|()| std::fs::OpenOptions::new().append(true).create(true)
         .open(&arquivo)).and_then(|mut f| std::io::Write::write_all(&mut f, linhas.as_bytes()));
-    if let Err(e) = escrito { eprintln!("diário de passos não gravado em {}: {e}", arquivo.display()); }
+    // The run goes on, but the caller sees that what it learned was not kept.
+    if let Err(e) = escrito { anotar_roteiro(r, format!("diário de passos não gravado em {}: {e}", arquivo.display())); }
 }
 
 fn anotar_roteiro(r: &mut Resultado, texto: String) {
@@ -566,7 +570,8 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
 
 #[allow(clippy::too_many_arguments)]
 async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
-    r: &mut Resultado, secretos: &Segredos, gravados: &mut Vec<Gravado>, recentes: &mut Vec<Registro>) -> Result<(), String> {
+    r: &mut Resultado, secretos: &Segredos, gravados: &mut Vec<Gravado>, recentes: &mut Vec<Registro>,
+    barrado: &mut Option<String>) -> Result<(), String> {
     let jev = validar(op)?;
     let pasta = tempfile::Builder::new().prefix("hcu-").tempdir().map_err(erro_io)?.keep();
     r.registro = Some(pasta.clone());
@@ -761,7 +766,10 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
             (a, b) => a.or(b),
         };
-        let (acoes, confirmacao) = Barreiras::sem_confirmar(segurar_segredos(Barreiras::barrar(cands, recentes), &op.texto, recentes, &secretos.valores), &obs, &op.texto);
+        let antes = segurar_segredos(Barreiras::barrar(cands, recentes), &op.texto, recentes, &secretos.valores);
+        let (acoes, confirmacao) = Barreiras::sem_confirmar(antes.clone(), &obs, &op.texto);
+        let fora: Vec<&str> = antes.iter().filter(|c| !acoes.iter().any(|a| a.acao == c.acao)).map(|c| c.descricao.as_str()).collect();
+        if !fora.is_empty() { *barrado = Some(fora.join("; ")); }
         let mut acoes: Vec<Candidato> = acoes.into_iter().filter(|c| !texto_sem_alvo_barrado(&c.acao, foco_escolhido)).collect();
         if let Some(mut clique) = Barreiras::reclique(recentes, &obs) {
             clique.descricao = secretos.texto(&clique.descricao);

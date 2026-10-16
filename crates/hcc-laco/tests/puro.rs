@@ -1009,3 +1009,32 @@ mod passos_bons {
         assert_eq!(bons(&feitos, 9), vec![1]);
     }
 }
+
+#[test]
+fn the_dialogs_of_the_requested_work_keep_their_buttons() {
+    let i = [ElementAction::Invoke, ElementAction::Focus];
+    let salvar_como = obs(vec![
+        el("d1", "Salvar como", "Window", &[], None, Some(Rect(100, 100, 500, 400))),
+        el("c1", "Nome do arquivo", "Edit", &[ElementAction::SetValue], Some("relatorio.pdf"), Some(Rect(120, 300, 480, 330))),
+        el("b1", "Cancelar", "Button", &i, None, Some(Rect(300, 350, 380, 380))),
+        el("b2", "Salvar", "Button", &i, None, Some(Rect(390, 350, 490, 380))),
+    ]);
+    let (ficam, _) = Barreiras::sem_confirmar(vec![candidato(invoke("b2"))], &salvar_como, "exportar o relatório em PDF");
+    assert_eq!(ficam.len(), 1, "Salvar de um diálogo com campo é o trabalho, não uma confirmação");
+    let pergunta = obs(vec![
+        el("d1", "Confirma a gravação do cadastro?", "Dialog", &[], None, Some(Rect(100, 100, 500, 300))),
+        el("b1", "Não", "Button", &i, None, Some(Rect(300, 250, 380, 280))),
+        el("b2", "Sim", "Button", &i, None, Some(Rect(390, 250, 490, 280))),
+    ]);
+    let (ficam, _) = Barreiras::sem_confirmar(vec![candidato(invoke("b2"))], &pergunta, "gravar o cadastro do paciente Ana");
+    assert_eq!(ficam.len(), 1, "a confirmação do que o objetivo pede é dele");
+    let (ficam, _) = Barreiras::sem_confirmar(vec![candidato(invoke("b2"))], &pergunta, "abrir assim a agenda do dia");
+    assert!(ficam.is_empty(), "'assim' não autoriza 'Sim'");
+}
+
+#[test]
+fn a_page_named_with_a_destructive_word_still_takes_clicks() {
+    let o = obs(vec![el("p1", "Excluir arquivos - Drive", "Document", &[ElementAction::Scroll], None, Some(Rect(0, 0, 800, 600)))]);
+    let (ficam, _) = Barreiras::sem_confirmar(vec![candidato(mouse(200, 200, MouseMode::Click))], &o, "abrir a pasta Fotos");
+    assert_eq!(ficam.len(), 1);
+}

@@ -2468,3 +2468,31 @@ async fn a_recorded_confirmation_is_not_replayed_when_the_goal_does_not_ask_for_
     assert!(!alvos.contains(&Some("b2".into())), "{}", r.resumo());
     assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("confirmação")), "{:?}", r.roteiro);
 }
+
+#[tokio::test]
+async fn a_stop_says_which_option_the_confirmation_rule_removed() {
+    let mut obs = tree("o1", "");
+    let botao = |id: &str, nome: &str, r: [i32; 4]| serde_json::from_value::<hcc_protocolo::Element>(json!({"id":id, "name":nome, "role":"Button",
+        "value":null, "enabled":true, "rect":r, "focused":false, "actions":["invoke"]})).unwrap();
+    obs.elements.push(serde_json::from_value(json!({"id":"d1", "name":"Quer mesmo trocar de modo?", "role":"Window", "value":null,
+        "enabled":true, "rect":[100,100,500,300], "focused":false, "actions":[]})).unwrap());
+    obs.elements.push(botao("b1", "Cancelar", [300, 250, 380, 280]));
+    obs.elements.push(botao("b2", "Sim, tenho certeza.", [390, 250, 490, 280]));
+    let con = FakeConnector::new(vec![obs]);
+    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    let r = run(op, &con).await;
+    assert!(!r.ok);
+    assert!(r.motivo.contains("barrado pela regra de confirmação: invoke Button 'Sim, tenho certeza.'"), "{}", r.motivo);
+}
+
+#[tokio::test]
+async fn a_journal_that_cannot_be_written_is_reported() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    std::fs::write(pasta.join("diario"), b"ocupado").unwrap();
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.roteiros = Some(pasta);
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("diário de passos não gravado")), "{:?}", r.roteiro);
+}

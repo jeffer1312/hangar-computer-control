@@ -19,6 +19,9 @@ static PEDE_FECHAR: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 const CAMPOS: [&str; 6] = ["Edit", "CheckBox", "ComboBox", "RadioButton", "List", "Document"];
+/// Only what a click acts on: a page or panel titled "Excluir arquivos" still takes clicks inside it.
+const ACIONAVEIS: [&str; 8] = ["Button", "MenuItem", "ListItem", "Hyperlink", "TabItem", "TreeItem", "DataItem", "SplitButton"];
+const GENERICAS: [&str; 10] = ["deseja", "realmente", "certeza", "confirma", "confirmar", "continuar", "really", "continue", "voces", "agora"];
 static CANCELAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(cancelar|cancel|não|nao|no|voltar|back)$").unwrap());
 static FECHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(fechar|close|x|×|dispensar|dismiss)$").unwrap());
 static DESTRUIR: LazyLock<Regex> = LazyLock::new(|| {
@@ -255,7 +258,13 @@ impl Barreiras {
     /// when the goal names them: Jev's risk score is a guess, these rules are not. A click on their area counts too.
     pub fn sem_confirmar(cands: Vec<Candidato>, obs: &Observation, objetivo: &str) -> (Vec<Candidato>, Option<String>) {
         let pedido = palavras(objetivo);
-        let pede = |nome: &str| { let n = palavras(nome); !n.is_empty() && pedido.contains(&n) };
+        let cercado = format!(" {pedido} ");
+        let pede = |nome: &str| { let n = palavras(nome); !n.is_empty() && cercado.contains(&format!(" {n} ")) };
+        // Stems of the goal: "gravar" answers "Confirma a gravação?", the confirmation of the work it asked for.
+        let raizes: HashSet<String> = pedido.split(' ').filter(|w| w.chars().count() >= 5 && !GENERICAS.contains(w))
+            .map(|w| w.chars().take(5).collect()).collect();
+        let do_pedido = |texto: &str| palavras(texto).split(' ').filter(|w| w.chars().count() >= 5 && !GENERICAS.contains(w))
+            .any(|w| raizes.contains(&w.chars().take(5).collect::<String>()));
         let mut proibidos: Vec<&hcc_protocolo::Element> = Vec::new();
         let mut dica = None;
         for (d, r) in dialogos(obs) {
@@ -270,15 +279,20 @@ impl Barreiras {
                 }
                 continue;
             };
+            // A dialog with fields (Save as, a record form) is the work itself; only a bare question confirms.
+            if obs.elements.iter().any(|e| CAMPOS.contains(&e.role.as_str()) && dentro_de(r, e)) { continue; }
             let confirmam: Vec<&hcc_protocolo::Element> = botoes.iter().copied()
                 .filter(|b| !CANCELAR.is_match(&palavras(&b.name)) && !FECHAR.is_match(&palavras(&b.name))).collect();
-            if confirmam.is_empty() || pede(&d.name) || confirmam.iter().any(|b| pede(&b.name)) { continue; }
+            // The question is the dialog's title or a text of it ending in "?"; its long explanation is not read.
+            let perguntas = std::iter::once(d.name.as_str()).chain(obs.elements.iter()
+                .filter(|e| e.role == "Text" && dentro_de(r, e) && e.name.trim_end().ends_with('?')).map(|e| e.name.as_str()));
+            if confirmam.is_empty() || pede(&d.name) || confirmam.iter().any(|b| pede(&b.name)) || perguntas.into_iter().any(do_pedido) { continue; }
             dica.get_or_insert_with(|| format!("A confirmation dialog the goal does not ask for is open ('{}'): never confirm it, \
                 close it with '{}'.", d.name.trim(), cancelar.name.trim()));
             proibidos.extend(confirmam);
         }
         if !DESTRUIR.is_match(&pedido) {
-            proibidos.extend(obs.elements.iter().filter(|e| DESTRUIR.is_match(&palavras(&e.name))));
+            proibidos.extend(obs.elements.iter().filter(|e| ACIONAVEIS.contains(&e.role.as_str()) && DESTRUIR.is_match(&palavras(&e.name))));
         }
         let ficam = cands.into_iter().filter(|c| !proibidos.iter().any(|e| {
             c.acao.target.as_deref() == Some(e.id.as_str())
