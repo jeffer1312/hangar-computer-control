@@ -235,7 +235,14 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
 
     fn point(&self, x: Option<i32>, y: Option<i32>) -> Result<(), DesktopError> {
         let (x, y) = match (x, y) { (Some(x), Some(y)) => entrada::para_global(self.area, x, y).map_err(invalid)?, _ => return Err(invalid("coordenada fora da tela")) };
-        hypr::dispatch(&self.commands, &format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})"), &format!("movecursor {x} {y}")).map_err(runtime)
+        hypr::dispatch(&self.commands, &format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})"), &format!("movecursor {x} {y}")).map_err(runtime)?;
+        // A cursor left elsewhere would click whatever is under it.
+        let pos = hypr::query(&self.commands, "cursorpos").map_err(runtime)?;
+        let (cx, cy) = (pos["x"].as_f64(), pos["y"].as_f64());
+        if cx.zip(cy).is_none_or(|(cx, cy)| (cx - f64::from(x)).abs() > 2.0 || (cy - f64::from(y)).abs() > 2.0) {
+            return Err(runtime(format!("cursor não chegou em ({x},{y}); está em ({},{})", pos["x"], pos["y"])));
+        }
+        Ok(())
     }
 
     fn mouse(&self, action: &Action) -> Result<(), DesktopError> {
@@ -302,24 +309,47 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         if info.text.is_none() && !self.tree.read(&element.node).map_err(tree_error)?.has("focused") {
             return Err(runtime("campo não recebeu o foco; nada foi digitado"));
         }
-        // Chromium drops keystrokes typed at full speed (an autofill popup opening mid-word): one slow retype.
-        for atraso in [None, Some("30")] {
+        let senha = info.role == "password text";
+        // wtype loses , { } > and friends with a dead-key layout, and a long text at 30 ms per key outlasts the action
+        // timeout: those go by the clipboard. A password never does (clipboard history keeps it).
+        let colar = !senha && precisa_colar(value);
+        // Chromium drops keystrokes typed at full speed (an autofill popup opening mid-word): one slow retype, then paste.
+        let modos: &[Option<&str>] = if colar { &[Some("colar")] } else if senha { &[None, Some("30")] } else { &[None, Some("30"), Some("colar")] };
+        let mut readback = String::new();
+        for &modo in modos {
             entrada::keys(&self.commands, &["ctrl".into(), "a".into()]).map_err(runtime)?;
             entrada::keys(&self.commands, &["delete".into()]).map_err(runtime)?;
-            match atraso {
+            match modo {
                 None => self.type_text(Some(value), "texto inválido")?,
+                Some("colar") => self.paste(value)?,
                 Some(ms) => { self.commands.run(&["wtype", "-d", ms, "-"], Some(value.as_bytes())).map_err(runtime)?; }
             }
             std::thread::sleep(Duration::from_millis(150));
-            if info.role == "password text" || info.text.is_none() { return Ok(()); }
-            let readback = self.tree.text(&element.node).map_err(tree_error)?;
+            if senha || info.text.is_none() { return Ok(()); }
+            readback = self.tree.text(&element.node).map_err(tree_error)?;
             if readback.replace("\r\n", "\n").trim() == value.replace("\r\n", "\n").trim() { return Ok(()); }
-            // ponytail: slow retype only for short values; 30 ms per key on a long text outlasts the action timeout.
-            if atraso.is_some() || value.chars().count() > 200 {
-                return Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&readback.chars().take(80).collect::<String>()))));
-            }
         }
+        Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&readback.chars().take(80).collect::<String>()))))
+    }
+
+    fn paste(&self, value: &str) -> Result<(), DesktopError> {
+        if !self.commands.exists("wl-copy") { return Err(runtime("wl-copy não instalado (pacote wl-clipboard); texto com símbolos não pode ser colado")); }
+        // wl-copy forks a server that keeps stderr open: through a pipe, the call would wait for the next copy.
+        self.commands.run(&["sh", "-c", "exec wl-copy --sensitive 2>/dev/null"], Some(value.as_bytes())).map_err(runtime)?;
+        self.commands.run(&["wtype", "-M", "ctrl", "v", "-m", "ctrl"], None).map_err(runtime)?;
         Ok(())
+    }
+
+    /// The visible part of the last observed dialog over `area` (the walk goes outside in, so the last is the topmost).
+    fn dialogo_sobre(&self, area: Rect, window: Rect) -> Option<Rect> {
+        let mut dialogos: Vec<(usize, Rect)> = self.elements.iter().filter(|(_, e)| e.role == "Window").filter_map(|(id, e)| {
+            let info = self.tree.read(&e.node).ok().filter(|i| ["dialog", "alert", "alert dialog"].contains(&i.role.as_str()))?;
+            let r = element_rect(escalar(info.extents?, e.fator), window)?;
+            let r = Rect(r.0.max(area.0), r.1.max(area.1), r.2.min(area.2), r.3.min(area.3));
+            (r.0 < r.2 && r.1 < r.3).then_some((id.trim_start_matches('e').parse().ok()?, r))
+        }).collect();
+        dialogos.sort_by_key(|(n, _)| *n);
+        dialogos.last().map(|(_, r)| *r)
     }
 
     fn element_action(&self, action: &Action) -> Result<(), DesktopError> {
@@ -345,8 +375,10 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
             ActionType::SetValue => self.set_value(element, &info, action.value.as_deref()),
             ActionType::Scroll => {
                 // The wheel over the visible part of the element; delta > 0 goes down, as in the mouse action.
-                let visivel = rect.map(|r| Rect(r.0.max(window.0), r.1.max(window.1), r.2.min(window.2), r.3.min(window.3)))
-                    .filter(|r| r.0 < r.2 && r.1 < r.3).ok_or_else(|| runtime("controle sem área visível para rolar"))?;
+                let visivel = |r: Rect| Some(Rect(r.0.max(window.0), r.1.max(window.1), r.2.min(window.2), r.3.min(window.3))).filter(|r| r.0 < r.2 && r.1 < r.3);
+                let visivel = rect.and_then(visivel).ok_or_else(|| runtime("controle sem área visível para rolar"))?;
+                // The wheel goes to what is under the cursor: with a modal open over the page, that is the modal.
+                let visivel = if element.role == "Document" { self.dialogo_sobre(visivel, window).unwrap_or(visivel) } else { visivel };
                 let passos = if action.amount == Some(hcc_protocolo::Amount::Large) { 10 } else { 3 };
                 let delta = match action.direction {
                     Some(hcc_protocolo::Direction::Down) => passos,
@@ -359,6 +391,10 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
             ActionType::Activate | ActionType::Launch | ActionType::Keys | ActionType::Text | ActionType::Mouse => Err(invalid(format!("tipo de ação desconhecido: {}", action.kind))),
         }
     }
+}
+
+fn precisa_colar(value: &str) -> bool {
+    value.chars().count() > 40 || value.chars().any(|c| ",{}<>'\"()[]|\\~^`".contains(c))
 }
 
 fn center(rect: Rect) -> (i32, i32) {
@@ -438,14 +474,24 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
             ActionType::Keys => {
                 let names = action.keys.as_deref().ok_or_else(|| invalid("keys precisa conter de 1 a 8 teclas"))?;
                 entrada::evdev(names).map_err(invalid)?;
-                entrada::keys(&self.commands, names).map_err(runtime)
-            }
-            ActionType::Text => {
                 if let Some(target) = &action.target {
                     let element = self.elements.get(target).ok_or_else(|| invalid("controle não pertence à observação"))?;
                     self.focus_field(element)?; std::thread::sleep(Duration::from_millis(150));
                 }
-                self.type_text(action.value.as_deref(), "texto inválido")
+                entrada::keys(&self.commands, names).map_err(runtime)
+            }
+            ActionType::Text => {
+                let mut colar = false;
+                if let Some(target) = &action.target {
+                    let element = self.elements.get(target).ok_or_else(|| invalid("controle não pertence à observação"))?;
+                    self.focus_field(element)?; std::thread::sleep(Duration::from_millis(150));
+                    // Only a field known not to be a password: clipboard history would keep it.
+                    colar = self.tree.read(&element.node).is_ok_and(|i| i.role != "password text");
+                }
+                match action.value.as_deref().filter(|v| colar && v.chars().count() <= 20000 && precisa_colar(v)) {
+                    Some(v) => self.paste(v),
+                    None => self.type_text(action.value.as_deref(), "texto inválido"),
+                }
             }
             ActionType::Mouse => self.mouse(action),
             ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle | ActionType::Expand | ActionType::Collapse | ActionType::Focus | ActionType::Scroll => self.element_action(action),

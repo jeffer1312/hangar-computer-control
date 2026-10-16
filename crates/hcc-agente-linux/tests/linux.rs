@@ -108,6 +108,8 @@ struct FakeCommands {
     active_error: Rc<RefCell<Option<String>>>,
     fail_release: Rc<RefCell<bool>>,
     classico: Rc<RefCell<bool>>,
+    cursor: Rc<RefCell<(i64, i64)>>,
+    cursor_stuck: Rc<RefCell<bool>>,
 }
 
 impl Default for FakeCommands {
@@ -119,6 +121,7 @@ impl Default for FakeCommands {
             clients: Rc::new(RefCell::new(json!([{"address":"0xa","title":"Editor","pid":7,"class":"editor","at":[1542,51],"size":[800,600],"mapped":true,"hidden":false}]))),
             dispatch_output: Rc::new(RefCell::new(b"ok\n".to_vec())),
             locked: Rc::default(), fail_keys: Rc::default(), fail_press: Rc::default(), active_error: Rc::default(), fail_release: Rc::default(), classico: Rc::default(),
+            cursor: Rc::default(), cursor_stuck: Rc::default(),
         }
     }
 }
@@ -126,7 +129,14 @@ impl Default for FakeCommands {
 impl Comandos for FakeCommands {
     fn run(&self, argv: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>, String> {
         self.calls.borrow_mut().push((argv.iter().map(|s| s.to_string()).collect(), stdin.map(Vec::from)));
+        if let ["hyprctl", "dispatch", comando] = argv && !*self.cursor_stuck.borrow() {
+            let numeros: Vec<i64> = comando.split(|c: char| !c.is_ascii_digit() && c != '-').filter_map(|n| n.parse().ok()).collect();
+            if (comando.contains("cursor.move") || comando.starts_with("movecursor")) && numeros.len() == 2 && !(*self.classico.borrow() && comando.starts_with("hl.")) {
+                *self.cursor.borrow_mut() = (numeros[0], numeros[1]);
+            }
+        }
         match argv {
+            ["hyprctl", "-j", "cursorpos"] => { let (x, y) = *self.cursor.borrow(); Ok(serde_json::to_vec(&json!({"x": x, "y": y})).unwrap()) }
             ["pgrep", "-x", "hyprlock"] => if *self.locked.borrow() { Ok(vec![]) } else { Err("pgrep falhou (1): ".into()) },
             ["hyprctl", "-j", "activewindow"] => match &*self.active_error.borrow() { Some(error) => Err(error.clone()), None => Ok(serde_json::to_vec(&*self.active.borrow()).unwrap()) },
             ["hyprctl", "-j", "monitors"] => Ok(serde_json::to_vec(&*self.monitors.borrow()).unwrap()),
@@ -137,12 +147,12 @@ impl Comandos for FakeCommands {
             ["ydotool", "click", "0x80"] if self.fail_release.replace(false) => Err("ydotool falhou (3): release falhou".into()),
             ["ydotool", "key", ..] if self.fail_keys.replace(false) => Err("ydotool falhou (2): falhou".into()),
             ["ydotool", "click", "0x40"] if self.fail_press.replace(false) => Err("ydotool falhou (2): press falhou".into()),
-            ["ydotool", ..] | ["wtype", "-"] | ["wtype", "-d", _, "-"] => Ok(vec![]),
+            ["ydotool", ..] | ["wtype", "-"] | ["wtype", "-d", _, "-"] | ["wtype", "-M", "ctrl", "v", "-m", "ctrl"] | ["sh", "-c", "exec wl-copy --sensitive 2>/dev/null"] => Ok(vec![]),
             ["grim", ..] => Ok(b"PNG".to_vec()),
             _ => panic!("comando inesperado: {argv:?}"),
         }
     }
-    fn exists(&self, name: &str) -> bool { name == "editor" }
+    fn exists(&self, name: &str) -> bool { name == "editor" || name == "wl-copy" }
 }
 
 fn desktop(elements: Vec<FakeNo>) -> (LinuxDesktop<FakeCommands, FakeTree>, FakeCommands, FakeTree) {
@@ -825,4 +835,88 @@ fn set_value_retypes_slowly_once_when_the_field_lost_characters() {
     desktop.act(&observed,&set).unwrap();
     let wtypes: Vec<Vec<String>> = commands.calls.borrow().iter().filter(|c| c.0[0] == "wtype").map(|c| c.0.clone()).collect();
     assert_eq!(wtypes, vec![vec!["wtype","-"], vec!["wtype","-d","30","-"]]);
+}
+
+// A cursor that did not reach the point would click whatever is under it (a mode switch, a delete button).
+#[test]
+fn click_fails_when_the_cursor_did_not_reach_the_point() {
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    *commands.cursor_stuck.borrow_mut() = true; commands.calls.borrow_mut().clear();
+    let click: Action = serde_json::from_value(json!({"type":"mouse","x":10,"y":20,"button":"left","mode":"click"})).unwrap();
+    let error = desktop.act(&observed, &click).unwrap_err();
+    assert!(error.msg.contains("cursor não chegou em (1546,20)"), "{}", error.msg);
+    assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool"));
+}
+
+// A modal over the page: the wheel over the page's center would scroll the page behind it.
+#[test]
+fn scrolling_the_page_under_an_open_dialog_scrolls_the_dialog() {
+    let mut pagina = node("document web", "Formulário"); pagina.info.extents = Some((0, 0, 800, 2000));
+    let mut modal = node("dialog", "Diga-nos o motivo"); modal.info.extents = Some((200, 100, 400, 300));
+    let (mut desktop, commands, _) = desktop(vec![pagina, modal]);
+    let observed = desktop.observe().unwrap();
+    commands.calls.borrow_mut().clear();
+    let rolar: Action = serde_json::from_value(json!({"type":"scroll","target":"e0","direction":"down","amount":"small"})).unwrap();
+    desktop.act(&observed, &rolar).unwrap();
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["hyprctl","dispatch","hl.dsp.cursor.move({ x = 1942, y = 301 })"]), "{:?}", commands.calls.borrow());
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","mousemove","--wheel","-x","0","-y","-3"]));
+}
+
+// wtype loses , { } > with a dead-key layout: such a value is pasted and read back exactly.
+#[test]
+fn set_value_pastes_a_value_with_symbols_and_checks_it() {
+    let valor = "POST /PAGE_ID/messages, {\"a\": 1} > 2";
+    let mut field = node("entry","Descrição"); field.info.states.push("editable".into()); field.info.text = Some(String::new());
+    let (mut desktop, commands, tree) = desktop(vec![field]); *tree.readback.borrow_mut() = Some(valor.into());
+    let observed = desktop.observe().unwrap();
+    desktop.act(&observed, &Action { value:Some(valor.into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap();
+    let calls = commands.calls.borrow();
+    let copia = calls.iter().position(|c| c.0[0] == "sh" && c.1.as_deref() == Some(valor.as_bytes())).expect("wl-copy");
+    let cola = calls.iter().position(|c| c.0 == vec!["wtype","-M","ctrl","v","-m","ctrl"]).expect("ctrl+v");
+    assert!(copia < cola);
+    assert!(!calls.iter().any(|c| c.0 == vec!["wtype","-"] || c.0.get(1).is_some_and(|a| a == "-d")));
+    drop(calls);
+    let observed = desktop.observe().unwrap(); *tree.readback.borrow_mut() = Some("POST /PAGE_ID/messages  \"a\": 1  2".into());
+    assert!(desktop.act(&observed, &Action { value:Some(valor.into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap_err().msg.contains("valor digitado não confirmado"));
+}
+
+#[test]
+fn set_value_pastes_a_short_value_after_both_typings_failed() {
+    let mut field = node("entry","Email"); field.info.states.push("editable".into()); field.info.text = Some(String::new());
+    let (mut desktop, commands, tree) = desktop(vec![field]);
+    tree.readbacks.borrow_mut().extend(["a@gmaicom".to_owned(), "a@gmaicom".to_owned(), "a@gmail.com".to_owned()]);
+    let observed = desktop.observe().unwrap();
+    desktop.act(&observed, &Action { value:Some("a@gmail.com".into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap();
+    let wtypes: Vec<Vec<String>> = commands.calls.borrow().iter().filter(|c| c.0[0] == "wtype").map(|c| c.0.clone()).collect();
+    assert_eq!(wtypes, vec![vec!["wtype","-"], vec!["wtype","-d","30","-"], vec!["wtype","-M","ctrl","v","-m","ctrl"]]);
+}
+
+// ctrl+a / ctrl+v aimed at a textarea went to whatever had the focus.
+#[test]
+fn keys_aimed_at_a_field_focus_it_first() {
+    let mut field = node("entry","Descrição"); field.info.states.push("editable".into());
+    let (mut desktop, commands, tree) = desktop(vec![field]);
+    let observed = desktop.observe().unwrap(); commands.calls.borrow_mut().clear();
+    let teclas = Action { keys:Some(vec!["ctrl".into(),"a".into()]), ..action(ActionType::Keys,Some("e0")) };
+    desktop.act(&observed, &teclas).unwrap();
+    assert_eq!(*tree.events.borrow(), vec!["focus:2"]);
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","key","29:1","30:1","30:0","29:0"]));
+    let observed = desktop.observe().unwrap();
+    let error = desktop.act(&observed, &Action { target:Some("e9".into()), ..teclas }).unwrap_err();
+    assert!(error.msg.contains("não pertence"));
+}
+
+#[test]
+fn text_into_a_named_field_pastes_symbols_but_a_password_is_typed() {
+    let mut field = node("entry","Descrição"); field.info.states.push("editable".into());
+    let mut senha = node("password text","Senha"); senha.info.states.push("editable".into());
+    let (mut desktop, commands, _) = desktop(vec![field, senha]);
+    let observed = desktop.observe().unwrap();
+    desktop.act(&observed, &Action { value:Some("a, {b}".into()), ..action(ActionType::Text,Some("e0")) }).unwrap();
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wtype","-M","ctrl","v","-m","ctrl"]));
+    commands.calls.borrow_mut().clear();
+    let observed = desktop.observe().unwrap();
+    desktop.act(&observed, &Action { value:Some("s3nh@,{x}".into()), ..action(ActionType::Text,Some("e1")) }).unwrap();
+    assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "sh"));
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wtype","-"]));
 }
