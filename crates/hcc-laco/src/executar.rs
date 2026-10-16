@@ -414,59 +414,80 @@ const PARECIDO: &str = "Pick the recorded goal that asks for exactly the same ta
 target (person, record, screen) and same outcome; values the user supplies in `data` may differ. NONE when no recorded \
 goal is that task, or when a goal only looks alike.";
 
-const PARCIAL: &str = "The run below stopped before `goal` was done. Pick the LAST action of the list after which \
-everything done so far still went toward `goal`, with no wrong turn before it (a wrong field typed in, a wrong item \
-opened, a step later undone). NONE when the first action already went wrong or nothing went toward `goal`.";
-
-/// A run that stopped keeps the start Jev judges right, as a partial variant: next time it is replayed and
-/// Jev goes on from there.
+/// A run that stopped (or failed) keeps the steps that went right, as a partial variant and as pieces: next time
+/// they are replayed and Jev goes on from there. No judge decides: a step is kept for its effect (trecho::bons).
 async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
     r: &mut Resultado, secretos: &Segredos) -> Result<(), String> {
     let mut gravados = Vec::new();
     let mut recentes = Vec::new();
-    ciclo_passos(op, conector, sessao, controle, r, secretos, &mut gravados, &mut recentes).await?;
+    let res = ciclo_passos(op, conector, sessao, controle, r, secretos, &mut gravados, &mut recentes).await;
     // A field left with another value is the likely cause of a stop: the caller must see it.
     if !r.ok && let Some(falha) = recentes.iter().rev().find(|x| x.action.starts_with("set_value ") || x.action.starts_with("text "))
         .and_then(|x| x.result.strip_prefix("NOT confirmed: ")).filter(|f| !r.motivo.contains(*f)) {
         r.motivo = format!("{}; {falha}", r.motivo);
     }
-    let (Some(dir), Some(pasta), false) = (op.roteiros.as_deref(), r.registro.clone(), r.ok) else { return Ok(()); };
-    // Like a confirmed run: each step keeps whether it changed the screen, the check its replay relies on.
-    let feitos: Vec<(roteiro::Passo, String)> = gravados.into_iter()
-        .filter_map(|(mut p, i)| i.and_then(|i| recentes.get(i)).map(|reg| { p.mudou_tela = reg.screen_changed; (p, reg.action.clone()) })).collect();
-    if feitos.is_empty() { return Ok(()); }
-    let anota = |r: &mut Resultado, texto: String| r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
-    if controle.restante().is_err() { anota(r, "parcial não gravado: sem tempo para perguntar ao Jev".into()); return Ok(()); }
-    let jev = validar(op)?;
-    let opcoes: Vec<String> = feitos.iter().enumerate().map(|(n, (_, d))| format!("{}. {d}", n + 1)).collect();
-    let estado = json!({"goal": secretos.texto(&op.texto), "stopped": secretos.texto(&r.motivo)});
-    let limite = controle.restante()?.min(Duration::from_secs(30));
-    let (i, p) = match controle.medir("jev", Progresso::Jev, jev.escolher(&estado, PARCIAL, &opcoes, limite)).await {
-        Ok(v) => v,
-        Err(e) => { r.roteiro = Some(format!("parcial não gravado: {}", secretos.texto(&e))); return Ok(()); }
-    };
-    controle.rodar(registrar(&pasta, json!({"parcial": i.map(|i| &opcoes[i]), "probability": p}), secretos)).await?;
-    let Some(fim) = i.filter(|_| p >= 0.8) else {
-        anota(r, format!("parcial não gravado: o Jev não viu um começo certo ({})", percentual(p)));
-        return Ok(());
-    };
+    let (Some(dir), Some(_), false) = (op.roteiros.as_deref(), r.registro.as_ref(), r.ok) else { return res; };
+    let feitos = feitos(&gravados, &recentes);
+    // ponytail: the screen after the last step is unknown here, so an open-and-cancel pair at the very end stays.
+    let passos: Vec<roteiro::Passo> = trecho::bons(&feitos, 0).into_iter().map(|i| feitos[i].passo.clone()).collect();
+    if passos.is_empty() { return res; }
     let arquivo = roteiro::arquivo(dir, &op.texto, &op.dados);
-    let passos: Vec<roteiro::Passo> = feitos.into_iter().take(fim + 1).map(|(p, _)| p).collect();
+    let n = passos.len();
     let pecas = gravar_trechos(op, secretos, &passos, None);
     let gravado = roteiro::anteriores(&arquivo).map(|a| roteiro::juntar(a, &op.texto, passos, true)).and_then(|novo| {
         if serde_json::to_value(&novo).map_or(true, |v| secretos.tem_segredo(&v)) { Err("contém um valor secreto".to_owned()) }
         else { roteiro::salvar(&arquivo, &novo).map_err(|e| e.to_string()) }
     });
     let texto = gravado.map_or_else(|e| format!("parcial não gravado: {e}"),
-        |()| format!("parcial gravado: {} passo(s) em {}", fim + 1, arquivo.display()));
+        |()| format!("parcial gravado: {n} passo(s) em {}", arquivo.display()));
     let texto = if pecas.is_empty() { texto } else { format!("{texto}; {pecas}") };
     r.roteiro = Some(r.roteiro.take().map_or_else(|| texto.clone(), |antes| format!("{antes}; {texto}")));
-    Ok(())
+    res
+}
+
+/// Each recorded step with how it went: whether it changed the screen (the check its replay relies on) and ran ok.
+fn feitos(gravados: &[(roteiro::Passo, Option<usize>, u64)], recentes: &[Registro]) -> Vec<trecho::Feito> {
+    gravados.iter().filter_map(|(p, i, tela)| i.and_then(|i| recentes.get(i)).map(|reg| {
+        let mut passo = p.clone();
+        passo.mudou_tela = reg.screen_changed;
+        trecho::Feito { passo, ok: reg.executada && reg.result.starts_with("ok"), tela: *tela }
+    })).collect()
+}
+
+fn hash_tela(tela: &AssinaturaTela) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tela.hash(&mut h);
+    h.finish()
+}
+
+/// Steps whose effect is now known go to `<roteiros>/diario/diario.jsonl` at once: a crash or a kill loses none.
+fn anotar_diario(op: &Opcoes, r: &Resultado, secretos: &Segredos, gravados: &[(roteiro::Passo, Option<usize>, u64)],
+    recentes: &[Registro], ate: &mut usize) {
+    let (Some(dir), Some(pasta)) = (op.roteiros.as_deref(), r.registro.as_deref()) else { return; };
+    let execucao = pasta.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut linhas = String::new();
+    while let Some((p, i, _)) = gravados.get(*ate) {
+        let reg = i.and_then(|i| recentes.get(i));
+        if reg.is_some_and(|reg| reg.screen_changed.is_none()) { break; }
+        *ate += 1;
+        let Some(reg) = reg.filter(|reg| reg.screen_changed == Some(true) && reg.executada && reg.result.starts_with("ok")) else { continue };
+        let mut passo = p.clone();
+        passo.mudou_tela = reg.screen_changed;
+        let linha = json!({"execucao": execucao, "objetivo": secretos.texto(&op.texto), "passo": passo});
+        if secretos.tem_segredo(&linha) { continue; }
+        linhas.push_str(&format!("{linha}\n"));
+    }
+    if linhas.is_empty() { return; }
+    let arquivo = dir.join("diario").join("diario.jsonl");
+    let escrito = std::fs::create_dir_all(dir.join("diario")).and_then(|()| std::fs::OpenOptions::new().append(true).create(true)
+        .open(&arquivo)).and_then(|mut f| std::io::Write::write_all(&mut f, linhas.as_bytes()));
+    if let Err(e) = escrito { eprintln!("diário de passos não gravado em {}: {e}", arquivo.display()); }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
-    r: &mut Resultado, secretos: &Segredos, gravados: &mut Vec<(roteiro::Passo, Option<usize>)>, recentes: &mut Vec<Registro>) -> Result<(), String> {
+    r: &mut Resultado, secretos: &Segredos, gravados: &mut Vec<(roteiro::Passo, Option<usize>, u64)>, recentes: &mut Vec<Registro>) -> Result<(), String> {
     let jev = validar(op)?;
     let pasta = tempfile::Builder::new().prefix("hcu-").tempdir().map_err(erro_io)?.keep();
     r.registro = Some(pasta.clone());
@@ -484,6 +505,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     let mut recusou_sem_acao = false;
     // The last typing into a named field (registry index, role, name, value): checked on the next screen.
     let mut digitado: Option<(usize, String, String, String)> = None;
+    let mut diario_ate = 0usize;
     // No step budget: the run stops when it keeps coming back to screens it has already seen.
     let mut vistas: HashSet<AssinaturaTela> = HashSet::new();
     let mut sem_tela_nova = 0u32;
@@ -541,7 +563,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 }
                 let passo = &passos[n];
                 // Kept as recorded: the next run may find the app closed.
-                if roteiro::ja_aberto(passos, n, &vista) { gravados.push((passo.clone(), None)); pulou = true; continue; }
+                if roteiro::ja_aberto(passos, n, &vista) { gravados.push((passo.clone(), None, hash_tela(&atual))); pulou = true; continue; }
                 let motivo = |m: &str| Some(format!("parou no passo {}: {m}", n + 1));
                 if !std::mem::take(&mut pulou) && n > 0 && passos[n - 1].mudou_tela == Some(true)
                     && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
@@ -573,11 +595,11 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     Ok(_) => {}
                 }
                 foco_escolhido |= escolhe_foco(&acao) || invoca_editavel(&acao, &vista);
-                gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1)));
+                gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1), hash_tela(&atual)));
                 esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
             }
             r.roteiro = Some(if passos.is_empty() { format!("{origem}{}", parou.unwrap_or_default()) } else {
-                let pulados = gravados.iter().filter(|(_, i)| i.is_none()).count();
+                let pulados = gravados.iter().filter(|(_, i, _)| i.is_none()).count();
                 let mut texto = format!("{origem}{variante}repetidos {} de {} passos", gravados.len() - pulados, passos.len());
                 if pulados > 0 { texto.push_str(&format!(" ({pulados} pulado(s): app já aberto)")); }
                 if let Some(p) = parou { texto.push_str(&format!("; {p}")); }
@@ -648,7 +670,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if let Err(e) = &retorno && reconectavel(e) && !controle.cancel.is_cancelled() { reconectar(conector, sessao, controle).await?; }
                 if !ok { parou = Some(format!("trecho {} parou no passo {}: {resultado}", textos[i], n + 1)); break 'pecas; }
                 foco_escolhido |= escolhe_foco(&acao) || invoca_editavel(&acao, &vista);
-                gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1)));
+                gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1), hash_tela(&atual)));
                 esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
             }
             feitas.push((opcao.trecho, opcao.params.clone()));
@@ -672,6 +694,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             ultima.screen_changed = anterior.as_ref().map_or(Some(true), |a| mudou(a, &atual));
         }
         anterior = Some(atual.clone());
+        anotar_diario(op, r, secretos, gravados, recentes, &mut diario_ate);
         let divergencia = digitado.take().and_then(|(i, papel, nome, valor)| {
             let lido = campo_diferente(&obs, &papel, &nome, &valor)?;
             let texto = secretos.texto(&format!("o campo {papel} {} ficou com {}, não com o valor pedido",
@@ -838,7 +861,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         }
                         r.ok = true;
                         if let Some(arquivo) = arquivo.as_deref().filter(|_| !gravados.is_empty()) {
-                            let passos: Vec<roteiro::Passo> = gravados.drain(..).map(|(mut p, i)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
+                            let passos: Vec<roteiro::Passo> = gravados.drain(..).map(|(mut p, i, _)| { if let Some(i) = i { p.mudou_tela = recentes.get(i).and_then(|r| r.screen_changed); } p }).collect();
                             let pecas = gravar_trechos(op, secretos, &passos, Some(&obs));
                             // `refazer` asked to forget the recorded ways, not to keep them beside the new one.
                             let anteriores = if op.refazer { Ok(None) } else { roteiro::anteriores(arquivo) };
@@ -955,7 +978,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 digitado = Some((recentes.len() - 1, papel, nome, valor));
             }
             if !falhou && op.roteiros.is_some() {
-                gravados.push((roteiro::passo(acao, &vista, &op.dados), Some(recentes.len() - 1)));
+                gravados.push((roteiro::passo(acao, &vista, &op.dados), Some(recentes.len() - 1), hash_tela(&atual)));
             }
             esperar_efeito(conector, sessao, controle, acao, &vista, &atual, secretos).await?;
             let Some(proxima) = fila.next().filter(|_| !falhou) else { break };

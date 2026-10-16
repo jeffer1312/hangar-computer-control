@@ -1986,15 +1986,35 @@ async fn a_script_of_a_newer_format_is_never_overwritten() {
 }
 
 #[tokio::test]
-async fn stopped_goal_records_nothing() {
+async fn stopped_goal_records_its_effective_steps_without_asking_jev() {
     let pasta = tempfile::tempdir().unwrap().keep();
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (mut op, _server) = setup(vec![select("set_value"), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
-        Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Pick("NONE", 0.9)]).await;
+    let (mut op, server) = setup(vec![select("set_value"), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
     op.roteiros = Some(pasta.clone());
     let r = run(op, &con).await;
     assert!(!r.ok, "{}", r.resumo());
-    assert!(roteiros(&pasta).is_empty(), "Jev saw no good start: nothing recorded");
+    assert_eq!(roteiros(&pasta).len(), 1, "{:?}", r.roteiro);
+    assert!(!bodies(&server).await.iter().any(|b| b["questions"]["pick"].is_object()), "no question about a good start");
+    // Each effective step is on disk as soon as its effect is seen.
+    let diario = std::fs::read_to_string(pasta.join("diario").join("diario.jsonl")).unwrap();
+    let linhas: Vec<Value> = diario.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(linhas.len(), 1, "{diario}");
+    assert_eq!(linhas[0]["passo"]["acao"]["type"], "set_value");
+    assert_eq!(linhas[0]["execucao"].as_str(), r.registro.as_ref().unwrap().file_name().unwrap().to_str());
+}
+
+#[tokio::test]
+async fn stopped_goal_whose_steps_had_no_effect_records_nothing() {
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (mut op, _server) = setup(vec![select("invoke"), Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])),
+        Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
+    op.roteiros = Some(pasta.clone());
+    op.dados = Map::new();
+    let r = run(op, &con).await;
+    assert!(!r.ok, "{}", r.resumo());
+    assert!(roteiros(&pasta).is_empty(), "{:?}", r.roteiro);
 }
 
 #[tokio::test]
@@ -2083,8 +2103,7 @@ async fn stopped_goal_keeps_the_good_start_as_partial() {
     let pasta = tempfile::tempdir().unwrap().keep();
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
     let bloqueado = || Answer::Choice("BLOCKED", 0.9, 0.05);
-    let (mut op, _server) = setup(vec![select("set_value"), bloqueado(), help(json!([])), bloqueado(),
-        Answer::Pick("set_value Edit 'Nome'", 0.9)]).await;
+    let (mut op, _server) = setup(vec![select("set_value"), bloqueado(), help(json!([])), bloqueado()]).await;
     op.roteiros = Some(pasta.clone());
     let r = run(op, &con).await;
     assert!(!r.ok);
