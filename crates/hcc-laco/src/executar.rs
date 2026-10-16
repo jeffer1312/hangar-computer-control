@@ -258,6 +258,11 @@ fn invoca_editavel(acao: &Action, obs: &Observation) -> bool {
         .any(|e| &e.id == id && (e.role == "Edit" || e.actions.contains(&hcc_protocolo::ElementAction::SetValue))))
 }
 
+/// A recorded step goes through the same confirmation rule as a fresh pick: another goal may have authorized it.
+fn confirmacao_barrada(acao: &Action, obs: &Observation, objetivo: &str, secretos: &Segredos) -> bool {
+    Barreiras::sem_confirmar(vec![secretos.candidato(acao.clone(), obs)], obs, objetivo).0.is_empty()
+}
+
 fn com_dica(nome: &Option<String>, texto: String) -> String {
     match nome { Some(n) if texto.is_empty() => n.clone(), Some(n) => format!("{n}\n{texto}"), None => texto }
 }
@@ -535,6 +540,9 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
         let Some(acao) = roteiro::resolver_com(passo, &vista, &op.dados, &opcao.params) else {
             parou = Some(format!("trecho {} parou no passo {}: controle diferente do gravado", textos[i], n + 1)); break;
         };
+        if confirmacao_barrada(&acao, &vista, &op.texto, secretos) {
+            parou = Some(format!("trecho {} parou no passo {}: confirmação ou ação destrutiva que o objetivo não pede", textos[i], n + 1)); break;
+        }
         let nome = secretos.descricao(&acao, &vista, true);
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false)),
@@ -644,6 +652,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 let Some(acao) = roteiro::resolver(passo, &vista, &op.dados) else {
                     parou = motivo("janela da frente ou controle diferente do gravado"); break;
                 };
+                if confirmacao_barrada(&acao, &vista, &op.texto, secretos) {
+                    parou = motivo("confirmação ou ação destrutiva que o objetivo não pede"); break;
+                }
                 let nome = secretos.descricao(&acao, &vista, true);
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false)),

@@ -145,9 +145,12 @@ Pedido dito com outras palavras: sem arquivo para o texto exato, o Jev escolhe e
 pasta (só os que esta chamada consegue repetir, com as chaves de `dados` que eles usam) qual é a mesma tarefa, ou
 nenhum; vale a escolha com 80% ou mais, e o resultado diz `parecido com '<objetivo gravado>'`.
 
-Objetivo que parou: o Jev escolhe até qual passo o caminho ia certo (80% ou mais), e esse começo é gravado como
-variação `parcial` (depois das completas). Na repetição ele é refeito e o Jev segue dali; quando o objetivo
-concluir, as variações parciais saem.
+Objetivo que parou (por qualquer motivo, inclusive erro): os passos que deram certo viram variação `parcial`
+(depois das completas), sem perguntar ao Jev. Passo que deu certo = executado, com efeito na tela e sem
+divergência no campo; saem também os desfeitos (texto digitado e apagado em seguida, campo redigitado, algo
+aberto e fechado logo depois por Cancelar/Fechar/Esc). Cada passo bom entra na hora em
+`<pasta dos roteiros>/diario/diario.jsonl`, para não se perder se o processo cair. Na repetição a parcial é
+refeita e o Jev segue dali; quando o objetivo concluir, as variações parciais saem.
 
 Na próxima chamada igual, o laço repete os passos sem perguntar ao Jev: lê a tela, acha o controle, executa.
 Para na primeira divergência (janela diferente, controle ausente, ação recusada, tela que não mudou onde mudou
@@ -155,8 +158,10 @@ na gravação) e segue pelo Jev a partir da tela atual. O fim sempre passa pela 
 objetivo concluir, o roteiro é regravado. O resultado traz `roteiro: variação K de V, repetidos N de M passos; gravado em …`
 e os passos repetidos aparecem com `[roteiro]`. Apagar o arquivo ou `refazer=true` força o caminho pelo Jev.
 
-- Clique por coordenada nunca se repete: o roteiro devolve ao Jev ali, porque a coordenada não diz se o mesmo
-  item ainda está embaixo.
+- Clique por coordenada é gravado no menor controle com nome que estava embaixo e repetido no centro atual
+  desse controle; clique sem controle com nome embaixo não se repete (devolve ao Jev ali).
+- Passo repetido passa pela mesma regra de confirmação da escolha normal: confirmação de diálogo ou ação
+  destrutiva que o objetivo atual não pede para a repetição e devolve ao Jev.
 - Abrir um app é pulado quando a janela do passo seguinte já existe (não abre segunda instância).
 - Roteiro em que qualquer campo traria um valor secreto de `dados` (texto do objetivo, título, rótulo da visão)
   não é gravado; o resultado diz `roteiro: não gravado: contém um valor secreto`.
@@ -166,8 +171,9 @@ e os passos repetidos aparecem com `[roteiro]`. Apagar o arquivo ou `refazer=tru
 
 ### Pedaços reaproveitáveis (formato versão 3)
 
-Além do roteiro do objetivo, toda corrida que concluiu (e o começo certo de uma que parou) é cortada em pedaços
-que servem a outros objetivos: abrir um app, abrir um item pelo nome, pesquisar um termo. Ficam em
+Além do roteiro do objetivo, toda corrida (concluída ou não, só com os passos que deram certo) é cortada em
+pedaços que servem a outros objetivos, em qualquer app: abrir um app, abrir um item pelo nome, pesquisar um termo,
+preencher um diálogo (campo, upload, caixa, salvar). Ficam em
 `<pasta dos roteiros>/trechos/trecho-<descrição>-<hash>.json`, formato combinado com o gravador do navegador do Hangar:
 
 ```json
@@ -175,7 +181,11 @@ que servem a outros objetivos: abrir um app, abrir um item pelo nome, pesquisar 
  "contexto": "app", "variantes": [{"passos": [...], "usos": 2}]}
 ```
 
-- Corte: onde a janela da frente muda, ou onde um passo que mudou a tela também mudou o título (contadores à parte).
+- Corte: onde a janela da frente muda, onde um diálogo abre ou fecha (cada diálogo é uma sub-tarefa), ou onde um
+  passo que mudou a tela também mudou o título (contadores à parte).
+- Forma (`forma`): papéis e palavras dos controles do diálogo do primeiro passo (ou da janela), sem os valores do
+  objetivo. O pedaço só é oferecido numa tela de forma parecida (70% ou mais dos itens em comum), não pela frase do
+  objetivo. Entre controles iguais, vale o que está dentro do diálogo aberto.
 - Lacuna `{pN}`: um valor do objetivo (entre aspas, nome próprio, URL, termo depois de "pesquisar/buscar/procurar",
   valor não secreto de `dados`) com que a corrida agiu: nome do controle usado ou texto digitado. Valor visto só no
   título (o nome do app) fica fixo. No passo, `valor` pode ser `{"parametro": "pN"}`; nomes de controle levam o modelo
@@ -184,15 +194,16 @@ que servem a outros objetivos: abrir um app, abrir um item pelo nome, pesquisar 
   arquivo e soma `usos`. `contexto` é a classe da janela do primeiro passo (do app aberto, quando o pedaço abre um
   app; no navegador, o caminho da página), com dígitos tratados como um só (`/paciente/123` = `/paciente/9`).
 - Pedaço não guarda título: pode começar em qualquer tela da janela, e é conferido pela classe e pelos controles.
-- Repetição: sem roteiro para o objetivo, as opções são os pedaços cujo primeiro passo cabe na tela atual com as
+- Repetição: no primeiro ciclo (sem roteiro para o objetivo) e sempre que um diálogo abre ou fecha ou outra janela
+  vem para a frente, as opções são os pedaços cujo primeiro passo cabe na tela atual com as
   lacunas preenchidas pelos valores do objetivo (pedaço que abre um app só cabe se o app não estiver aberto). O Jev
   escolhe uma delas ou nenhuma (vale com 80% ou mais); cada passo é conferido, e a primeira divergência devolve ao
   Jev. Depois de um pedaço, procura o próximo (até 5); o mesmo pedaço com os mesmos valores não volta.
 - Caminho alternativo é outro pedaço: "clicar no item visível" só cabe com o item na tela; "abrir a busca e digitar"
   cabe sempre, e o Jev escolhe.
 - Limites: o corte e a lacuna são heurísticos (um rótulo citado no objetivo, como o nome de um campo, também vira
-  lacuna) e não se aprende o que nunca deu certo. Clique por coordenada não entra em pedaço. Segredo nunca vai para
-  o arquivo.
+  lacuna) e não se aprende o que nunca deu certo. Clique sem controle com nome embaixo não entra em pedaço. Segredo
+  nunca vai para o arquivo.
 
 ### Progresso durante `objetivo`
 

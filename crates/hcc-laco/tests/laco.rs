@@ -2445,3 +2445,26 @@ async fn a_failed_run_still_leaves_its_piece_on_disk() {
     assert!(!r.ok, "{}", r.resumo());
     assert_eq!(roteiros(&pasta.join("trechos")).len(), 1, "{:?}", r.roteiro);
 }
+
+#[tokio::test]
+async fn a_recorded_confirmation_is_not_replayed_when_the_goal_does_not_ask_for_it() {
+    let mut obs = tree("o1", "");
+    let botao = |id: &str, nome: &str, r: [i32; 4]| serde_json::from_value::<hcc_protocolo::Element>(json!({"id":id, "name":nome, "role":"Button",
+        "value":null, "enabled":true, "rect":r, "focused":false, "actions":["invoke"]})).unwrap();
+    obs.elements.push(serde_json::from_value(json!({"id":"d1", "name":"Quer mesmo trocar de modo?", "role":"Window", "value":null,
+        "enabled":true, "rect":[100,100,500,300], "focused":false, "actions":[]})).unwrap());
+    obs.elements.push(botao("b1", "Cancelar", [300, 250, 380, 280]));
+    obs.elements.push(botao("b2", "Sim, tenho certeza.", [390, 250, 490, 280]));
+    let pasta = tempfile::tempdir().unwrap().keep();
+    let (mut op, _server) = setup(vec![select("Cancelar"), done()]).await;
+    let mut passo = hcc_laco::roteiro::passo(&action(json!({"type":"invoke","target":"b2"})), &obs, &op.dados);
+    passo.mudou_tela = Some(true);
+    let gravado = hcc_laco::roteiro::juntar(None, &op.texto, vec![passo], false);
+    hcc_laco::roteiro::salvar(&hcc_laco::roteiro::arquivo(&pasta, &op.texto, &op.dados), &gravado).unwrap();
+    op.roteiros = Some(pasta);
+    let con = FakeConnector::new(vec![obs, tree("o2", "")]);
+    let r = run(op, &con).await;
+    let alvos: Vec<Option<String>> = con.state.lock().unwrap().acts.iter().map(|(a, _, _)| a.target.clone()).collect();
+    assert!(!alvos.contains(&Some("b2".into())), "{}", r.resumo());
+    assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("confirmação")), "{:?}", r.roteiro);
+}
