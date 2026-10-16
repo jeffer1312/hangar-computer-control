@@ -40,6 +40,9 @@ pub struct Trecho {
     #[serde(default)]
     pub parametros: BTreeMap<String, Parametro>,
     pub contexto: String,
+    /// Shape of the screen the piece starts on (see `forma`): it is offered only on a screen of a close shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forma: Vec<String>,
     /// Alternative ways of the same piece, latest first: the first whose first step fits the screen is replayed.
     pub variantes: Vec<VarianteTrecho>,
 }
@@ -85,6 +88,7 @@ pub fn juntar(anterior: Option<Trecho>, novo: Trecho) -> Trecho {
         for v in &mut novo.variantes { v.usos = v.usos.max(1); }
         return novo;
     };
+    if base.forma.is_empty() { base.forma = novo.forma; }
     for mut v in novo.variantes {
         let usos = base.variantes.iter().find(|a| mesmo(&a.passos, &v.passos)).map_or(0, |a| a.usos.max(1));
         base.variantes.retain(|a| !mesmo(&a.passos, &v.passos));
@@ -129,6 +133,8 @@ pub fn mesmo_titulo(gravado: &str, agora: &str) -> bool {
 /// A piece before its description is written: steps already templated, the slots it uses with their examples.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rascunho {
+    /// Index of its first step in the run.
+    pub inicio: usize,
     pub contexto: String,
     pub parametros: BTreeMap<String, Parametro>,
     pub passos: Vec<Passo>,
@@ -200,9 +206,31 @@ pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) 
         let contexto = if trecho.first().is_some_and(|p| p.acao.kind == ActionType::Launch) {
             passos.get(ini + 1).map(|p| p.janela.classe.clone()).or_else(|| classe_final.map(str::to_owned)).unwrap_or_default()
         } else { trecho.first().map(|p| p.janela.classe.clone()).unwrap_or_default() };
-        Rascunho { contexto, parametros, passos: trecho }
+        Rascunho { inicio: ini, contexto, parametros, passos: trecho }
     // A piece with no context would fit everywhere: an app opener would open the app again and again.
     }).filter(|r| !r.contexto.is_empty()).collect()
+}
+
+/// Shape of a screen: role and lowercased words of each control in the open dialog (or the whole window), digit runs
+/// collapsed. A control whose name holds one of the goal's values is left out, so screens that differ only by those
+/// values (a person, an item, a permission) have the same shape.
+pub fn forma(obs: &Observation, valores: &[String]) -> Vec<String> {
+    let escopo = crate::estado::dialogo_aberto(obs).map(|(_, r)| r);
+    let valores: Vec<String> = valores.iter().filter(|v| v.chars().count() >= 3).map(|v| v.to_lowercase()).collect();
+    let palavras = |t: &str| t.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    let mut f: Vec<String> = obs.elements.iter()
+        .filter(|e| escopo.is_none_or(|r| crate::estado::dentro_de(r, e)))
+        .filter(|e| { let n = e.name.to_lowercase(); !valores.iter().any(|v| n.contains(v.as_str())) })
+        .map(|e| format!("{}|{}", e.role, contexto_normal(&palavras(&e.name)))).collect();
+    f.sort();
+    f.dedup();
+    f
+}
+
+fn parecida(a: &[String], b: &[String]) -> bool {
+    let comuns = a.iter().filter(|t| b.contains(t)).count();
+    let todos = a.len() + b.len() - comuns;
+    todos > 0 && comuns * 10 >= todos * 7
 }
 
 /// A piece that fits the screen now, with the goal values in its slots.
@@ -219,9 +247,11 @@ pub struct Opcao {
 // ponytail: every binding of the goal's values is tried (capped); fine for the few slots a piece has.
 pub fn opcoes(pecas: &[(PathBuf, Trecho)], obs: &Observation, dados: &Map<String, Value>, valores: &[String]) -> Vec<Opcao> {
     let frente = obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| contexto_normal(&w.class_name)).unwrap_or_default();
+    let agora = forma(obs, valores);
     let valores: Vec<&String> = valores.iter().take(12).collect();
     let mut saida: Vec<Opcao> = Vec::new();
     for (t, (_, peca)) in pecas.iter().enumerate() {
+        if !peca.forma.is_empty() && !parecida(&peca.forma, &agora) { continue; }
         let abre = peca.variantes.iter().any(|v| v.passos.first().is_some_and(|p| p.acao.kind == ActionType::Launch));
         let cabe = if abre { !obs.windows.iter().any(|w| contexto_normal(&w.class_name) == contexto_normal(&peca.contexto)) }
             else { contexto_normal(&peca.contexto) == frente };
@@ -333,7 +363,7 @@ mod tests {
 
     fn trecho(passos: Vec<Passo>) -> Trecho {
         Trecho { versao: VERSAO_TRECHO, tipo: "trecho".into(), descricao: "abrir {p1}".into(),
-            parametros: BTreeMap::from([("p1".into(), Parametro { exemplo: "Ana".into() })]), contexto: "app".into(),
+            parametros: BTreeMap::from([("p1".into(), Parametro { exemplo: "Ana".into() })]), contexto: "app".into(), forma: vec![],
             variantes: vec![VarianteTrecho { passos, usos: 0 }] }
     }
 

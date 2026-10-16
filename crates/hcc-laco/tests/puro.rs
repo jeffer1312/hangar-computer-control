@@ -942,6 +942,29 @@ fn a_twin_inside_the_open_dialog_is_the_recorded_one() {
     assert_eq!(resolver(&p, &com_dialogo("Motivo"), &Map::new()), Some(invoke));
 }
 
+// A piece is offered on a screen of the same shape (the open dialog's controls), whatever the names the goal changes.
+#[test]
+fn a_piece_is_offered_only_on_a_screen_of_the_same_shape() {
+    use hcc_laco::roteiro::passo;
+    use hcc_laco::trecho::{Trecho, VarianteTrecho, VERSAO_TRECHO, forma, opcoes};
+    let gravada = com_dialogo("Motivo para Ana");
+    let f = forma(&gravada, &["Ana".to_owned()]);
+    assert!(f.contains(&"Edit|descrição".to_owned()) && f.contains(&"Button|salvar".to_owned()), "{f:?}");
+    assert!(!f.iter().any(|t| t.contains("ana")), "a goal value is not part of the shape: {f:?}");
+    let mut p = passo(&Action { kind: ActionType::Invoke, target: Some("b1".into()), ..Default::default() }, &gravada, &Map::new());
+    p.mudou_tela = Some(true);
+    let peca = Trecho { versao: VERSAO_TRECHO, tipo: "trecho".into(), descricao: "invoke Button 'Salvar'".into(), parametros: Default::default(),
+        contexto: "TMainForm".into(), forma: f, variantes: vec![VarianteTrecho { passos: vec![p], usos: 1 }] };
+    let pecas = vec![(std::path::PathBuf::from("x"), peca)];
+    assert_eq!(opcoes(&pecas, &com_dialogo("Motivo para Bia"), &Map::new(), &["Bia".to_owned()]).len(), 1);
+    let mut outra = com_dialogo("Excluir conta");
+    outra.elements.retain(|e| e.id != "c1");
+    for (n, nome) in ["Senha", "Confirmar senha", "Motivo"].iter().enumerate() {
+        outra.elements.push(el(&format!("x{n}"), nome, "Edit", &[ElementAction::SetValue], Some(""), Some(Rect(120, 210 + 30 * n as i32, 480, 230 + 30 * n as i32))));
+    }
+    assert!(opcoes(&pecas, &outra, &Map::new(), &[]).is_empty());
+}
+
 mod passos_bons {
     use super::*;
     use hcc_laco::roteiro::passo;
