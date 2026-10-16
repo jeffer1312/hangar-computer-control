@@ -904,6 +904,44 @@ fn a_click_is_learned_on_the_control_under_it_and_replayed_where_it_is_now() {
     assert_eq!(hcc_laco::roteiro::resolver(&vazio, &depois, &Map::new()), None);
 }
 
+fn com_dialogo(nome: &str) -> Observation {
+    let i = [ElementAction::Invoke];
+    obs(vec![
+        el("p1", "Salvar", "Button", &i, None, Some(Rect(10, 10, 60, 30))),
+        el("d1", nome, "Dialog", &[], None, Some(Rect(100, 100, 500, 400))),
+        el("c1", "Descrição", "Edit", &[ElementAction::SetValue], Some(""), Some(Rect(120, 150, 480, 200))),
+        el("b1", "Salvar", "Button", &i, None, Some(Rect(400, 350, 480, 380))),
+    ])
+}
+
+// Opening or closing a dialog ends a sub-task: a run is cut there, and the dialog's name takes the goal's values as slots.
+#[test]
+fn a_run_is_cut_where_a_dialog_opens_or_closes() {
+    use hcc_laco::roteiro::passo;
+    let invoke = |id: &str| Action { kind: ActionType::Invoke, target: Some(id.into()), ..Default::default() };
+    let sem = obs(vec![el("a1", "Abrir permissão", "Button", &[ElementAction::Invoke], None, Some(Rect(10, 10, 60, 30)))]);
+    let dentro = com_dialogo("Motivo para Ana");
+    let mut passos = vec![passo(&invoke("a1"), &sem, &Map::new()),
+        passo(&Action { value: Some("x".into()), ..invoke("c1") }, &dentro, &Map::new()), passo(&invoke("b1"), &dentro, &Map::new())];
+    for p in &mut passos { p.mudou_tela = Some(true); }
+    assert_eq!(passos[1].dialogo.as_deref(), Some("Motivo para Ana"));
+    assert_eq!(passos[0].dialogo, None);
+    let pecas = hcc_laco::trecho::cortar(&passos, &["Ana".to_owned()], None);
+    assert_eq!(pecas.iter().map(|p| p.passos.len()).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(pecas[1].passos[0].dialogo.as_deref(), Some("Motivo para {p1}"));
+}
+
+// The page behind has another "Salvar" now: the one inside the open dialog is the recorded one.
+#[test]
+fn a_twin_inside_the_open_dialog_is_the_recorded_one() {
+    use hcc_laco::roteiro::{passo, resolver};
+    let invoke = Action { kind: ActionType::Invoke, target: Some("b1".into()), ..Default::default() };
+    let mut gravado = com_dialogo("Motivo");
+    gravado.elements.remove(0);
+    let p = passo(&invoke, &gravado, &Map::new());
+    assert_eq!(resolver(&p, &com_dialogo("Motivo"), &Map::new()), Some(invoke));
+}
+
 mod passos_bons {
     use super::*;
     use hcc_laco::roteiro::passo;

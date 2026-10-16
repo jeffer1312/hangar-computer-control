@@ -39,6 +39,26 @@ pub fn assinatura_tela(obs: &Observation) -> AssinaturaTela {
     (janela, titulo, itens, foco)
 }
 
+const DIALOGOS: [&str; 4] = ["Window", "Dialog", "Alert", "AlertDialog"];
+
+/// The dialogs drawn over the foreground window, in tree order (the last is the topmost). A "window" as big as
+/// the app is the app itself, not a dialog over it.
+pub fn dialogos(obs: &Observation) -> impl Iterator<Item = (&hcc_protocolo::Element, Rect)> {
+    let area = |r: Rect| i64::from(r.2 - r.0) * i64::from(r.3 - r.1);
+    let janela = obs.windows.iter().find(|w| w.id == obs.foreground).map_or(i64::MAX, |w| area(w.rect));
+    obs.elements.iter().filter(|e| DIALOGOS.contains(&e.role.as_str()))
+        .filter_map(move |d| d.rect.filter(|r| area(*r) * 10 < janela * 8).map(|r| (d, r)))
+}
+
+pub fn dialogo_aberto(obs: &Observation) -> Option<(&hcc_protocolo::Element, Rect)> {
+    dialogos(obs).last()
+}
+
+/// The control's center lies in `r`.
+pub fn dentro_de(r: Rect, e: &hcc_protocolo::Element) -> bool {
+    e.rect.is_some_and(|q| { let (x, y) = crate::candidatos::centro(q); r.0 <= x && x < r.2 && r.1 <= y && y < r.3 })
+}
+
 pub fn estado_compacto(
     goal: &str,
     dados: &Map<String, Value>,

@@ -64,6 +64,9 @@ pub struct Passo {
     pub acao: Action,
     pub valor: Option<Valor>,
     pub mudou_tela: Option<bool>,
+    /// Name of the dialog open over the window when the step ran: a dialog opening or closing ends a sub-task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogo: Option<String>,
 }
 
 /// One way the goal was done; installations differ (app version in a title, another build), so a file keeps several.
@@ -162,7 +165,8 @@ pub fn passo(acao: &Action, obs: &Observation, dados: &Map<String, Value>) -> Pa
     let valor = acao.value.as_ref().map(|v| {
         dados.iter().find(|(_, d)| py_str(d) == *v).map_or_else(|| Valor::Literal(v.clone()), |(k, _)| Valor::Dados(k.clone()))
     });
-    Passo { janela: janela(obs), alvo, acao: Action { target: None, value: None, ..acao.clone() }, valor, mudou_tela: None }
+    Passo { janela: janela(obs), alvo, acao: Action { target: None, value: None, ..acao.clone() }, valor, mudou_tela: None,
+        dialogo: crate::estado::dialogo_aberto(obs).map(|(d, _)| d.name.clone()) }
 }
 
 pub fn resolver(passo: &Passo, obs: &Observation, dados: &Map<String, Value>) -> Option<Action> {
@@ -199,8 +203,13 @@ fn resolver_em(passo: &Passo, obs: &Observation, dados: &Map<String, Value>, par
         Some(Alvo::Elemento { role, name, ordem, .. }) => {
             let name = modelo(name)?;
             let gemeos: Vec<_> = obs.elements.iter().filter(|e| &e.role == role && e.name == name).collect();
-            if gemeos.len() != ordem.de { return None; }
-            Some(gemeos.get(ordem.indice)?.id.clone())
+            if gemeos.len() == ordem.de { Some(gemeos.get(ordem.indice)?.id.clone()) } else {
+                // The screen behind changed its count of twins: recorded inside a dialog, the twin inside the open one.
+                let (_, r) = crate::estado::dialogo_aberto(obs).filter(|_| passo.dialogo.is_some())?;
+                let dentro: Vec<_> = gemeos.iter().filter(|e| crate::estado::dentro_de(r, e)).collect();
+                if dentro.len() != 1 { return None; }
+                Some(dentro[0].id.clone())
+            }
         }
         Some(Alvo::Janela(j)) => {
             let titulo = modelo(&j.titulo)?;
@@ -342,7 +351,7 @@ mod tests {
             alvo: Some(Alvo::Elemento { role: "ListItem".into(), name: "{p1}, Mensagem direta".into(), text: None, placeholder: None,
                 test_id: None, ordem: Ordem { indice: 0, de: 1 } }),
             acao: Action { kind: ActionType::Text, ..Default::default() },
-            valor: Some(Valor::Parametro("p1".into())), mudou_tela: None,
+            valor: Some(Valor::Parametro("p1".into())), mudou_tela: None, dialogo: None,
         };
         let params = BTreeMap::from([("p1".to_owned(), "Rafael".to_owned())]);
         let acao = resolver_com(&gravado, &agora, &Map::new(), &params).unwrap();

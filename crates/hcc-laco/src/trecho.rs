@@ -143,10 +143,13 @@ pub struct Rascunho {
 // taken as a slot there too, and replay's per-step check is the net.
 pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) -> Vec<Rascunho> {
     let escapar = |t: &str| t.replace('{', "{{").replace('}', "}}");
-    let nomes = |p: &Passo| -> Vec<String> { match &p.alvo {
-        Some(Alvo::Elemento { name, text, placeholder, .. }) => [Some(name), text.as_ref(), placeholder.as_ref()].into_iter().flatten().cloned().collect(),
-        _ => vec![],
-    } };
+    let nomes = |p: &Passo| -> Vec<String> {
+        let mut n: Vec<String> = p.dialogo.iter().cloned().collect();
+        if let Some(Alvo::Elemento { name, text, placeholder, .. }) = &p.alvo {
+            n.extend([Some(name), text.as_ref(), placeholder.as_ref()].into_iter().flatten().cloned());
+        }
+        n
+    };
     let literal = |p: &Passo| match &p.valor { Some(Valor::Literal(v)) => Some(v.clone()), _ => None };
     let mut variaveis: Vec<&String> = valores.iter().filter(|v| v.chars().count() >= 3)
         .filter(|v| passos.iter().any(|p| nomes(p).iter().any(|n| n.contains(v.as_str())) || literal(p).is_some_and(|l| l.contains(v.as_str()))))
@@ -155,7 +158,8 @@ pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) 
     let mut inicios = vec![0];
     for i in 0..passos.len().saturating_sub(1) {
         let (a, b) = (&passos[i], &passos[i + 1]);
-        if a.janela.classe != b.janela.classe || (a.mudou_tela == Some(true) && !mesmo_titulo(&a.janela.titulo, &b.janela.titulo)) {
+        if a.janela.classe != b.janela.classe || a.dialogo != b.dialogo
+            || (a.mudou_tela == Some(true) && !mesmo_titulo(&a.janela.titulo, &b.janela.titulo)) {
             inicios.push(i + 1);
         }
     }
@@ -173,8 +177,12 @@ pub fn cortar(passos: &[Passo], valores: &[String], classe_final: Option<&str>) 
         let trecho: Vec<Passo> = passos[ini..fim].iter().map(|p| {
             let mut p = p.clone();
             p.janela.titulo = String::new();
+            let mut campos: Vec<&mut String> = p.dialogo.iter_mut().collect();
             if let Some(Alvo::Elemento { name, text, placeholder, .. }) = &mut p.alvo {
-                for campo in [Some(name), text.as_mut(), placeholder.as_mut()].into_iter().flatten() {
+                campos.extend([Some(name), text.as_mut(), placeholder.as_mut()].into_iter().flatten());
+            }
+            {
+                for campo in campos {
                     let mut t = escapar(campo);
                     for v in &variaveis {
                         let e = escapar(v);
@@ -320,7 +328,7 @@ mod tests {
         Passo { janela: Janela { classe: "app".into(), titulo: "App".into() },
             alvo: Some(Alvo::Elemento { role: "Button".into(), name: nome.into(), text: None, placeholder: None, test_id: None,
                 ordem: Ordem { indice: 0, de: 1 } }),
-            acao: Action { kind: ActionType::Invoke, ..Default::default() }, valor: None, mudou_tela: Some(true) }
+            acao: Action { kind: ActionType::Invoke, ..Default::default() }, valor: None, mudou_tela: Some(true), dialogo: None }
     }
 
     fn trecho(passos: Vec<Passo>) -> Trecho {
@@ -333,7 +341,7 @@ mod tests {
         Passo { janela: Janela { classe: classe.into(), titulo: titulo.into() },
             alvo: alvo.map(|n| Alvo::Elemento { role: "ListItem".into(), name: n.into(), text: None, placeholder: None, test_id: None,
                 ordem: Ordem { indice: 0, de: 1 } }),
-            acao, valor, mudou_tela: Some(mudou) }
+            acao, valor, mudou_tela: Some(mudou), dialogo: None }
     }
 
     // Generic: open an app, open an item by a name from the goal, search a term from the goal.
