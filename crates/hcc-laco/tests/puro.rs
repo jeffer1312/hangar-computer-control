@@ -888,6 +888,22 @@ fn a_file_named_in_the_data_gets_a_double_click_in_any_file_list() {
     assert_eq!(duplos, vec![Action { target: Some("e1".into()), ..mouse(200, 210, MouseMode::Double) }]);
 }
 
+// A click by coordinate is learned as a click on the named control under it, and replayed at its new place.
+#[test]
+fn a_click_is_learned_on_the_control_under_it_and_replayed_where_it_is_now() {
+    let i = [ElementAction::Invoke];
+    let antes = obs(vec![
+        el("e1", "Painel", "Group", &[], None, Some(Rect(0, 0, 800, 600))),
+        el("e2", "Começar", "Button", &i, None, Some(Rect(100, 100, 200, 140))),
+    ]);
+    let p = hcc_laco::roteiro::passo(&mouse(150, 120, MouseMode::Click), &antes, &Map::new());
+    let depois = obs(vec![el("e9", "Começar", "Button", &i, None, Some(Rect(300, 400, 400, 440)))]);
+    assert_eq!(hcc_laco::roteiro::resolver(&p, &depois, &Map::new()),
+        Some(Action { target: Some("e9".into()), ..mouse(350, 420, MouseMode::Click) }));
+    let vazio = hcc_laco::roteiro::passo(&mouse(700, 500, MouseMode::Click), &obs(vec![]), &Map::new());
+    assert_eq!(hcc_laco::roteiro::resolver(&vazio, &depois, &Map::new()), None);
+}
+
 mod passos_bons {
     use super::*;
     use hcc_laco::roteiro::passo;

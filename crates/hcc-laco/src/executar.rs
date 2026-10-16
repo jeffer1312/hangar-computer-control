@@ -378,7 +378,7 @@ fn gravar_trechos(op: &Opcoes, secretos: &Segredos, passos: &[roteiro::Passo], f
     let (mut gravados, mut falhas) = (0, Vec::new());
     let classe_final = fim.and_then(|o| o.windows.iter().find(|w| w.id == o.foreground)).map(|w| w.class_name.as_str());
     for r in trecho::cortar(passos, &valores, classe_final) {
-        if r.passos.is_empty() || r.passos.iter().any(|p| p.acao.kind == ActionType::Mouse) { continue; }
+        if r.passos.is_empty() || r.passos.iter().any(|p| p.acao.kind == ActionType::Mouse && p.alvo.is_none()) { continue; }
         // A browser's window class is the same on every site: a piece typing a secret could be offered on another.
         if r.passos.iter().any(|p| matches!(&p.valor, Some(roteiro::Valor::Dados(k)) if crate::candidatos::chave_secreta(k))) {
             falhas.push("trecho que digita segredo fica de fora".to_owned()); continue;
@@ -569,7 +569,6 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     && recentes.last().is_some_and(|u| u.screen_changed == Some(false)) {
                     parou = motivo("a tela não mudou depois do passo anterior"); break;
                 }
-                if passo.acao.kind == ActionType::Mouse { parou = motivo("clique por coordenada volta ao Jev"); break; }
                 let Some(acao) = roteiro::resolver(passo, &vista, &op.dados) else {
                     parou = motivo("janela da frente ou controle diferente do gravado"); break;
                 };
