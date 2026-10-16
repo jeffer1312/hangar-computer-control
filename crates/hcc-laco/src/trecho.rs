@@ -236,6 +236,55 @@ pub fn opcoes(pecas: &[(PathBuf, Trecho)], obs: &Observation, dados: &Map<String
     saida
 }
 
+/// A step as it ran: `tela` identifies the screen right before it (a hash of the screen signature).
+#[derive(Clone, Debug)]
+pub struct Feito {
+    pub passo: Passo,
+    pub ok: bool,
+    pub tela: u64,
+}
+
+/// The steps worth learning, by index: ran ok and changed the screen, and were not undone later. Undone: a typing
+/// erased right after (select all, delete) or typed again into the same field; something opened and closed at once
+/// by a cancel, close or Escape that brought back the screen it was opened from.
+pub fn bons(feitos: &[Feito], tela_final: u64) -> Vec<usize> {
+    let tela_depois = |i: usize| feitos.get(i + 1).map_or(tela_final, |f| f.tela);
+    let mut ficam: Vec<usize> = (0..feitos.len()).filter(|&i| feitos[i].ok && feitos[i].passo.mudou_tela == Some(true)).collect();
+    let digita = |p: &Passo| matches!(p.acao.kind, ActionType::SetValue | ActionType::Text) && matches!(p.alvo, Some(Alvo::Elemento { .. }));
+    let teclas = |p: &Passo| p.acao.keys.as_deref().unwrap_or_default().iter().map(|k| k.to_lowercase()).collect::<Vec<_>>();
+    let apaga = |p: &Passo| p.acao.kind == ActionType::Keys && teclas(p).iter().any(|k| k == "delete" || k == "backspace");
+    let cancela = |p: &Passo| match (&p.alvo, p.acao.kind) {
+        (_, ActionType::Keys) => teclas(p) == ["escape"],
+        (Some(Alvo::Elemento { role, name, .. }), ActionType::Invoke | ActionType::Mouse) => role == "Button" && {
+            let n: String = name.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+            ["cancelar", "cancel", "fechar", "close", "não", "nao", "no"].contains(&n.trim())
+        },
+        _ => false,
+    };
+    let mut fora = vec![false; ficam.len()];
+    for a in 0..ficam.len() {
+        let p = &feitos[ficam[a]].passo;
+        if fora[a] { continue; }
+        if digita(p) {
+            // Retyped in the same field: only the last typing counts.
+            if ficam[a + 1..].iter().take(3).any(|&j| digita(&feitos[j].passo) && feitos[j].passo.alvo == p.alvo) { fora[a] = true; continue; }
+            // Erased by keys right after: the typing and the keys up to the delete go.
+            let seguintes: Vec<usize> = (a + 1..ficam.len()).take(3).take_while(|&b| feitos[ficam[b]].passo.acao.kind == ActionType::Keys).collect();
+            if let Some(&fim) = seguintes.iter().find(|&&b| apaga(&feitos[ficam[b]].passo)) {
+                for b in a..=fim { fora[b] = true; }
+            }
+            continue;
+        }
+        if let Some(b) = (a + 1 < ficam.len()).then_some(a + 1)
+            && cancela(&feitos[ficam[b]].passo) && !cancela(p) && tela_depois(ficam[b]) == feitos[ficam[a]].tela {
+            fora[a] = true; fora[b] = true;
+        }
+    }
+    let mut n = 0;
+    ficam.retain(|_| { n += 1; !fora[n - 1] });
+    ficam
+}
+
 /// The piece's description: its steps, slots kept. Deterministic, so the same way always lands in the same file.
 pub fn resumo(passos: &[Passo]) -> String {
     passos.iter().map(|p| {

@@ -887,3 +887,48 @@ fn a_file_named_in_the_data_gets_a_double_click_in_any_file_list() {
         .filter(|a| a.mode == Some(MouseMode::Double)).collect();
     assert_eq!(duplos, vec![Action { target: Some("e1".into()), ..mouse(200, 210, MouseMode::Double) }]);
 }
+
+mod passos_bons {
+    use super::*;
+    use hcc_laco::roteiro::passo;
+    use hcc_laco::trecho::{Feito, bons};
+
+    fn feito(acao: Action, tela: u64, ok: bool, mudou: bool) -> Feito {
+        let i = [ElementAction::Invoke, ElementAction::SetValue];
+        let o = obs(vec![
+            el("e1", "Entrada da pesquisa", "Edit", &i, Some(""), Some(Rect(0, 0, 100, 20))),
+            el("e2", "Começar", "Button", &i, None, Some(Rect(0, 40, 100, 60))),
+            el("e3", "Cancelar", "Button", &i, None, Some(Rect(0, 70, 100, 90))),
+            el("e4", "Mais opções", "Button", &i, None, Some(Rect(0, 100, 100, 120))),
+        ]);
+        let mut p = passo(&acao, &o, &Map::new());
+        p.mudou_tela = Some(mudou);
+        Feito { passo: p, ok, tela }
+    }
+    fn alvo(kind: ActionType, id: &str) -> Action { Action { kind, target: Some(id.into()), ..Default::default() } }
+    fn teclas(k: &[&str]) -> Action { Action { kind: ActionType::Keys, keys: Some(k.iter().map(|s| s.to_string()).collect()), ..Default::default() } }
+
+    // A text typed into the wrong box and erased, a menu opened and cancelled, a step without effect: none is learned.
+    #[test]
+    fn undone_or_ineffective_steps_are_not_learned() {
+        let digitar = Action { value: Some("descrição longa".into()), ..alvo(ActionType::SetValue, "e1") };
+        let feitos = vec![
+            feito(digitar, 1, true, true),
+            feito(teclas(&["ctrl", "a"]), 2, true, true),
+            feito(teclas(&["Delete"]), 3, true, true),
+            feito(alvo(ActionType::Invoke, "e4"), 4, true, true),
+            feito(alvo(ActionType::Invoke, "e3"), 5, true, true),
+            feito(alvo(ActionType::Invoke, "e2"), 4, true, false),
+            feito(alvo(ActionType::Invoke, "e2"), 4, true, true),
+        ];
+        assert_eq!(bons(&feitos, 9), vec![6]);
+    }
+
+    #[test]
+    fn a_field_typed_again_keeps_only_the_last_typing() {
+        let digitar = |v: &str| Action { value: Some(v.into()), ..alvo(ActionType::SetValue, "e1") };
+        let feitos = vec![feito(digitar("Ana"), 1, true, true), feito(digitar("Ana Maria"), 2, true, true),
+            feito(alvo(ActionType::Invoke, "e2"), 3, false, true)];
+        assert_eq!(bons(&feitos, 9), vec![1]);
+    }
+}
