@@ -824,3 +824,54 @@ fn a_state_word_is_not_a_request_to_act() {
     assert_eq!(hcc_laco::barreiras::sem_acao_pedida("verificar se \"Salvar\" está ativo e marcado", &o, &[]), None);
     assert!(hcc_laco::barreiras::sem_acao_pedida("ativar \"Salvar\"", &o, &[]).is_some());
 }
+
+fn confirmacao() -> Observation {
+    let i = [ElementAction::Invoke, ElementAction::Focus];
+    obs(vec![
+        el("e1", "Modo do aplicativo", "Button", &i, None, Some(Rect(900, 240, 930, 270))),
+        el("e83", "Quer mesmo trocar para o modo de desenvolvimento?", "Window", &[ElementAction::Focus], None, Some(Rect(660, 375, 1260, 595))),
+        el("e98", "Fechar \u{200b}", "Button", &i, None, Some(Rect(1212, 383, 1252, 419))),
+        el("e99", "Cancelar", "Button", &i, None, Some(Rect(991, 543, 1080, 579))),
+        el("e100", "Sim, tenho certeza.", "Button", &i, None, Some(Rect(1087, 543, 1244, 579))),
+        el("e200", "Deletar", "MenuItem", &i, None, Some(Rect(10, 10, 60, 30))),
+        el("e201", "Abrir conversa", "MenuItem", &i, None, Some(Rect(10, 40, 60, 60))),
+    ])
+}
+
+fn invoke(id: &str) -> Action { Action { kind: ActionType::Invoke, target: Some(id.into()), ..Default::default() } }
+
+#[test]
+fn an_unrequested_confirmation_or_destructive_item_is_never_offered() {
+    let o = confirmacao();
+    let cands: Vec<Candidato> = [invoke("e100"), mouse(1150, 560, MouseMode::Click), invoke("e99"), invoke("e98"), invoke("e200"), invoke("e201")]
+        .into_iter().map(candidato).collect();
+    let (ficam, dica) = Barreiras::sem_confirmar(cands.clone(), &o, "abrir a conversa da Ana no ProChat");
+    let alvos: Vec<Action> = ficam.into_iter().map(|c| c.acao).collect();
+    assert_eq!(alvos, vec![invoke("e99"), invoke("e98"), invoke("e201")]);
+    let dica = dica.unwrap();
+    assert!(dica.contains("Quer mesmo trocar para o modo de desenvolvimento?") && dica.contains("Cancelar"), "{dica}");
+    // Asked for in the goal, they stay.
+    let (ficam, _) = Barreiras::sem_confirmar(cands.clone(), &o, "trocar para o modo de desenvolvimento e confirmar com \"Sim, tenho certeza.\"");
+    assert!(ficam.iter().any(|c| c.acao == invoke("e100")));
+    let (ficam, _) = Barreiras::sem_confirmar(cands, &o, "deletar a conversa da Ana");
+    assert!(ficam.iter().any(|c| c.acao == invoke("e200")));
+}
+
+#[test]
+fn an_unnamed_button_gets_no_blind_click() {
+    let o = obs(vec![el("e1", "", "Button", &[ElementAction::Focus], None, Some(Rect(900, 240, 930, 270)))]);
+    assert!(candidatos(&o, &Map::new(), &HashSet::new()).iter().all(|c| c.acao.kind != ActionType::Mouse));
+}
+
+#[test]
+fn a_notice_over_the_screen_is_dismissed_first() {
+    let i = [ElementAction::Invoke, ElementAction::Focus];
+    let aviso = el("d1", "Processando arquivo", "Dialog", &[], None, Some(Rect(100, 100, 400, 300)));
+    let fechar = el("b1", "Fechar", "Button", &i, None, Some(Rect(300, 250, 380, 280)));
+    let (_, dica) = Barreiras::sem_confirmar(vec![], &obs(vec![aviso.clone(), fechar.clone()]), "salvar o formulário");
+    assert!(dica.is_some_and(|d| d.contains("'Processando arquivo'") && d.contains("dismiss it with 'Fechar'")));
+    // A form dialog with fields is the work itself, not a notice.
+    let campo = el("c1", "Descrição", "Edit", &[ElementAction::SetValue], Some(""), Some(Rect(120, 150, 380, 200)));
+    let (_, dica) = Barreiras::sem_confirmar(vec![], &obs(vec![aviso, fechar, campo]), "salvar o formulário");
+    assert_eq!(dica, None);
+}

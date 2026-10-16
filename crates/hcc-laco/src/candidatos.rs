@@ -119,7 +119,8 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
     for e in obs.elements.iter().filter(|e| e.enabled) {
         let sem_padrao = e.actions.iter().all(|a| *a == ElementAction::Focus);
         // Menu VCL ignores UIA Invoke/Expand, and a link inside a list item has no pattern: real click.
-        if let Some(r) = e.rect.filter(|_| (e.role == "MenuItem" || sem_padrao) && CLICAVEIS.contains(&e.role.as_str())) {
+        // A control with no name gets none: nobody can tell what a blind click there does.
+        if let Some(r) = e.rect.filter(|_| (e.role == "MenuItem" || sem_padrao) && CLICAVEIS.contains(&e.role.as_str()) && !e.name.trim().is_empty()) {
             let (x, y) = centro(r);
             acoes.push(clique(Some(e.id.clone()), x, y));
             continue;

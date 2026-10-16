@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use hcc_protocolo::{Action, ActionType, Observation};
+use hcc_protocolo::{Action, ActionType, Observation, Rect};
 use regex::Regex;
 
 use crate::candidatos::{centro, clique};
@@ -16,6 +16,19 @@ static PEDE_FECHAR: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+const DIALOGOS: [&str; 4] = ["Window", "Dialog", "Alert", "AlertDialog"];
+const CAMPOS: [&str; 6] = ["Edit", "CheckBox", "ComboBox", "RadioButton", "List", "Document"];
+static CANCELAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(cancelar|cancel|não|nao|no|voltar|back)$").unwrap());
+static FECHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(fechar|close|x|×|dispensar|dismiss)$").unwrap());
+static DESTRUIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(delet\w*|exclu\w*|apag\w*|remov\w*|desconect\w*|disconnect\w*|desinstal\w*|uninstall\w*|delete)\b").unwrap()
+});
+
+/// Lowercase words only: punctuation and invisible characters out, so "Fechar \u{200b}" reads "fechar".
+fn palavras(texto: &str) -> String {
+    casefold(texto).split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+}
 
 const OFERTA: &str = "; a real mouse click on the same control is now offered";
 
@@ -236,6 +249,47 @@ impl Barreiras {
         }
         self.anterior = textos;
         None
+    }
+
+    /// A dialog's confirmation (the button beside its Cancel) and a destructive control (delete, remove) run only
+    /// when the goal names them: Jev's risk score is a guess, these rules are not. A click on their area counts too.
+    pub fn sem_confirmar(cands: Vec<Candidato>, obs: &Observation, objetivo: &str) -> (Vec<Candidato>, Option<String>) {
+        let pedido = palavras(objetivo);
+        let pede = |nome: &str| { let n = palavras(nome); !n.is_empty() && pedido.contains(&n) };
+        let dentro_de = |r: Rect, e: &hcc_protocolo::Element| e.rect.is_some_and(|q| { let (x, y) = centro(q); r.0 <= x && x < r.2 && r.1 <= y && y < r.3 });
+        let mut proibidos: Vec<&hcc_protocolo::Element> = Vec::new();
+        let mut dica = None;
+        let area = |r: Rect| i64::from(r.2 - r.0) * i64::from(r.3 - r.1);
+        let janela = obs.windows.iter().find(|w| w.id == obs.foreground).map_or(i64::MAX, |w| area(w.rect));
+        for d in obs.elements.iter().filter(|e| DIALOGOS.contains(&e.role.as_str())) {
+            // A "window" as big as the app is the app itself, not a dialog over it.
+            let Some(r) = d.rect.filter(|r| area(*r) * 10 < janela * 8) else { continue };
+            let botoes: Vec<&hcc_protocolo::Element> = obs.elements.iter().filter(|e| e.role == "Button" && dentro_de(r, e)).collect();
+            let Some(cancelar) = botoes.iter().find(|b| CANCELAR.is_match(&palavras(&b.name))) else {
+                // Only dismiss buttons and nothing to fill: a notice covering the screen, closed before going on.
+                let campos = obs.elements.iter().any(|e| CAMPOS.contains(&e.role.as_str()) && dentro_de(r, e));
+                if let Some(fechar) = botoes.iter().find(|b| FECHAR.is_match(&palavras(&b.name)) || palavras(&b.name) == "ok")
+                    .filter(|_| !campos && !pede(&d.name) && botoes.iter().all(|b| FECHAR.is_match(&palavras(&b.name)) || palavras(&b.name) == "ok")) {
+                    dica.get_or_insert_with(|| format!("A notice covers the screen ('{}'): dismiss it with '{}' before anything else.",
+                        d.name.trim(), fechar.name.trim()));
+                }
+                continue;
+            };
+            let confirmam: Vec<&hcc_protocolo::Element> = botoes.iter().copied()
+                .filter(|b| !CANCELAR.is_match(&palavras(&b.name)) && !FECHAR.is_match(&palavras(&b.name))).collect();
+            if confirmam.is_empty() || pede(&d.name) || confirmam.iter().any(|b| pede(&b.name)) { continue; }
+            dica.get_or_insert_with(|| format!("A confirmation dialog the goal does not ask for is open ('{}'): never confirm it, \
+                close it with '{}'.", d.name.trim(), cancelar.name.trim()));
+            proibidos.extend(confirmam);
+        }
+        if !DESTRUIR.is_match(&pedido) {
+            proibidos.extend(obs.elements.iter().filter(|e| DESTRUIR.is_match(&palavras(&e.name))));
+        }
+        let ficam = cands.into_iter().filter(|c| !proibidos.iter().any(|e| {
+            c.acao.target.as_deref() == Some(e.id.as_str())
+                || matches!((c.acao.kind, c.acao.x, c.acao.y, e.rect), (ActionType::Mouse, Some(x), Some(y), Some(q)) if q.0 <= x && x < q.2 && q.1 <= y && y < q.3)
+        })).collect();
+        (ficam, dica)
     }
 
     pub fn tres_sem_efeito(hist: &[Registro]) -> Option<String> {

@@ -2321,3 +2321,21 @@ async fn a_secret_typed_wrong_never_shows_the_partial_value() {
     // The field itself is on screen and goes in `elements`; what this check writes must not repeat it.
     assert!(!bodies(&server).await.iter().any(|b| b["state"]["recentActions"].to_string().contains("s3gre")));
 }
+
+#[tokio::test]
+async fn an_open_confirmation_is_never_offered_and_jev_is_told_to_cancel() {
+    let mut obs = tree("o1", "");
+    let botao = |id: &str, nome: &str, r: [i32; 4]| serde_json::from_value::<hcc_protocolo::Element>(json!({"id":id, "name":nome, "role":"Button",
+        "value":null, "enabled":true, "rect":r, "focused":false, "actions":["invoke"]})).unwrap();
+    obs.elements.push(serde_json::from_value(json!({"id":"d1", "name":"Quer mesmo trocar de modo?", "role":"Window", "value":null,
+        "enabled":true, "rect":[100,100,500,300], "focused":false, "actions":[]})).unwrap());
+    obs.elements.push(botao("b1", "Cancelar", [300, 250, 380, 280]));
+    obs.elements.push(botao("b2", "Sim, tenho certeza.", [390, 250, 490, 280]));
+    let con = FakeConnector::new(vec![obs, tree("o2", "Ana")]);
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let primeiro = &bodies(&server).await[0];
+    assert!(!primeiro["questions"]["action"]["criteria"].to_string().contains("Sim, tenho certeza"));
+    assert!(primeiro["state"].to_string().contains("never confirm it, close it with 'Cancelar'"), "{}", primeiro["state"]);
+}

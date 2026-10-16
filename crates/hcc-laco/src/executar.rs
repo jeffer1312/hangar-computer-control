@@ -718,8 +718,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
             (a, b) => a.or(b),
         };
-        let mut acoes: Vec<Candidato> = segurar_segredos(Barreiras::barrar(cands, recentes), &op.texto, recentes, &secretos.valores)
-            .into_iter().filter(|c| !texto_sem_alvo_barrado(&c.acao, foco_escolhido)).collect();
+        let (acoes, confirmacao) = Barreiras::sem_confirmar(segurar_segredos(Barreiras::barrar(cands, recentes), &op.texto, recentes, &secretos.valores), &obs, &op.texto);
+        let mut acoes: Vec<Candidato> = acoes.into_iter().filter(|c| !texto_sem_alvo_barrado(&c.acao, foco_escolhido)).collect();
         if let Some(mut clique) = Barreiras::reclique(recentes, &obs) {
             clique.descricao = secretos.texto(&clique.descricao);
             acoes.push(clique);
@@ -727,7 +727,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let parecido = nome_parecido(&op.texto, &obs);
         let nome = parecido.as_ref().map(|(dita, tela)| format!(
             "'{dita}' in the goal is likely a speech transcription of '{tela}', the only similar name on screen; treat it as '{tela}'."));
-        let (mut dica, mut ajudou, mut direta) = (com_dica(&nome, divergencia.clone().unwrap_or_default()), false, None);
+        let alerta = [divergencia.clone(), confirmacao].into_iter().flatten().collect::<Vec<_>>().join("\n");
+        let (mut dica, mut ajudou, mut direta) = (com_dica(&nome, alerta), false, None);
         let mut leitura_valida = false;
         let mut leitura = String::new();
         let mut fila: Vec<Candidato> = Vec::new();
@@ -755,7 +756,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 })
                 .take(3).map(|g| g[0].clone()).collect();
             let propostas = grupos.into_iter().flatten().map(|a| secretos.candidato(a, &obs)).collect();
-            let propostas: Vec<Candidato> = segurar_segredos(Barreiras::barrar(propostas, recentes), &op.texto, recentes, &secretos.valores);
+            let propostas: Vec<Candidato> = Barreiras::sem_confirmar(segurar_segredos(Barreiras::barrar(propostas, recentes), &op.texto, recentes, &secretos.valores), &obs, &op.texto).0;
             // A proposal dropped by the guards breaks the run: the rest waits for the next cycle.
             let seguidas = propostas.iter().zip(&teclado).take_while(|(p, a)| p.acao == **a && dentro(&p.acao, &obs)).count();
             if seguidas >= 2 { fila = propostas[1..seguidas].to_vec(); }
@@ -897,7 +898,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
                 .flat_map(|a| no_campo(a, &obs, recentes)).map(|a| secretos.candidato(a, &obs)).collect();
-            for proposta in segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), &fechados), recentes), &op.texto, recentes, &secretos.valores)
+            for proposta in Barreiras::sem_confirmar(segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), &fechados), recentes), &op.texto, recentes, &secretos.valores), &obs, &op.texto).0
                 .into_iter().filter(|p| !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
                 if primeira_ajuda.is_none() && dentro(&proposta.acao, &obs) { primeira_ajuda = Some(proposta.clone()); }
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta); }
