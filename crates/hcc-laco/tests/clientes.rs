@@ -89,18 +89,23 @@ async fn llm_asks_for_strict_structured_output() {
     assert_eq!(esquema["required"], json!(["acoes", "impedimento", "interpretacao"]));
 }
 
-// An endpoint that refuses response_format still gets the help, asked once more without it.
+// An endpoint that refuses structured output (any 400, whatever it names) still gets the help, asked once more
+// without it; the client remembers, so later calls do not pay the refusal again.
 #[tokio::test]
 async fn llm_endpoint_without_response_format_is_asked_without_it() {
     let s = MockServer::start().await;
     Mock::given(method("POST")).respond_with(ResponseTemplate::new(400)
-        .set_body_string(r#"{"error":{"message":"Unknown parameter: 'response_format'"}}"#)).up_to_n_times(1).mount(&s).await;
+        .set_body_string(r#"{"error":{"message":"json_schema is not supported"}}"#)).up_to_n_times(1).mount(&s).await;
     Mock::given(method("POST")).respond_with(conteudo(r#"{"interpretacao": "sem formato", "acoes": []}"#)).mount(&s).await;
-    let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;
-    assert_eq!(a.interpretacao, "sem formato");
+    let cliente = llm(&s, Some("KEY"));
+    assert_eq!(cliente.ajudar(&json!({}), PNG, T).await.interpretacao, "sem formato");
+    assert_eq!(cliente.ajudar(&json!({}), PNG, T).await.interpretacao, "sem formato");
     let pedidos = s.received_requests().await.unwrap();
-    let segundo: Value = serde_json::from_slice(&pedidos[1].body).unwrap();
-    assert!(segundo.get("response_format").is_none(), "{segundo}");
+    assert_eq!(pedidos.len(), 3, "one refusal, then no format");
+    for p in &pedidos[1..] {
+        let corpo: Value = serde_json::from_slice(&p.body).unwrap();
+        assert!(corpo.get("response_format").is_none(), "{corpo}");
+    }
 }
 
 #[tokio::test]

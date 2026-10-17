@@ -1,6 +1,7 @@
 //! Vision LLM fallback: interprets the screen and proposes actions; Jev still decides (laco_uia.py:318-338).
 
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
@@ -45,6 +46,8 @@ pub struct Llm {
     pub effort: Option<String>,
     pub key: Option<String>,
     http: reqwest::Client,
+    /// The endpoint refused `response_format` once: later requests go without it.
+    sem_formato: AtomicBool,
 }
 
 fn be(b: &[u8]) -> u64 {
@@ -53,7 +56,7 @@ fn be(b: &[u8]) -> u64 {
 
 impl Llm {
     pub fn new(url: String, model: String, effort: Option<String>, key: Option<String>) -> Llm {
-        Llm { url, model, effort, key, http: http::cliente() }
+        Llm { url, model, effort, key, http: http::cliente(), sem_formato: AtomicBool::new(false) }
     }
 
     /// Unset URL/model fall back to the defaults; empty effort or key count as absent.
@@ -98,17 +101,18 @@ impl Llm {
             json!({"role": "user", "content": conteudo})];
         // A reply without the object is asked once more, quoting it back.
         let mut recusadas = Vec::new();
-        let mut formato = true;
         for tentativa in 0..2 {
             let mut corpo = json!({"model": self.model, "messages": mensagens});
             if let Some(e) = self.effort.as_deref().filter(|e| !e.is_empty()) {
                 corpo["reasoning_effort"] = json!(e);
             }
+            let formato = !self.sem_formato.load(Ordering::Relaxed);
             if formato { corpo["response_format"] = FORMATO.clone(); }
             let r = match http::post(&self.http, &self.url, &corpo, chave, timeout).await {
                 // An endpoint without structured output still gets the request; the reply is parsed from the text.
-                Err(f) if formato && f.msg.starts_with("HTTP 400") && f.msg.contains("response_format") => {
-                    formato = false;
+                // Endpoints name the refusal differently (response_format, json_schema, schema): any 400 counts.
+                Err(f) if formato && f.msg.starts_with("HTTP 400") => {
+                    self.sem_formato.store(true, Ordering::Relaxed);
                     if let Value::Object(m) = &mut corpo { m.remove("response_format"); }
                     http::post(&self.http, &self.url, &corpo, chave, timeout).await?
                 }
