@@ -313,10 +313,11 @@ async fn registrar(pasta: &Path, mut valor: Value, secretos: &Segredos) -> Resul
     log.flush().await.map_err(erro_io)
 }
 
-async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_>, r: &mut Resultado,
+#[allow(clippy::too_many_arguments)]
+async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_>, r: &mut Resultado, ciclo: u32,
     obs: &Observation, estado: &Value, secretos: &Segredos) -> Result<(Ajuda, bool), String> {
     let imagem = controle.medir("captura", Progresso::Captura, async { sessao.screenshot().await.map_err(erro_sessao) }).await?;
-    let captura = r.registro.as_ref().ok_or("RuntimeError: registro indisponível")?.join("tela.png");
+    let captura = r.registro.as_ref().ok_or("RuntimeError: registro indisponível")?.join(format!("tela-{ciclo}.png"));
     controle.rodar(async { tokio::fs::write(&captura, &imagem).await.map_err(erro_io) }).await?;
     r.captura = Some(captura);
     let limite = controle.restante()?.min(Duration::from_secs(45));
@@ -433,6 +434,11 @@ async fn ciclo<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Option<C::S
     if !r.ok && let Some(falha) = recentes.iter().rev().find(|x| x.action.starts_with("set_value ") || x.action.starts_with("text "))
         .and_then(|x| x.result.strip_prefix("NOT confirmed: ")).filter(|f| !r.motivo.contains(*f)) {
         r.motivo = format!("{}; {falha}", r.motivo);
+    }
+    // Each action's outcome, beside the `resultado` line `executar` writes last.
+    if let Some(pasta) = r.registro.clone() {
+        let acoes: Vec<Value> = recentes.iter().map(|x| json!({"acao": x.action, "resultado": x.result, "tela_mudou": x.screen_changed})).collect();
+        if let Err(e) = registrar(&pasta, json!({"acoes": acoes}), secretos).await { eprintln!("ações não gravadas no registro: {e}"); }
     }
     let (Some(dir), Some(_), false) = (op.roteiros.as_deref(), r.registro.as_ref(), r.ok) else { return res; };
     let (feitos, formas) = feitos(&gravados, &recentes);
@@ -636,9 +642,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     async { observar(s).await.map_err(erro_sessao) }).await?;
                 let atual = assinatura_tela(&vista);
                 iniciais.get_or_insert_with(|| vista.windows.iter().map(|w| w.id.clone()).collect());
-                if !pulou {
-                    if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
-                }
+                if !pulou && let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
                 anterior = Some(atual.clone());
                 if n == 0 {
                     let Some((i, escolhidos)) = roteiro::escolher(&gravado, &vista, &op.dados) else {
@@ -741,7 +745,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         if so_leitura(&op.texto) {
             // Nothing to do on screen: the tree text and one print reading are the answer; no Jev, no action.
             let estado = secretos.estado(op, &obs, recentes, None);
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
+            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos).await?;
             let texto = texto_janela(&obs);
             if !leu && texto.is_empty() { r.motivo = format!("leitura sem resultado: {}", ajuda.interpretacao); return Ok(()); }
             r.ok = true;
@@ -787,7 +791,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let mut primeira_ajuda: Option<Candidato> = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, recentes, None);
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
+            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
@@ -830,7 +834,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let opcao = escolha(d.escolha);
             // Python conta caracteres do JSON ASCII, apesar do nome bytes_estado.
             let ascii = py_dumps(&estado).chars().map(|c| if c.is_ascii() { 1 } else if u32::from(c) > 0xffff { 12 } else { 6 }).sum::<usize>();
-            let mut log = json!({"ciclo":ciclo, "n_acoes":acoes.len(), "bytes_estado":ascii,
+            let mut log = json!({"ciclo":ciclo, "n_acoes":acoes.len(), "bytes_estado":ascii, "dica":dica,
+                "opcoes":acoes.iter().map(|a| &a.descricao).collect::<Vec<_>>(),
                 "choice":opcao, "probability":d.p, "risky":d.risco});
             if !d.top.is_empty() { log["top"] = json!(d.top); }
             controle.rodar(registrar(&pasta, log, secretos)).await?;
@@ -941,7 +946,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 return Ok(());
             }
             ajudou = true;
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, &obs, &estado, secretos).await?;
+            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             dica = com_dica(&nome, falta_dica.as_ref().map_or_else(|| ajuda.interpretacao.clone(), |f| format!("{f}\n{}", ajuda.interpretacao)));

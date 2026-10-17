@@ -11,7 +11,8 @@ Como funciona, por ciclo:
 3. O Jev (TypeSafe) escolhe uma ação. Não gera texto.
 4. Só quando o Jev não acha saída, ou a árvore vem vazia, um LLM barato olha o print e propõe ações extras,
    que voltam pro Jev escolher. Se o Jev continua em dúvida, a primeira ação proposta pelo LLM é executada,
-   depois da pergunta de risco ao Jev. Resposta do LLM sem o JSON é pedida de novo uma vez; ação inválida dela
+   depois da pergunta de risco ao Jev. O pedido ao LLM leva o schema em `response_format` (modo estrito); endpoint
+   que recusar o campo com HTTP 400 recebe o pedido de novo sem ele. Resposta do LLM sem o JSON é pedida de novo uma vez; ação inválida dela
    é descartada sozinha (mouse sem botão/modo vira clique esquerdo). Janela da frente sem nenhum controle na árvore (botões desenhados, como a
    caixa de mensagem da TMS): o print vai direto ao LLM, que devolve o clique rotulado ("botão Não"); o laço
    executa sem votação, só depois da pergunta de risco ao Jev e se o clique cair dentro dessa janela.
@@ -112,7 +113,10 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   diálogo. Um caminho de arquivo em `dados` vira a opção de duplo clique no arquivo com esse nome em qualquer
   lista (seletor de arquivos KDE/GTK/Windows). Controle sem nome não ganha clique por coordenada. Retorna um texto com
   `concluído: …` ou `parou: …`, a lista de passos executados com a confiança do Jev, os tempos por etapa,
-  o caminho do último print (se o LLM foi chamado) e a pasta de registro (`observacao.json`, `jev.jsonl`).
+  o caminho do último print (se o LLM foi chamado) e a pasta de registro. Nela, por ciclo: `observacao-N.json` (a
+  árvore) e `tela-N.png` (o print, quando o LLM foi chamado); em `jev.jsonl`, cada decisão com as opções oferecidas
+  ao Jev e a dica, as propostas do LLM, a lista de ações com o resultado de cada uma (`acoes`) e o desfecho
+  (`resultado`). É o que se lê para entender por que um objetivo parou.
   Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print
   (`Leitura: …`) e/ou o texto visível da janela pela árvore (`Texto na janela: …`, até 2000 caracteres).
   `refazer=true` ignora o roteiro gravado (abaixo).

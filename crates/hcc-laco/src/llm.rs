@@ -1,5 +1,6 @@
 //! Vision LLM fallback: interprets the screen and proposes actions; Jev still decides (laco_uia.py:318-338).
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use base64::Engine;
@@ -13,6 +14,30 @@ use hcc_protocolo::Action;
 pub const LLM_URL: &str = "http://127.0.0.1:8317/v1/chat/completions";
 pub const LLM_MODELO: &str = "gpt-5.6-luna";
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+/// AJUDA_SCHEMA as strict mode takes it (Anthropic's and OpenAI's): no length or count limits, which ler_ajuda
+/// applies, and every property required (nullable ones are already `anyOf` null).
+static FORMATO: LazyLock<Value> = LazyLock::new(|| {
+    fn estrito(v: &mut Value) {
+        match v {
+            Value::Object(m) => {
+                for k in ["maxItems", "minItems", "maxLength", "minimum", "maximum", "default", "title"] { m.remove(k); }
+                if let Some(Value::Object(p)) = m.get("properties") {
+                    let mut chaves: Vec<&String> = p.keys().collect();
+                    chaves.sort();
+                    let chaves = json!(chaves);
+                    m.insert("required".into(), chaves);
+                }
+                m.values_mut().for_each(estrito);
+            }
+            Value::Array(a) => a.iter_mut().for_each(estrito),
+            _ => {}
+        }
+    }
+    let mut esquema: Value = serde_json::from_str(AJUDA_SCHEMA).expect("AJUDA_SCHEMA é JSON");
+    estrito(&mut esquema);
+    json!({"type": "json_schema", "json_schema": {"name": "ajuda", "strict": true, "schema": esquema}})
+});
 
 pub struct Llm {
     pub url: String,
@@ -73,12 +98,22 @@ impl Llm {
             json!({"role": "user", "content": conteudo})];
         // A reply without the object is asked once more, quoting it back.
         let mut recusadas = Vec::new();
+        let mut formato = true;
         for tentativa in 0..2 {
             let mut corpo = json!({"model": self.model, "messages": mensagens});
             if let Some(e) = self.effort.as_deref().filter(|e| !e.is_empty()) {
                 corpo["reasoning_effort"] = json!(e);
             }
-            let r = http::post(&self.http, &self.url, &corpo, chave, timeout).await?;
+            if formato { corpo["response_format"] = FORMATO.clone(); }
+            let r = match http::post(&self.http, &self.url, &corpo, chave, timeout).await {
+                // An endpoint without structured output still gets the request; the reply is parsed from the text.
+                Err(f) if formato && f.msg.starts_with("HTTP 400") && f.msg.contains("response_format") => {
+                    formato = false;
+                    if let Value::Object(m) = &mut corpo { m.remove("response_format"); }
+                    http::post(&self.http, &self.url, &corpo, chave, timeout).await?
+                }
+                r => r?,
+            };
             let campo = |v: &Value, k: &str| v.get(k).cloned().ok_or_else(|| Falha::new("KeyError", format!("'{k}'")));
             let primeira = campo(&r, "choices")?
                 .get(0)

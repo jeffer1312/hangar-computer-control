@@ -729,6 +729,38 @@ async fn record_keeps_the_goal_and_every_cycle_screen() {
     assert!(pasta.join("observacao-0.json").exists() && pasta.join("observacao-1.json").exists());
 }
 
+// Why a run stopped is read from the folder: what Jev was offered, each action's outcome and how it ended.
+#[tokio::test]
+async fn record_shows_the_options_each_outcome_and_the_end() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    let log: Vec<Value> = std::fs::read_to_string(r.registro.unwrap().join("jev.jsonl")).unwrap()
+        .lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let decisao = log.iter().find(|l| l["ciclo"] == 0 && l.get("choice").is_some()).unwrap();
+    assert!(decisao["opcoes"].as_array().unwrap().iter().any(|o| o.as_str().unwrap().starts_with("set_value")), "{decisao}");
+    assert!(decisao.get("dica").is_some(), "{decisao}");
+    let fim = &log.last().unwrap()["resultado"];
+    assert_eq!(fim["ok"], true, "{fim}");
+    let acoes = log.iter().find_map(|l| l.get("acoes")).unwrap();
+    let acao = &acoes[0];
+    assert!(acao["acao"].as_str().unwrap().starts_with("set_value"), "{acao}");
+    assert_eq!(acao["resultado"], "ok");
+    assert!(acao.get("tela_mudou").is_some(), "{acao}");
+}
+
+// Each vision call keeps its own print beside that cycle's tree, not one file overwritten.
+#[tokio::test]
+async fn record_keeps_every_vision_print() {
+    let con = FakeConnector::new(vec![empty("o1"), empty("o2")]);
+    let (op, _server) = setup(vec![help(json!([{"type":"keys","keys":["Escape"],"rotulo":"fechar"}])), Answer::Risk(0.05),
+        help(json!([])), done()]).await;
+    let r = run(op, &con).await;
+    let dir = r.registro.clone().unwrap();
+    assert!(dir.join("tela-0.png").exists() && dir.join("tela-1.png").exists(), "{}", r.resumo());
+    assert_eq!(r.captura, Some(dir.join("tela-1.png")));
+}
+
 // The vision model sees secrets as "<senha>" and proposes typing that marker: the loop types the secret itself.
 #[tokio::test]
 async fn vision_secret_marker_is_typed_as_the_secret_or_dropped() {
@@ -1060,7 +1092,7 @@ async fn whole_run_never_leaks_secret() {
     }
     let observation: Value = serde_json::from_slice(&std::fs::read(dir.join("observacao.json")).unwrap()).unwrap();
     assert_eq!(observation["elements"][0]["value"], "echo: <senha>");
-    assert_eq!(r.captura, Some(dir.join("tela.png")));
+    assert_eq!(r.captura, Some(dir.join("tela-1.png")));
 }
 
 #[test]

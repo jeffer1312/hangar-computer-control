@@ -70,6 +70,39 @@ async fn llm_reply_without_json_is_asked_again() {
     assert_eq!(s.received_requests().await.unwrap().len(), 2);
 }
 
+// Strict structured output, in the shape both Anthropic's and OpenAI's strict mode accept: no length or count
+// limits (ler_ajuda applies them) and every property required (with optional ones Anthropic never answers).
+#[tokio::test]
+async fn llm_asks_for_strict_structured_output() {
+    let s = responde(conteudo(r#"{"interpretacao": "ok", "acoes": [], "impedimento": ""}"#)).await;
+    llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;
+    let corpo: Value = serde_json::from_slice(&s.received_requests().await.unwrap()[0].body).unwrap();
+    let f = &corpo["response_format"];
+    assert_eq!((f["type"].as_str(), f["json_schema"]["strict"].as_bool()), (Some("json_schema"), Some(true)), "{f}");
+    let esquema = &f["json_schema"]["schema"];
+    let texto = esquema.to_string();
+    for proibido in ["maxItems", "minItems", "maxLength", "minimum", "maximum", "\"default\""] {
+        assert!(!texto.contains(proibido), "{proibido} in {texto}");
+    }
+    let acao = &esquema["$defs"]["Acao"];
+    assert_eq!(acao["required"].as_array().unwrap().len(), acao["properties"].as_object().unwrap().len());
+    assert_eq!(esquema["required"], json!(["acoes", "impedimento", "interpretacao"]));
+}
+
+// An endpoint that refuses response_format still gets the help, asked once more without it.
+#[tokio::test]
+async fn llm_endpoint_without_response_format_is_asked_without_it() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(400)
+        .set_body_string(r#"{"error":{"message":"Unknown parameter: 'response_format'"}}"#)).up_to_n_times(1).mount(&s).await;
+    Mock::given(method("POST")).respond_with(conteudo(r#"{"interpretacao": "sem formato", "acoes": []}"#)).mount(&s).await;
+    let a = llm(&s, Some("KEY")).ajudar(&json!({}), PNG, T).await;
+    assert_eq!(a.interpretacao, "sem formato");
+    let pedidos = s.received_requests().await.unwrap();
+    let segundo: Value = serde_json::from_slice(&pedidos[1].body).unwrap();
+    assert!(segundo.get("response_format").is_none(), "{segundo}");
+}
+
 #[tokio::test]
 async fn llm_answer_after_a_sentence_is_read() {
     let objeto = r#"{"interpretacao": "formulário de webhook", "acoes": [{"type": "keys", "keys": ["Tab"]}]}"#;

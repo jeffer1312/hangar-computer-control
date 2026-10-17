@@ -14810,7 +14810,259 @@
         ]
        }
       ],
-      "reasoning_effort": "high"
+      "reasoning_effort": "high",
+      "response_format": {
+       "type": "json_schema",
+       "json_schema": {
+        "name": "ajuda",
+        "strict": true,
+        "schema": {
+         "$defs": {
+          "Acao": {
+           "additionalProperties": false,
+           "properties": {
+            "type": {
+             "enum": [
+              "invoke",
+              "set_value",
+              "select",
+              "toggle",
+              "expand",
+              "collapse",
+              "focus",
+              "scroll",
+              "activate",
+              "keys",
+              "text",
+              "launch",
+              "mouse"
+             ],
+             "type": "string"
+            },
+            "target": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "value": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "keys": {
+             "anyOf": [
+              {
+               "items": {
+                "type": "string"
+               },
+               "type": "array"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "application": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "args": {
+             "anyOf": [
+              {
+               "items": {
+                "type": "string"
+               },
+               "type": "array"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "direction": {
+             "anyOf": [
+              {
+               "enum": [
+                "up",
+                "down",
+                "left",
+                "right"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "amount": {
+             "anyOf": [
+              {
+               "enum": [
+                "small",
+                "large"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "x": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "y": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "button": {
+             "anyOf": [
+              {
+               "enum": [
+                "left",
+                "middle",
+                "right"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "mode": {
+             "anyOf": [
+              {
+               "enum": [
+                "click",
+                "double",
+                "move",
+                "drag",
+                "scroll"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "x2": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "y2": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "delta": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "rotulo": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            }
+           },
+           "required": [
+            "amount",
+            "application",
+            "args",
+            "button",
+            "delta",
+            "direction",
+            "keys",
+            "mode",
+            "rotulo",
+            "target",
+            "type",
+            "value",
+            "x",
+            "x2",
+            "y",
+            "y2"
+           ],
+           "type": "object"
+          }
+         },
+         "additionalProperties": false,
+         "properties": {
+          "interpretacao": {
+           "type": "string"
+          },
+          "acoes": {
+           "items": {
+            "$ref": "#/$defs/Acao"
+           },
+           "type": "array"
+          },
+          "impedimento": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "acoes",
+          "impedimento",
+          "interpretacao"
+         ],
+         "type": "object"
+        }
+       }
+      }
      }
     }
    ],
@@ -14907,7 +15159,259 @@
          }
         ]
        }
-      ]
+      ],
+      "response_format": {
+       "type": "json_schema",
+       "json_schema": {
+        "name": "ajuda",
+        "strict": true,
+        "schema": {
+         "$defs": {
+          "Acao": {
+           "additionalProperties": false,
+           "properties": {
+            "type": {
+             "enum": [
+              "invoke",
+              "set_value",
+              "select",
+              "toggle",
+              "expand",
+              "collapse",
+              "focus",
+              "scroll",
+              "activate",
+              "keys",
+              "text",
+              "launch",
+              "mouse"
+             ],
+             "type": "string"
+            },
+            "target": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "value": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "keys": {
+             "anyOf": [
+              {
+               "items": {
+                "type": "string"
+               },
+               "type": "array"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "application": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "args": {
+             "anyOf": [
+              {
+               "items": {
+                "type": "string"
+               },
+               "type": "array"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "direction": {
+             "anyOf": [
+              {
+               "enum": [
+                "up",
+                "down",
+                "left",
+                "right"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "amount": {
+             "anyOf": [
+              {
+               "enum": [
+                "small",
+                "large"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "x": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "y": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "button": {
+             "anyOf": [
+              {
+               "enum": [
+                "left",
+                "middle",
+                "right"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "mode": {
+             "anyOf": [
+              {
+               "enum": [
+                "click",
+                "double",
+                "move",
+                "drag",
+                "scroll"
+               ],
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "x2": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "y2": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "delta": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            },
+            "rotulo": {
+             "anyOf": [
+              {
+               "type": "string"
+              },
+              {
+               "type": "null"
+              }
+             ]
+            }
+           },
+           "required": [
+            "amount",
+            "application",
+            "args",
+            "button",
+            "delta",
+            "direction",
+            "keys",
+            "mode",
+            "rotulo",
+            "target",
+            "type",
+            "value",
+            "x",
+            "x2",
+            "y",
+            "y2"
+           ],
+           "type": "object"
+          }
+         },
+         "additionalProperties": false,
+         "properties": {
+          "interpretacao": {
+           "type": "string"
+          },
+          "acoes": {
+           "items": {
+            "$ref": "#/$defs/Acao"
+           },
+           "type": "array"
+          },
+          "impedimento": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "acoes",
+          "impedimento",
+          "interpretacao"
+         ],
+         "type": "object"
+        }
+       }
+      }
      }
     }
    ],
