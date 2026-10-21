@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
-use tokio::time::Instant;
 use serde_json::{Map, Value, json};
 
 use crate::http::{self, prob};
@@ -77,10 +76,12 @@ const FORA: &str = "IndexError: list index out of range";
 
 type Top = Vec<(String, f64, String)>;
 
-/// What happened to the screenshot passed with a request (`Decisao::imagem`).
-struct Envio {
-    imagem: &'static str,
-    motivo: String,
+/// What happened to the screenshot passed with a request: `enviada`, `falhou` (with the error in `motivo`),
+/// `desligada`, `sem_prazo`; empty without one.
+#[derive(Debug)]
+pub struct Envio {
+    pub imagem: &'static str,
+    pub motivo: String,
 }
 
 /// Python `round(p, 2)`: correctly rounded decimal, ties to even on the exact binary value.
@@ -97,7 +98,6 @@ impl Jev {
     /// fails is asked again without it, and the screenshot stays off for the rest of the run.
     async fn perguntar(&self, state: &Value, questions: Value, imagem: Option<&Imagem>, timeout: Duration)
         -> Result<(Map<String, Value>, Envio), String> {
-        let fim = Instant::now() + timeout;
         let mut envio = Envio { imagem: "", motivo: String::new() };
         if let Some(imagem) = imagem {
             if self.sem_imagem.load(Ordering::Relaxed) {
@@ -109,15 +109,16 @@ impl Jev {
                     Ok(r) => return Ok((r, Envio { imagem: "enviada", motivo: String::new() })),
                     Err(e) => {
                         self.sem_imagem.store(true, Ordering::Relaxed);
-                        envio = Envio { imagem: "falhou", motivo: e.chars().take(300).collect() };
+                        envio = Envio { imagem: "falhou", motivo: e };
                     }
                 }
             }
         }
-        // Without the screenshot, questions about it have nothing to look at.
+        // Without the screenshot, questions about it have nothing to look at. The retry gets the whole `timeout`, as
+        // the request without it always had: a slow Jev that just timed out would fail again in what was left.
         let mut questions = questions;
         if let Value::Object(q) = &mut questions { q.remove(BLOQUEIO); }
-        let r = self.pedir(state, &questions, None, fim.saturating_duration_since(Instant::now())).await?;
+        let r = self.pedir(state, &questions, None, timeout).await?;
         Ok((r, envio))
     }
 
@@ -147,13 +148,14 @@ impl Jev {
         }
     }
 
-    pub async fn arriscado(&self, estado: &Value, proposta: &str, imagem: Option<&Imagem>, timeout: Duration) -> Result<f64, String> {
+    /// The risk, and what happened to the screenshot.
+    pub async fn arriscado(&self, estado: &Value, proposta: &str, imagem: Option<&Imagem>, timeout: Duration) -> Result<(f64, Envio), String> {
         let mut state = estado.clone();
         if let Value::Object(m) = &mut state {
             m.insert("proposedAction".into(), json!(proposta));
         }
-        let (r, _) = self.perguntar(&state, json!({"risky": risco_pergunta()}), imagem, timeout).await?;
-        risco(&r)
+        let (r, envio) = self.perguntar(&state, json!({"risky": risco_pergunta()}), imagem, timeout).await?;
+        Ok((risco(&r)?, envio))
     }
 
     /// One `choice` among `opcoes` plus NONE: the index picked (None for NONE) and its probability.
@@ -195,7 +197,7 @@ impl Jev {
             let (respostas, envio) = self.perguntar(estado, Value::Object(perguntas), imagem, timeout).await?;
             let risco = risco(&respostas)?;
             let com_imagem = envio.imagem == "enviada";
-            let blocked = com_imagem.then(|| prob(respostas.get(BLOQUEIO).and_then(|b| b.get("noul"))));
+            let blocked = respostas.get(BLOQUEIO).and_then(|b| b.get("noul")).filter(|_| com_imagem).map(|v| prob(Some(v)));
             let decisao = |escolha, p, top| Decisao { escolha, p, risco, top, com_imagem, imagem: envio.imagem,
                 motivo: envio.motivo.clone(), blocked };
             if lotes.len() == 1 {

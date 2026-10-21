@@ -124,7 +124,7 @@ async fn arriscado_matches_python() {
     let caso = &g["arriscado"];
     let s = servidor(&Value::Array(vec![caso["resposta"].clone()])).await;
     let jev = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into());
-    let p = jev.arriscado(&caso["estado"], caso["proposta"].as_str().unwrap(), None, T).await.unwrap();
+    let (p, _) = jev.arriscado(&caso["estado"], caso["proposta"].as_str().unwrap(), None, T).await.unwrap();
     perto(p, &caso["resultado"]);
     confere_pedidos(&s, &caso["pedidos"]).await;
 }

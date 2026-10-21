@@ -206,7 +206,7 @@ async fn unknown_choice_is_an_error_not_a_panic() {
     let e = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).decidir(&json!({}), &[], None, T).await.unwrap_err();
     assert_eq!(e, "IndexError: list index out of range");
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"answers": {}}))).await;
-    let p = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", None, T).await.unwrap();
+    let (p, _) = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", None, T).await.unwrap();
     assert_eq!(p, 0.0);
     let s = responde(ResponseTemplate::new(200).set_body_json(json!({"sem": 1}))).await;
     let e = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", None, T).await.unwrap_err();

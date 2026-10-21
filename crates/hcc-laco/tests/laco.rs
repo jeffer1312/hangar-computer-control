@@ -2550,7 +2550,7 @@ async fn print_em_todo_passo() {
     }
     let d = decisoes(&r);
     assert_eq!(d.len(), 2);
-    assert!(d.iter().all(|l| l["imagem"] == "enviada"), "{d:?}");
+    assert!(d.iter().all(|l| l["imagem"] == "enviada" && l["blocked"].is_null()), "unanswered `blocked` is not 0: {d:?}");
     assert_eq!(con.state.lock().unwrap().captures, 2);
 }
 
@@ -2632,4 +2632,20 @@ async fn sem_print_segue_pela_arvore() {
     assert!(bodies(&server).await.iter().all(|b| b["state"].get("tela").is_none()));
     let d = decisoes(&r);
     assert!(d.iter().all(|l| l["imagem"] == "sem_print" && l["motivo"].as_str().is_some_and(|m| m.contains("captura recusada"))), "{d:?}");
+}
+
+// A window with no controls never reaches `decidir`: the risk question is the cycle's request with the screenshot,
+// and its failure must be on record too.
+#[tokio::test]
+async fn imagem_falha_no_risco_fica_no_registro() {
+    let mut antes = empty("o1");
+    antes.windows[0].rect = Rect(0, 0, 1280, 800);
+    let con = FakeConnector::new(vec![antes, tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"botão Não"}])),
+        Answer::SemTela(Box::new(Answer::Risk(0.05))), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let direta = jev_log(&r).into_iter().find(|l| l.get("direta").is_some()).unwrap();
+    assert_eq!(direta["imagem"], "falhou", "{direta}");
+    assert!(direta["motivo"].as_str().is_some_and(|m| m.contains("400")), "{direta}");
 }
