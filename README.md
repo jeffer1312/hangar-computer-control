@@ -8,14 +8,25 @@ Como funciona, por ciclo:
 1. O agente na sessão gráfica do Windows lê a árvore de acessibilidade (UI Automation) da janela ativa,
    dos popups dela e da barra de tarefas.
 2. O laço transforma a árvore em ações concretas (clicar botão X, digitar valor Y no campo Z, ativar janela W).
-3. O Jev (TypeSafe) escolhe uma ação. Não gera texto.
-4. Só quando o Jev não acha saída, ou a árvore vem vazia, um LLM barato olha o print e propõe ações extras,
-   que voltam pro Jev escolher. Se o Jev continua em dúvida, a primeira ação proposta pelo LLM é executada,
-   depois da pergunta de risco ao Jev. O pedido ao LLM leva o schema em `response_format` (modo estrito); endpoint
+3. O Jev (TypeSafe) escolhe uma ação vendo o print da tela, que vai ao Jev em todo passo. No mesmo pedido ele
+   diz se um diálogo, erro ou login na tela impede o objetivo sem que nenhuma ação visível resolva. Não gera texto.
+4. O LLM barato é a reserva: entra quando o Jev não tem confiança (ou vê a tela bloqueada), quando a janela não
+   tem controles na árvore e no objetivo "só leitura". Ele olha o mesmo print e propõe ações extras; o Jev
+   escolhe entre elas vendo o print, e o ponto do clique é sempre o que o LLM deu. Se o Jev continua em dúvida
+   na decisão do passo, roda a proposta que ele escolheu com confiança suficiente ou, sem ela, a primeira do LLM,
+   depois da pergunta de risco ao Jev. Tela bloqueada só para com o impedimento que o LLM escrever; se o LLM não
+   vê bloqueio, o laço segue. O pedido ao LLM leva o schema em `response_format` (modo estrito); endpoint
    que responder HTTP 400 recebe o pedido de novo sem ele, e o resto do objetivo segue sem o campo. Resposta do LLM sem o JSON é pedida de novo uma vez; ação inválida dela
    é descartada sozinha (mouse sem botão/modo vira clique esquerdo). Janela da frente sem nenhum controle na árvore (botões desenhados, como a
    caixa de mensagem da TMS): o print vai direto ao LLM, que devolve o clique rotulado ("botão Não"); o laço
-   executa sem votação, só depois da pergunta de risco ao Jev e se o clique cair dentro dessa janela.
+   executa a proposta que o Jev escolher (ou a primeira), só depois da pergunta de risco ao Jev e se o clique
+   cair dentro dessa janela.
+
+O print vai sempre ao provedor do Jev, sem exceção por segredo ou por alvo (o Jev já recebe por texto o que
+está na árvore). O formato depende do endereço do Jev: pelo OpenRouter a imagem só vale como parte `image_url`
+dentro do `state` (o campo `assets` é ignorado lá); na TypeSafe direta vai em `assets`, com o cabeçalho
+`TypeSafe-Danger-Zone-Images`. Pedido com o print que falha é refeito sem ele, e o resto do objetivo segue sem
+print ao Jev; pedido com o print também tem teto de tempo próprio e só sai com prazo para refazer sem ele.
 5. O agente executa, o laço observa de novo. Repete até DONE, impedimento real ou limite.
 
 Não tem regra por aplicativo. Tela nova é só árvore nova.
@@ -113,10 +124,12 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   diálogo. Um caminho de arquivo em `dados` vira a opção de duplo clique no arquivo com esse nome em qualquer
   lista (seletor de arquivos KDE/GTK/Windows). Controle sem nome não ganha clique por coordenada. Retorna um texto com
   `concluído: …` ou `parou: …`, a lista de passos executados com a confiança do Jev, os tempos por etapa,
-  o caminho do último print (se o LLM foi chamado) e a pasta de registro. Nela, por ciclo: `observacao-N.json` (a
-  árvore) e `tela-N.png` (o print, quando o LLM foi chamado); em `jev.jsonl`, cada decisão com as opções oferecidas
-  ao Jev e a dica, as propostas do LLM, a lista de ações com o resultado de cada uma (`acoes`) e o desfecho
-  (`resultado`). É o que se lê para entender por que um objetivo parou.
+  o caminho do último print que o LLM viu (se ele foi chamado) e a pasta de registro. Nela, por ciclo:
+  `observacao-N.json` (a árvore) e `tela-N.png` (o print do ciclo); em `jev.jsonl`, cada decisão com as opções
+  oferecidas ao Jev, a dica, `imagem` (se o print foi ao Jev: `enviada`, `falhou`, `desligada`, `sem_prazo`,
+  `fora_do_limite`, `sem_print`), `motivo` e `blocked`; as propostas do LLM e qual delas o Jev escolheu; a lista
+  de ações com o resultado de cada uma (`acoes`) e o desfecho (`resultado`). É o que se lê para entender por que
+  um objetivo parou.
   Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print
   (`Leitura: …`) e/ou o texto visível da janela pela árvore (`Texto na janela: …`, até 2000 caracteres).
   `refazer=true` ignora o roteiro gravado (abaixo).
@@ -220,8 +233,8 @@ rótulos fixos ou a descrição da ação executada (`invoke Button 'Enviar'`, `
 |---|---|
 | `conectando ao computador` / `reconectando ao computador` | conexão com o agente |
 | `lendo a tela` | leitura da árvore de acessibilidade |
-| `decidindo o próximo passo` | pergunta ao Jev (cerca de 0,5 s) |
-| `capturando a tela` | print para o modelo de visão |
+| `decidindo o próximo passo` | pergunta ao Jev, com o print |
+| `capturando a tela` | print do ciclo, para o Jev e o modelo de visão |
 | `pedindo ajuda visual` | modelo de visão (o passo mais lento, 4 a 10 s) |
 | qualquer outro texto | ação sendo executada |
 
