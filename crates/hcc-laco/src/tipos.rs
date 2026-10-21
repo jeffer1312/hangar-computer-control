@@ -38,7 +38,8 @@ pub enum Escolha {
 }
 
 /// What happened to the screenshot passed with a request: `enviada`, `falhou` (with the error in `motivo`),
-/// `desligada`, `sem_prazo`; empty without one. The loop adds its own `sem_print` and `fora_do_limite`.
+/// `desligada`, `sem_prazo`; empty without one. The loop adds `nao_precisou` (the request went without a print),
+/// `sem_print` and `fora_do_limite`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Envio {
     pub imagem: &'static str,
