@@ -19,7 +19,7 @@ use crate::estado::{AssinaturaTela, assinatura_tela, estado_compacto, padrao_seg
 use crate::geometria::{dentro, para_tela};
 use crate::http::py_dumps;
 use crate::jev::Jev;
-use crate::llm::Llm;
+use crate::llm::{Imagem, Llm};
 use crate::objetivo::{literais, nome_parecido, nomes_em_janela_nova, nomes_no_titulo, pede_leitura, so_leitura, texto_janela, valores_do_objetivo};
 use crate::trecho;
 use crate::resultado::Resultado;
@@ -29,6 +29,16 @@ use crate::tipos::{Ajuda, Candidato, Decisao, Escolha, Progresso, Registro};
 const CANCELADO: &str = "RuntimeError: objetivo cancelado; nenhuma nova ação será enviada";
 const SEM_PROGRESSO: u32 = 6;
 const LIMITE: &str = "TimeoutError: limite de duração atingido; objetivo não confirmado";
+// Limits for a decision Jev made seeing the screenshot: equal to the tree-only ones until calibrated on live runs.
+const FRACO_COM_PRINT: f64 = 0.25;
+const DONE_COM_PRINT: f64 = 0.75;
+const TRUNCADA_COM_PRINT: f64 = 0.6;
+const LIMITE_BLOQUEIO: f64 = 0.5;
+
+/// The lowest probability that still counts for a pick, a DONE and a pick on a truncated tree.
+fn limites(d: &Decisao) -> (f64, f64, f64) {
+    if d.com_imagem { (FRACO_COM_PRINT, DONE_COM_PRINT, TRUNCADA_COM_PRINT) } else { (0.25, 0.75, 0.6) }
+}
 
 pub struct Opcoes {
     pub texto: String,
@@ -313,16 +323,27 @@ async fn registrar(pasta: &Path, mut valor: Value, secretos: &Segredos) -> Resul
     log.flush().await.map_err(erro_io)
 }
 
+/// The screen as PNG, saved to `arquivo`. The outer error stops the run (cancel, time, disk); the inner one is the agent's.
+async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arquivo: &Path) -> Result<Result<Vec<u8>, SessionError>, String> {
+    let png = controle.medir("captura", Progresso::Captura, async { Ok(sessao.screenshot().await) }).await?;
+    if let Ok(png) = &png { controle.rodar(async { tokio::fs::write(arquivo, png).await.map_err(erro_io) }).await?; }
+    Ok(png)
+}
+
+/// `print` is the cycle's capture; without one (it failed) the screen is captured here, and a failure stops the run.
 #[allow(clippy::too_many_arguments)]
 async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_>, r: &mut Resultado, ciclo: u32,
-    obs: &Observation, estado: &Value, secretos: &Segredos) -> Result<(Ajuda, bool), String> {
-    let imagem = controle.medir("captura", Progresso::Captura, async { sessao.screenshot().await.map_err(erro_sessao) }).await?;
+    obs: &Observation, estado: &Value, secretos: &Segredos, print: Option<&[u8]>) -> Result<(Ajuda, bool), String> {
     let captura = r.registro.as_ref().ok_or("RuntimeError: registro indisponível")?.join(format!("tela-{ciclo}.png"));
-    controle.rodar(async { tokio::fs::write(&captura, &imagem).await.map_err(erro_io) }).await?;
+    let capturada;
+    let imagem = match print {
+        Some(png) => png,
+        None => { capturada = capturar(sessao, controle, &captura).await?.map_err(erro_sessao)?; &capturada[..] }
+    };
     r.captura = Some(captura);
     let limite = controle.restante()?.min(Duration::from_secs(45));
     let (mut ajuda, leitura_valida) = controle.medir("llm", Progresso::Llm, async {
-        match op.llm.pedir(estado, &imagem, limite).await {
+        match op.llm.pedir(estado, imagem, limite).await {
             Ok(a) => Ok((a, true)),
             Err(f) if matches!(f.tipo, "KeyError" | "IndexError" | "AttributeError") => Err(format!("{}: {}", f.tipo, secretos.texto(&f.msg))),
             Err(f) => Ok((Ajuda {
@@ -738,6 +759,15 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         controle.rodar(async { tokio::fs::write(pasta.join("observacao.json"), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
         // Every cycle's screen stays, so a run can be read back step by step.
         controle.rodar(async { tokio::fs::write(pasta.join(format!("observacao-{ciclo}.json")), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
+        // Jev decides every step seeing the screen; without a usable print it decides from the tree alone.
+        let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+        let (print, imagem, sem_imagem) = match capturar(s, controle, &pasta.join(format!("tela-{ciclo}.png"))).await? {
+            Err(e) => (None, None, Some(("sem_print", secretos.texto(&erro_sessao(e))))),
+            Ok(png) => match Imagem::de_png(png.clone()) {
+                Ok(i) => (Some(png), Some(i), None),
+                Err(e) => (Some(png), None, Some(("fora_do_limite", e))),
+            },
+        };
         if barreiras.aviso_repetido(&obs).is_some() {
             let texto: String = secretos.texto(&aviso(&obs).unwrap_or_default()).chars().take(400).collect();
             r.motivo = format!("o aplicativo respondeu duas vezes com o mesmo aviso: {texto}"); return Ok(());
@@ -745,7 +775,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         if so_leitura(&op.texto) {
             // Nothing to do on screen: the tree text and one print reading are the answer; no Jev, no action.
             let estado = secretos.estado(op, &obs, recentes, None);
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos).await?;
+            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos, print.as_deref()).await?;
             let texto = texto_janela(&obs);
             if !leu && texto.is_empty() { r.motivo = format!("leitura sem resultado: {}", ajuda.interpretacao); return Ok(()); }
             r.ok = true;
@@ -791,7 +821,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let mut primeira_ajuda: Option<Candidato> = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, recentes, None);
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos).await?;
+            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos, print.as_deref()).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
@@ -820,33 +850,37 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             }
             if let Some(proposta) = propostas.first().filter(|p| !ambigua && dentro(&p.acao, &obs) && !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
                 let limite = controle.restante()?.min(Duration::from_secs(30));
-                let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, None, limite)).await?;
+                let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem.as_ref(), limite)).await?;
                 controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
                 let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
-                direta = Some(Decisao { escolha: Escolha::Indice(i), p: 1.0, risco, top: vec![] });
+                direta = Some(Decisao { escolha: Escolha::Indice(i), p: 1.0, risco, top: vec![], com_imagem: false, imagem: "",
+                    motivo: String::new(), blocked: None });
             }
         }
         let mut decisao = loop {
             if let Some(d) = direta.take() { break d; }
             let estado = secretos.estado(op, &obs, recentes, Some(&dica));
             let limite = controle.restante()?.min(Duration::from_secs(30));
-            let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, None, limite)).await?;
+            let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, imagem.as_ref(), limite)).await?;
             let opcao = escolha(d.escolha);
+            let (envio, motivo) = sem_imagem.as_ref().map_or((d.imagem, d.motivo.as_str()), |(e, m)| (*e, m.as_str()));
             // Python conta caracteres do JSON ASCII, apesar do nome bytes_estado.
             let ascii = py_dumps(&estado).chars().map(|c| if c.is_ascii() { 1 } else if u32::from(c) > 0xffff { 12 } else { 6 }).sum::<usize>();
             let mut log = json!({"ciclo":ciclo, "n_acoes":acoes.len(), "bytes_estado":ascii, "dica":dica,
                 "opcoes":acoes.iter().map(|a| &a.descricao).collect::<Vec<_>>(),
-                "choice":opcao, "probability":d.p, "risky":d.risco});
+                "choice":opcao, "probability":d.p, "risky":d.risco, "imagem":envio, "motivo":(!motivo.is_empty()).then_some(motivo),
+                "blocked":d.blocked});
             if !d.top.is_empty() { log["top"] = json!(d.top); }
             controle.rodar(registrar(&pasta, log, secretos)).await?;
             controle.restante()?;
-            if d.escolha == Escolha::Done && d.p >= 0.75 {
+            let (fraco_min, done_min, truncada_min) = limites(&d);
+            if d.escolha == Escolha::Done && d.p >= done_min {
                 let mut confirmado = (!ajudou).then_some(d.p);
                 let mut leitura_forte = false;
                 if ajudou {
                     let sem_dica = secretos.estado(op, &obs, recentes, None);
                     let limite = controle.restante()?.min(Duration::from_secs(30));
-                    let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, None, limite)).await?;
+                    let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, imagem.as_ref(), limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "sem_dica":true,
                         "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco}), secretos)).await?;
                     controle.restante()?;
@@ -857,7 +891,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     if leitura_valida && so_a_leitura && matches!(d2.escolha, Escolha::Done | Escolha::Wait) {
                         confirmado = Some(d.p);
                         leitura_forte = true;
-                    } else if d2.escolha == Escolha::Done && d2.p >= 0.75 { confirmado = Some(d2.p); }
+                    } else if d2.escolha == Escolha::Done && d2.p >= limites(&d2).1 { confirmado = Some(d2.p); }
                     // The print reading plus every explicit item of the goal on screen is evidence enough.
                     else if ((itens_pendentes(conferir, &obs) > 0 && literais_atendidos(conferir, &obs, recentes)) || nomes_no_titulo(&op.texto, &obs)
                         || iniciais.as_ref().is_some_and(|i| nomes_em_janela_nova(&op.texto, &obs, i)))
@@ -927,30 +961,33 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             }
             let esperando = recentes.iter().rev().filter(|r| !r.action.starts_with("DONE recusado: "))
                 .take(3).filter(|r| r.action == "WAIT").count() >= 3;
-            let fraco = d.escolha == Escolha::Blocked || d.p < if d.escolha == Escolha::Done { 0.75 } else { 0.25 }
-                || (d.escolha == Escolha::Wait && esperando);
+            // A blocked screen calls the helper, which writes why or disagrees; once it has looked, its word stands.
+            let bloqueado = d.blocked.is_some_and(|b| b >= LIMITE_BLOQUEIO);
+            let fraco = d.escolha == Escolha::Blocked || d.p < if d.escolha == Escolha::Done { done_min } else { fraco_min }
+                || (d.escolha == Escolha::Wait && esperando) || (bloqueado && !ajudou);
             // A truncated tree may hide the control the goal needs, but a sure pick was found in what came.
-            if !fraco && (!obs.elements.is_empty() && (!obs.truncated || d.p >= 0.6) && divergencia.is_none() || ajudou) { break d; }
+            if !fraco && (!obs.elements.is_empty() && (!obs.truncated || d.p >= truncada_min) && divergencia.is_none() || ajudou) { break d; }
             if ajudou {
                 // Jev still unsure: the help's first action decides, after the risk question.
                 if let Some(proposta) = primeira_ajuda.take() {
                     let estado = secretos.estado(op, &obs, recentes, Some(&dica));
                     let limite = controle.restante()?.min(Duration::from_secs(30));
-                    let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, None, limite)).await?;
+                    let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem.as_ref(), limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
                     let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
                     // Jev's own confidence stays on record: the step came from the help, not from a sure vote.
-                    break Decisao { escolha: Escolha::Indice(i), p: d.p, risco, top: vec![] };
+                    break Decisao { escolha: Escolha::Indice(i), risco, top: vec![], ..d };
                 }
                 r.motivo = format!("sem ação segura: Jev escolheu {opcao} com {}. {dica}", percentual(d.p)).trim().into();
                 return Ok(());
             }
             ajudou = true;
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos).await?;
+            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos, print.as_deref()).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             dica = com_dica(&nome, falta_dica.as_ref().map_or_else(|| ajuda.interpretacao.clone(), |f| format!("{f}\n{}", ajuda.interpretacao)));
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
+            if bloqueado { controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "auxiliar_discorda":true}), secretos)).await?; }
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
                 .flat_map(|a| no_campo(a, &obs, recentes)).map(|a| secretos.candidato(a, &obs)).collect();

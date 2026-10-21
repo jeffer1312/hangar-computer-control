@@ -1,25 +1,34 @@
 //! Jev client: one choice + risk request per decision, batches and tournament (laco_uia.py:267-315).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
+use tokio::time::Instant;
 use serde_json::{Map, Value, json};
 
 use crate::http::{self, prob};
 use crate::llm::Imagem;
-use crate::prompts::{DESFECHOS, REGRAS, REGRAS_LOTE, risco_pergunta};
+use crate::prompts::{DESFECHOS, REGRAS, REGRAS_LOTE, bloqueio_pergunta, risco_pergunta};
 use crate::tipos::{Candidato, Decisao, Escolha, Intencao};
 
 pub const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
 pub const JEV_MODEL: &str = "jev-latest";
 /// TypeSafe refuses more than 255 options per question; 4 are left for DONE/WAIT/BLOCKED.
 pub const LOTE: usize = 251;
+/// A request with the screenshot waits at most this long, and only goes with `PRAZO_IMAGEM` left: a retry without
+/// it must still fit.
+const TETO_IMAGEM: Duration = Duration::from_secs(15);
+const PRAZO_IMAGEM: Duration = Duration::from_secs(20);
+const BLOQUEIO: &str = "blocked";
 
 pub struct Jev {
     pub url: String,
     pub key: String,
     pub model: String,
     http: reqwest::Client,
+    /// A request with the screenshot failed once: later requests go without it.
+    sem_imagem: AtomicBool,
 }
 
 #[derive(PartialEq)]
@@ -66,6 +75,14 @@ fn risco(r: &Map<String, Value>) -> Result<f64, String> {
 
 const FORA: &str = "IndexError: list index out of range";
 
+type Top = Vec<(String, f64, String)>;
+
+/// What happened to the screenshot passed with a request (`Decisao::imagem`).
+struct Envio {
+    imagem: &'static str,
+    motivo: String,
+}
+
 /// Python `round(p, 2)`: correctly rounded decimal, ties to even on the exact binary value.
 fn arredonda(p: f64) -> f64 {
     format!("{p:.2}").parse().unwrap_or(p)
@@ -73,15 +90,42 @@ fn arredonda(p: f64) -> f64 {
 
 impl Jev {
     pub fn new(url: String, key: String, model: String) -> Jev {
-        Jev { url, key, model, http: http::cliente() }
+        Jev { url, key, model, http: http::cliente(), sem_imagem: AtomicBool::new(false) }
     }
 
-    async fn perguntar(&self, state: &Value, questions: Value, imagem: Option<&Imagem>, timeout: Duration) -> Result<Map<String, Value>, String> {
+    /// The answers, and what happened to the screenshot (`enviada` when it went with them). A request with it that
+    /// fails is asked again without it, and the screenshot stays off for the rest of the run.
+    async fn perguntar(&self, state: &Value, questions: Value, imagem: Option<&Imagem>, timeout: Duration)
+        -> Result<(Map<String, Value>, Envio), String> {
+        let fim = Instant::now() + timeout;
+        let mut envio = Envio { imagem: "", motivo: String::new() };
+        if let Some(imagem) = imagem {
+            if self.sem_imagem.load(Ordering::Relaxed) {
+                envio.imagem = "desligada";
+            } else if timeout < PRAZO_IMAGEM {
+                envio.imagem = "sem_prazo";
+            } else {
+                match self.pedir(state, &questions, Some(imagem), timeout.min(TETO_IMAGEM)).await {
+                    Ok(r) => return Ok((r, Envio { imagem: "enviada", motivo: String::new() })),
+                    Err(e) => {
+                        self.sem_imagem.store(true, Ordering::Relaxed);
+                        envio = Envio { imagem: "falhou", motivo: e.chars().take(300).collect() };
+                    }
+                }
+            }
+        }
+        // Without the screenshot, questions about it have nothing to look at.
+        let mut questions = questions;
+        if let Value::Object(q) = &mut questions { q.remove(BLOQUEIO); }
+        let r = self.pedir(state, &questions, None, fim.saturating_duration_since(Instant::now())).await?;
+        Ok((r, envio))
+    }
+
+    async fn pedir(&self, state: &Value, questions: &Value, imagem: Option<&Imagem>, timeout: Duration) -> Result<Map<String, Value>, String> {
         let mut corpo = json!({"model": self.model, "state": state, "questions": questions});
         let mut cabecalhos: &[(&str, &str)] = &[];
-        if let Some(imagem) = imagem
-            && let Value::Object(m) = &mut corpo["state"]
-        {
+        if let Some(imagem) = imagem {
+            let Value::Object(m) = &mut corpo["state"] else { return Err("TypeError: state sem objeto para a imagem".into()) };
             let b64 = base64::engine::general_purpose::STANDARD.encode(&imagem.png);
             // OpenRouter silently drops `assets`: there the image only counts as an `image_url` part in `state`.
             if self.url.contains("openrouter.ai") {
@@ -108,7 +152,7 @@ impl Jev {
         if let Value::Object(m) = &mut state {
             m.insert("proposedAction".into(), json!(proposta));
         }
-        let r = self.perguntar(&state, json!({"risky": risco_pergunta()}), imagem, timeout).await?;
+        let (r, _) = self.perguntar(&state, json!({"risky": risco_pergunta()}), imagem, timeout).await?;
         risco(&r)
     }
 
@@ -117,7 +161,7 @@ impl Jev {
         let mut criterios = Map::new();
         for (i, o) in opcoes.iter().take(LOTE).enumerate() { criterios.insert(i.to_string(), json!(o)); }
         criterios.insert("NONE".into(), json!("None of the options."));
-        let r = self.perguntar(estado, json!({"pick": {"type": "choice", "instructions": instrucoes, "criteria": criterios}}), imagem, timeout).await?;
+        let (r, _) = self.perguntar(estado, json!({"pick": {"type": "choice", "instructions": instrucoes, "criteria": criterios}}), imagem, timeout).await?;
         let r = r.get("pick");
         let opcao = r.and_then(|r| r.get("choice")).and_then(Value::as_str);
         let p = prob(opcao.and_then(|o| r?.get("probabilities")?.get(o)));
@@ -147,10 +191,16 @@ impl Jev {
                 perguntas.insert(nome, json!({"type": "choice", "instructions": regras, "criteria": criterios}));
             }
             perguntas.insert("risky".into(), risco_pergunta());
-            let respostas = self.perguntar(estado, Value::Object(perguntas), imagem, timeout).await?;
+            perguntas.insert(BLOQUEIO.into(), bloqueio_pergunta());
+            let (respostas, envio) = self.perguntar(estado, Value::Object(perguntas), imagem, timeout).await?;
             let risco = risco(&respostas)?;
+            let com_imagem = envio.imagem == "enviada";
+            let blocked = com_imagem.then(|| prob(respostas.get(BLOQUEIO).and_then(|b| b.get("noul"))));
+            let decisao = |escolha, p, top| Decisao { escolha, p, risco, top, com_imagem, imagem: envio.imagem,
+                motivo: envio.motivo.clone(), blocked };
             if lotes.len() == 1 {
-                return um_lote(respostas.get("action"), cands, risco);
+                let (escolha, p, top) = um_lote(respostas.get("action"), cands)?;
+                return Ok(decisao(escolha, p, top));
             }
             let mut vencedores = Vec::new();
             for n in 0..lotes.len() {
@@ -159,7 +209,7 @@ impl Jev {
                 let p = prob(opcao.and_then(|o| r?.get("probabilities")?.get(o)));
                 match opcao {
                     Some(o @ ("DONE" | "WAIT")) => {
-                        return Ok(Decisao { escolha: desfecho(o)?, p, risco, top: vec![] });
+                        return Ok(decisao(desfecho(o)?, p, vec![]));
                     }
                     Some(o) => {
                         if let Some(i) = indice(o) {
@@ -173,8 +223,8 @@ impl Jev {
                 return Err(FORA.into());
             }
             match vencedores[..] {
-                [] => return Ok(Decisao { escolha: Escolha::Blocked, p: 1.0, risco, top: vec![] }),
-                [(i, p)] => return Ok(Decisao { escolha: Escolha::Indice(i), p, risco, top: vec![] }),
+                [] => return Ok(decisao(Escolha::Blocked, 1.0, vec![])),
+                [(i, p)] => return Ok(decisao(Escolha::Indice(i), p, vec![])),
                 _ => restantes = vencedores.iter().map(|&(i, _)| i).collect(),
             }
         }
@@ -183,7 +233,7 @@ impl Jev {
 
 /// Same intent spread over several nodes (ComboBox 'Nome:', Edit 'Nome', an LLM `text` with the same value)
 /// splits the vote: sum per intent, pick the best group, then its best node.
-fn um_lote(resposta: Option<&Value>, cands: &[Candidato], risco: f64) -> Result<Decisao, String> {
+fn um_lote(resposta: Option<&Value>, cands: &[Candidato]) -> Result<(Escolha, f64, Top), String> {
     let probs: Vec<(&str, f64)> = resposta
         .and_then(|r| r.get("probabilities"))
         .and_then(Value::as_object)
@@ -228,5 +278,5 @@ fn um_lote(resposta: Option<&Value>, cands: &[Candidato], risco: f64) -> Result<
             (k.to_owned(), arredonda(p), desc)
         })
         .collect();
-    Ok(Decisao { escolha, p: soma(melhor), risco, top })
+    Ok((escolha, soma(melhor), top))
 }

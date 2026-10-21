@@ -43,6 +43,13 @@ pub struct Decisao {
     pub p: f64,
     pub risco: f64,
     pub top: Vec<(String, f64, String)>,
+    /// Jev saw the screenshot when deciding.
+    pub com_imagem: bool,
+    /// What happened to the screenshot passed in: `enviada`, `falhou`, `desligada`, `sem_prazo`; empty without one.
+    pub imagem: &'static str,
+    pub motivo: String,
+    /// Jev's probability that nothing on the screenshot can clear the way; asked only with it.
+    pub blocked: Option<f64>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]

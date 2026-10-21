@@ -115,7 +115,7 @@ impl Session for FakeSession {
         s.captures += 1;
         match &s.screenshot_error {
             Some(e) => Err(e.clone()),
-            None => Ok(b"PNG".to_vec()),
+            None => Ok(png_1280x720()),
         }
     }
 
@@ -138,6 +138,10 @@ pub enum Answer {
     Vision(Value),
     /// Answers the `pick` question with the criterion containing this text ("NONE" picks none).
     Pick(&'static str, f64),
+    /// HTTP 400 to every request carrying the screenshot (`state.tela`), the inner answer to the first without it.
+    SemTela(Box<Answer>),
+    /// The inner answer plus `blocked` with this probability.
+    Bloqueio(Box<Answer>, f64),
 }
 
 #[derive(Clone)]
@@ -150,11 +154,20 @@ impl Script {
 impl Respond for Script {
     fn respond(&self, req: &Request) -> ResponseTemplate {
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        let answer = self.0.lock().unwrap().pop_front().expect("unexpected model request");
+        let mut fila = self.0.lock().unwrap();
+        if matches!(fila.front(), Some(Answer::SemTela(_))) && body["state"].get("tela").is_some() {
+            return ResponseTemplate::new(400).set_body_string("image not supported");
+        }
+        let (answer, bloqueio) = match fila.pop_front().expect("unexpected model request") {
+            Answer::SemTela(a) => (*a, None),
+            Answer::Bloqueio(a, b) => (*a, Some(b)),
+            a => (a, None),
+        };
+        drop(fila);
         let choice = |choice: &str, p: f64, risk: f64| json!({"answers": {
             "action": {"choice": choice, "probabilities": {choice: p}}, "risky": {"noul": risk},
         }});
-        let response = match answer {
+        let mut response = match answer {
             Answer::Choice(c, p, risk) => choice(c, p, risk),
             Answer::Select(description, p, risk) => {
                 let criteria = body["questions"]["action"]["criteria"].as_object().unwrap();
@@ -175,7 +188,9 @@ impl Respond for Script {
                 };
                 json!({"answers": {"pick": {"choice": k, "probabilities": {k.clone(): p}}}})
             }
+            Answer::SemTela(_) | Answer::Bloqueio(..) => panic!("wrappers do not nest"),
         };
+        if let Some(b) = bloqueio { response["answers"]["blocked"] = json!({"noul": b}); }
         ResponseTemplate::new(200).set_body_json(response)
     }
 }
@@ -199,3 +214,8 @@ pub fn help(actions: Value) -> Answer {
 }
 
 pub fn seconds(n: u64) -> Duration { Duration::from_secs(n) }
+
+/// Signature and IHDR of a 1280x720 PNG: all the loop reads from a screenshot.
+pub fn png_1280x720() -> Vec<u8> {
+    b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\x05\0\0\0\x02\xd0\x08\x06\0\0\0".to_vec()
+}

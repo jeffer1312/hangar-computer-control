@@ -13,6 +13,8 @@ use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const T: Duration = Duration::from_secs(5);
+/// Enough time left for the screenshot to go (20 s or more).
+const COM_IMAGEM: Duration = Duration::from_secs(30);
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x02";
 
 async fn responde(r: ResponseTemplate) -> MockServer {
@@ -280,7 +282,7 @@ async fn imagem_openrouter() {
     let s = responde(risco_ok()).await;
     let imagem = Imagem::de_png(png(1280, 720)).unwrap();
     let jev = Jev::new(format!("{}/openrouter.ai/api/alpha/decisions", s.uri()), "KEY".into(), JEV_MODEL.into());
-    jev.arriscado(&json!({"goal": "g"}), "p", Some(&imagem), T).await.unwrap();
+    jev.arriscado(&json!({"goal": "g"}), "p", Some(&imagem), COM_IMAGEM).await.unwrap();
     let pedido = &s.received_requests().await.unwrap()[0];
     let corpo: Value = serde_json::from_slice(&pedido.body).unwrap();
     let tela = &corpo["state"]["tela"];
@@ -297,7 +299,7 @@ async fn imagem_openrouter() {
 async fn imagem_typesafe() {
     let s = responde(risco_ok()).await;
     let imagem = Imagem::de_png(png(1280, 720)).unwrap();
-    Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", Some(&imagem), T).await.unwrap();
+    Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", Some(&imagem), COM_IMAGEM).await.unwrap();
     let pedido = &s.received_requests().await.unwrap()[0];
     let corpo: Value = serde_json::from_slice(&pedido.body).unwrap();
     let r = corpo["state"]["tela"].as_str().unwrap();

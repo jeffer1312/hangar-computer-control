@@ -46,6 +46,9 @@ async fn bodies(server: &MockServer) -> Vec<Value> {
     server.received_requests().await.unwrap().iter().map(|r| serde_json::from_slice(&r.body).unwrap()).collect()
 }
 
+/// Requests to the vision helper (the LLM), apart from Jev's.
+async fn ajudas(server: &MockServer) -> usize { bodies(server).await.iter().filter(|b| b.get("messages").is_some()).count() }
+
 fn action(v: Value) -> Action { serde_json::from_value(v).unwrap() }
 fn done() -> Answer { Answer::Choice("DONE", 0.95, 0.05) }
 fn select(s: &'static str) -> Answer { Answer::Select(s, 0.9, 0.05) }
@@ -83,7 +86,7 @@ async fn visual_hint_action_requires_selection() {
         help(json!([{"type":"text","target":"e0","value":"Ana"}])), select("text 'Ana'"), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().captures, 1);
+    assert_eq!(ajudas(&server).await, 1);
     assert_eq!(con.state.lock().unwrap().acts[0].0.kind.to_string(), "text");
     assert_eq!(bodies(&server).await[2]["state"]["hint"], "tela vista");
 }
@@ -120,7 +123,7 @@ async fn direct_path_types_text_then_presses_enter() {
         (action(json!({"type":"keys","keys":["Enter"]})), "o3".into()),
     ], "{}", r.resumo());
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().captures, 1, "uma ajuda só: as três ações saem no mesmo ciclo");
+    assert_eq!(ajudas(&server).await, 1, "uma ajuda só: as três ações saem no mesmo ciclo");
     let requests = bodies(&server).await;
     assert_eq!(requests.len(), 5);
     assert_eq!(requests[1]["state"]["proposedAction"], "keys CTRL+L");
@@ -283,7 +286,7 @@ async fn direct_sequence_runs_keys_text_keys_in_one_cycle() {
         (action(json!({"type":"text","value":"x.com"})), "o2".into()),
         (action(json!({"type":"keys","keys":["Enter"]})), "o3".into()),
     ]);
-    assert_eq!(con.state.lock().unwrap().captures, 1);
+    assert_eq!(ajudas(&server).await, 1);
     let diretas: Vec<_> = jev_log(&r).into_iter().filter(|l| l.get("direta").is_some()).collect();
     assert_eq!(diretas.iter().map(|l| l["direta"].as_str().unwrap()).collect::<Vec<_>>(),
         vec!["keys CTRL+L", "text 'x.com' no foco atual", "keys Enter"]);
@@ -910,7 +913,7 @@ async fn three_without_effect_asks_for_another_route_instead_of_stopping() {
     let r = run(op, &con).await;
     assert!(!r.motivo.starts_with("três ações seguidas sem efeito"), "{}", r.resumo());
     assert_eq!(con.state.lock().unwrap().acts.len(), 3);
-    assert_eq!(con.state.lock().unwrap().captures, 2, "{}", r.resumo());
+    assert_eq!(ajudas(&server).await, 2, "{}", r.resumo());
     let pedidos = bodies(&server).await;
     assert!(pedidos.iter().any(|b| b.to_string().contains("três ações seguidas sem efeito")), "a dica precisa dizer que nada mudou");
 }
@@ -958,12 +961,12 @@ async fn reclique_offered_after_no_effect() {
 #[tokio::test]
 async fn wait_three_times_calls_llm() {
     let con = FakeConnector::new(vec![tree("o1", "")]);
-    let (mut op, _server) = setup(vec![Answer::Choice("WAIT", 0.9, 0.05); 4].into_iter()
+    let (mut op, server) = setup(vec![Answer::Choice("WAIT", 0.9, 0.05); 4].into_iter()
         .chain([help(json!([])), Answer::Choice("BLOCKED", 0.9, 0.05)]).collect()).await;
     op.max_passos = 5;
     let r = run(op, &con).await;
     assert!(r.motivo.contains("sem ação segura"));
-    assert_eq!(con.state.lock().unwrap().captures, 1);
+    assert_eq!(ajudas(&server).await, 1);
     assert!(con.state.lock().unwrap().acts.is_empty());
 }
 
@@ -971,10 +974,10 @@ async fn wait_three_times_calls_llm() {
 async fn truncated_tree_calls_llm_when_jev_is_unsure() {
     let mut obs = tree("o1", ""); obs.truncated = true;
     let con = FakeConnector::new(vec![obs, tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![Answer::Select("set_value", 0.4, 0.05), help(json!([])), select("set_value"), done()]).await;
+    let (op, server) = setup(vec![Answer::Select("set_value", 0.4, 0.05), help(json!([])), select("set_value"), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().captures, 1);
+    assert_eq!(ajudas(&server).await, 1);
     assert_eq!(con.state.lock().unwrap().acts.len(), 1);
 }
 
@@ -1733,12 +1736,12 @@ async fn read_goal_done_from_tree_returns_window_text() {
     obs.elements.push(serde_json::from_value(json!({"id":"e2","name":"","role":"Group","value":"Resposta de exemplo na conversa",
         "enabled":true,"rect":null,"focused":false,"actions":[]})).unwrap());
     let con = FakeConnector::new(vec![obs]);
-    let (mut op, _server) = setup(vec![done()]).await;
+    let (mut op, server) = setup(vec![done()]).await;
     op.texto = "abra a conversa do Junior e leia a resposta".into();
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     assert!(r.motivo.contains("Resposta de exemplo na conversa"), "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().captures, 0);
+    assert_eq!(ajudas(&server).await, 0);
 }
 
 // Speech turned "Júnior" into "Juno"; one similar name on screen is the plausible target.
@@ -2299,10 +2302,10 @@ async fn truncated_tree_with_a_sure_pick_skips_the_vision_model() {
     let mut cortada = tree("o1", "");
     cortada.truncated = true;
     let con = FakeConnector::new(vec![cortada, tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().captures, 0);
+    assert_eq!(ajudas(&server).await, 0);
 }
 
 // /tmp/hcu-byF4iu: "clicar no botão 'Criar Página'" came back done at 85% without a single action.
@@ -2340,7 +2343,7 @@ async fn a_field_left_with_another_value_is_a_failure_that_goes_to_the_vision_mo
         Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
     let r = run(op, &con).await;
     assert!(!r.ok);
-    assert_eq!(con.state.lock().unwrap().captures, 1, "{}", r.resumo());
+    assert_eq!(ajudas(&server).await, 1, "{}", r.resumo());
     let requests = bodies(&server).await;
     let resultado = requests[1]["state"]["recentActions"][0]["result"].as_str().unwrap();
     assert!(resultado.starts_with("NOT confirmed: o campo Edit 'Nome' ficou com 'An'"), "{resultado}");
@@ -2351,12 +2354,12 @@ async fn a_field_left_with_another_value_is_a_failure_that_goes_to_the_vision_mo
 #[tokio::test]
 async fn a_masked_field_with_the_typed_digits_is_not_a_divergence() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "123.456.789-00"), tree("o3", "123.456.789-00")]);
-    let (mut op, _server) = setup(vec![select("set_value"), Answer::Choice("WAIT", 0.9, 0.05), done()]).await;
+    let (mut op, server) = setup(vec![select("set_value"), Answer::Choice("WAIT", 0.9, 0.05), done()]).await;
     op.texto = "preencher Nome com o cpf".into();
     op.dados = json!({"cpf":"12345678900"}).as_object().unwrap().clone();
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().captures, 0);
+    assert_eq!(ajudas(&server).await, 0);
 }
 
 // A secret typed wrong would show its partial echo in the message: the check stays off for secret values.
@@ -2527,4 +2530,106 @@ async fn a_journal_that_cannot_be_written_is_reported() {
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     assert!(r.roteiro.as_deref().is_some_and(|t| t.contains("diário de passos não gravado")), "{:?}", r.roteiro);
+}
+
+fn decisoes(r: &Resultado) -> Vec<Value> {
+    jev_log(r).into_iter().filter(|l| l.get("choice").is_some() && l.get("sem_dica").is_none()).collect()
+}
+
+#[tokio::test]
+async fn print_em_todo_passo() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let pedidos = bodies(&server).await;
+    assert_eq!(pedidos.len(), 2);
+    for p in &pedidos {
+        assert!(p["questions"].get("action").is_some());
+        assert!(p["state"]["tela"].as_str().is_some_and(|t| p["assets"][t]["format"] == "png"), "{p}");
+    }
+    let d = decisoes(&r);
+    assert_eq!(d.len(), 2);
+    assert!(d.iter().all(|l| l["imagem"] == "enviada"), "{d:?}");
+    assert_eq!(con.state.lock().unwrap().captures, 2);
+}
+
+// A request with the screenshot that fails is asked again without it, and the rest of the run goes without.
+#[tokio::test]
+async fn imagem_falha_refaz_sem() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, server) = setup(vec![Answer::SemTela(Box::new(select("set_value"))), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    let d = decisoes(&r);
+    assert_eq!(d[0]["imagem"], "falhou", "{d:?}");
+    assert!(d[0]["motivo"].as_str().is_some_and(|m| m.contains("400")), "{d:?}");
+    assert_eq!(d[1]["imagem"], "desligada", "{d:?}");
+    let com_tela = bodies(&server).await.iter().filter(|b| b["state"].get("tela").is_some()).count();
+    assert_eq!(com_tela, 1, "only the request that failed carried the screenshot");
+}
+
+// Under 20 s left the screenshot does not go: a slow request with it would eat the rest of the run.
+#[tokio::test]
+async fn imagem_sem_prazo() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op, server) = setup(vec![select("set_value"), done()]).await;
+    op.limite = seconds(15);
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(bodies(&server).await.iter().all(|b| b["state"].get("tela").is_none()));
+    assert!(decisoes(&r).iter().all(|l| l["imagem"] == "sem_prazo"), "{:?}", decisoes(&r));
+}
+
+// Jev sees a screen nothing on it can clear: the helper is asked and writes why the run stops.
+#[tokio::test]
+async fn bloqueio_pelo_jev() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (op, server) = setup(vec![Answer::Bloqueio(Box::new(select("set_value")), 0.9),
+        Answer::Vision(json!({"interpretacao": "diálogo pedindo a senha da rede", "acoes": [], "impedimento": "diálogo de rede"}))]).await;
+    let r = run(op, &con).await;
+    assert!(!r.ok);
+    assert_eq!(r.motivo, "diálogo de rede", "{}", r.resumo());
+    assert!(con.state.lock().unwrap().acts.is_empty());
+    assert!(bodies(&server).await[0]["questions"].get("blocked").is_some());
+    assert_eq!(decisoes(&r)[0]["blocked"], 0.9);
+}
+
+// The helper sees no blocker: its word stands, the loop goes on and the disagreement is on record.
+#[tokio::test]
+async fn bloqueio_auxiliar_discorda() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![Answer::Bloqueio(Box::new(select("set_value")), 0.9), help(json!([])),
+        Answer::Bloqueio(Box::new(select("set_value")), 0.9), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    assert!(jev_log(&r).iter().any(|l| l["auxiliar_discorda"] == true), "{:?}", jev_log(&r));
+}
+
+// The helper reads the cycle's print: one capture per cycle, never a second one for the help.
+#[tokio::test]
+async fn captura_reaproveitada() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"text","target":"e0","value":"Ana"}])), select("text 'Ana'"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(ajudas(&server).await, 1);
+    assert_eq!(con.state.lock().unwrap().captures, 2, "two cycles, one capture each");
+    assert_eq!(r.captura, Some(r.registro.clone().unwrap().join("tela-0.png")));
+}
+
+// A failed capture does not stop the cycle: Jev decides from the tree, and the record says why there was no print.
+#[tokio::test]
+async fn sem_print_segue_pela_arvore() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    con.state.lock().unwrap().screenshot_error = Some(SessionError::Agent("captura recusada".into()));
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert!(bodies(&server).await.iter().all(|b| b["state"].get("tela").is_none()));
+    let d = decisoes(&r);
+    assert!(d.iter().all(|l| l["imagem"] == "sem_print" && l["motivo"].as_str().is_some_and(|m| m.contains("captura recusada"))), "{d:?}");
 }

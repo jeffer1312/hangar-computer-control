@@ -29,6 +29,18 @@ pub fn risco_pergunta() -> Value {
     })
 }
 
+/// Asked only with the screenshot. A message box that can be closed is not a blocker, as in AJUDA.
+pub fn bloqueio_pergunta() -> Value {
+    json!({
+        "type": "noul",
+        "instructions": "A dialog, error or login wall on the screenshot `tela` prevents progress toward the goal and no visible action can clear it.",
+        "criteria": {
+            "true": "The screen demands something missing from `goal` and `data` (a credential, a network password, an application), or shows an error no visible control can get past.",
+            "false": "Nothing blocks the goal, or what is in the way can be closed, answered or filled with a visible control and the given data (a message box with OK or Close is not a blocker).",
+        },
+    })
+}
+
 pub const AJUDA: &str = "You assist a desktop controller (Windows or Linux). Jev picks the action; you only interpret. Given the goal, the current accessibility tree (`elements`, possibly empty), recent actions and, when attached, a screenshot: describe in `interpretacao` what is on screen and what is missing for the goal. In `acoes` propose up to 6 concrete actions the tree does not offer: `text` with the value to type derived from goal/data, `keys` shortcuts, `launch` an application, or `mouse` at coordinates of a control seen in the screenshot (never without a screenshot). When the control the goal needs is off screen, scroll first: `mouse` with mode `scroll` and `delta` (positive scrolls down, 3 to 10 per step) over the area to scroll. Order `acoes` best first: the first one is the next step toward the goal and may be executed directly. Set `target` only to an `id` listed in `elements`; otherwise leave it null. Give every action a short `rotulo` naming what it hits (\"botão Não\", \"campo Nome\"). Mouse coordinates are pixels of the ATTACHED IMAGE, whose size comes in `imageSize`; coordinates written in the goal are screen pixels, never copy them. Never invent data. `<senha>` in `data`, in a field or in the goal is a secret value the controller holds and types itself: it is never missing, so never report it as an impediment. A message box, warning or error dialog is not a blocker: propose dismissing it (its button by `mouse`, or `keys` Enter/Escape) so the goal can continue. Fill `impedimento` only when the CURRENT screen demands a datum, credential or application that is missing (for example a login form is showing and no credentials were given). Never anticipate a future step: a site may already be logged in, so first propose the actions that get there. Reply with JSON only matching this schema: ";
 
 /// `json.dumps(Ajuda.model_json_schema())` from the Python, pasted verbatim.
