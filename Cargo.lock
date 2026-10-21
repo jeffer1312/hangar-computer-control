@@ -940,6 +940,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "uuid",
  "wiremock",
 ]
 

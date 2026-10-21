@@ -2,9 +2,11 @@
 
 use std::time::Duration;
 
+use base64::Engine;
 use serde_json::{Map, Value, json};
 
 use crate::http::{self, prob};
+use crate::llm::Imagem;
 use crate::prompts::{DESFECHOS, REGRAS, REGRAS_LOTE, risco_pergunta};
 use crate::tipos::{Candidato, Decisao, Escolha, Intencao};
 
@@ -74,9 +76,26 @@ impl Jev {
         Jev { url, key, model, http: http::cliente() }
     }
 
-    async fn perguntar(&self, state: &Value, questions: Value, timeout: Duration) -> Result<Map<String, Value>, String> {
-        let corpo = json!({"model": self.model, "state": state, "questions": questions});
-        let mut r = http::post(&self.http, &self.url, &corpo, &self.key, timeout).await.map_err(|f| f.to_string())?;
+    async fn perguntar(&self, state: &Value, questions: Value, imagem: Option<&Imagem>, timeout: Duration) -> Result<Map<String, Value>, String> {
+        let mut corpo = json!({"model": self.model, "state": state, "questions": questions});
+        let mut cabecalhos: &[(&str, &str)] = &[];
+        if let Some(imagem) = imagem
+            && let Value::Object(m) = &mut corpo["state"]
+        {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&imagem.png);
+            // OpenRouter silently drops `assets`: there the image only counts as an `image_url` part in `state`.
+            if self.url.contains("openrouter.ai") {
+                m.insert("tela".into(), json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{b64}")}}));
+            } else {
+                let r = format!("img-{}", uuid::Uuid::new_v4());
+                m.insert("tela".into(), json!(r));
+                let mut assets = Map::new();
+                assets.insert(r, json!({"type": "image", "data_base64": b64, "format": "png"}));
+                corpo["assets"] = Value::Object(assets);
+                cabecalhos = &[("TypeSafe-Danger-Zone-Images", "true")];
+            }
+        }
+        let mut r = http::post(&self.http, &self.url, &corpo, &self.key, cabecalhos, timeout).await.map_err(|f| f.to_string())?;
         match r.get_mut("answers").map(Value::take) {
             Some(Value::Object(a)) => Ok(a),
             Some(v) => Err(sem_get(&v)),
@@ -84,21 +103,21 @@ impl Jev {
         }
     }
 
-    pub async fn arriscado(&self, estado: &Value, proposta: &str, timeout: Duration) -> Result<f64, String> {
+    pub async fn arriscado(&self, estado: &Value, proposta: &str, imagem: Option<&Imagem>, timeout: Duration) -> Result<f64, String> {
         let mut state = estado.clone();
         if let Value::Object(m) = &mut state {
             m.insert("proposedAction".into(), json!(proposta));
         }
-        let r = self.perguntar(&state, json!({"risky": risco_pergunta()}), timeout).await?;
+        let r = self.perguntar(&state, json!({"risky": risco_pergunta()}), imagem, timeout).await?;
         risco(&r)
     }
 
     /// One `choice` among `opcoes` plus NONE: the index picked (None for NONE) and its probability.
-    pub async fn escolher(&self, estado: &Value, instrucoes: &str, opcoes: &[String], timeout: Duration) -> Result<(Option<usize>, f64), String> {
+    pub async fn escolher(&self, estado: &Value, instrucoes: &str, opcoes: &[String], imagem: Option<&Imagem>, timeout: Duration) -> Result<(Option<usize>, f64), String> {
         let mut criterios = Map::new();
         for (i, o) in opcoes.iter().take(LOTE).enumerate() { criterios.insert(i.to_string(), json!(o)); }
         criterios.insert("NONE".into(), json!("None of the options."));
-        let r = self.perguntar(estado, json!({"pick": {"type": "choice", "instructions": instrucoes, "criteria": criterios}}), timeout).await?;
+        let r = self.perguntar(estado, json!({"pick": {"type": "choice", "instructions": instrucoes, "criteria": criterios}}), imagem, timeout).await?;
         let r = r.get("pick");
         let opcao = r.and_then(|r| r.get("choice")).and_then(Value::as_str);
         let p = prob(opcao.and_then(|o| r?.get("probabilities")?.get(o)));
@@ -108,7 +127,7 @@ impl Jev {
         }
     }
 
-    pub async fn decidir(&self, estado: &Value, cands: &[Candidato], timeout: Duration) -> Result<Decisao, String> {
+    pub async fn decidir(&self, estado: &Value, cands: &[Candidato], imagem: Option<&Imagem>, timeout: Duration) -> Result<Decisao, String> {
         let mut restantes: Vec<usize> = (0..cands.len()).collect();
         loop {
             let mut lotes: Vec<&[usize]> = restantes.chunks(LOTE).collect();
@@ -128,7 +147,7 @@ impl Jev {
                 perguntas.insert(nome, json!({"type": "choice", "instructions": regras, "criteria": criterios}));
             }
             perguntas.insert("risky".into(), risco_pergunta());
-            let respostas = self.perguntar(estado, Value::Object(perguntas), timeout).await?;
+            let respostas = self.perguntar(estado, Value::Object(perguntas), imagem, timeout).await?;
             let risco = risco(&respostas)?;
             if lotes.len() == 1 {
                 return um_lote(respostas.get("action"), cands, risco);

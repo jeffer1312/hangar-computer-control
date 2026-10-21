@@ -54,11 +54,16 @@ fn rede(e: reqwest::Error) -> Falha {
 
 /// POST `corpo` with `authorization: Bearer <chave>`; non-2xx becomes `HTTP <code> em <url>: <2000 bytes>`
 /// with the key replaced by `[redigido]`.
-pub async fn post(http: &reqwest::Client, url: &str, corpo: &Value, chave: &str, timeout: Duration) -> Result<Value, Falha> {
-    let mut r = http
+pub async fn post(http: &reqwest::Client, url: &str, corpo: &Value, chave: &str, cabecalhos: &[(&str, &str)],
+                  timeout: Duration) -> Result<Value, Falha> {
+    let mut pedido = http
         .post(url)
         .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {chave}"))
+        .header("authorization", format!("Bearer {chave}"));
+    for &(nome, valor) in cabecalhos {
+        pedido = pedido.header(nome, valor);
+    }
+    let mut r = pedido
         .body(serde_json::to_vec(corpo).expect("Value serializa"))
         .timeout(timeout)
         .send()

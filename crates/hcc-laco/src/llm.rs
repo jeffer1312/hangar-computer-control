@@ -54,6 +54,34 @@ fn be(b: &[u8]) -> u64 {
     b.iter().fold(0, |n, &x| (n << 8) | u64::from(x))
 }
 
+/// Width and height from IHDR (bytes 16-23), without decoding; None without the PNG signature.
+fn dimensoes(png: &[u8]) -> Option<(u64, u64)> {
+    let parte = |a: usize, b: usize| be(png.get(a..b.min(png.len())).unwrap_or_default());
+    png.starts_with(PNG).then(|| (parte(16, 20), parte(20, 24)))
+}
+
+/// Screenshot that goes to Jev with a decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Imagem {
+    pub png: Vec<u8>,
+    pub largura: u64,
+    pub altura: u64,
+}
+
+impl Imagem {
+    /// Typesafe takes 280 <= side <= 1568 (which also keeps the area within its 78,400..=2,458,624).
+    pub fn de_png(png: Vec<u8>) -> Result<Imagem, String> {
+        let (largura, altura) = dimensoes(&png).ok_or("sem assinatura PNG")?;
+        if largura.max(altura) > 1568 {
+            return Err(format!("lado acima de 1568: {largura}x{altura}"));
+        }
+        if largura.min(altura) < 280 {
+            return Err(format!("lado abaixo de 280: {largura}x{altura}"));
+        }
+        Ok(Imagem { png, largura, altura })
+    }
+}
+
 impl Llm {
     pub fn new(url: String, model: String, effort: Option<String>, key: Option<String>) -> Llm {
         Llm { url, model, effort, key, http: http::cliente(), sem_formato: AtomicBool::new(false) }
@@ -85,11 +113,10 @@ impl Llm {
             Falha::new("RuntimeError", "falta LLM_PROXY_KEY no ambiente para o fallback de interpretação")
         })?;
         let mut estado = estado.clone();
-        if png.starts_with(PNG)
+        if let Some((largura, altura)) = dimensoes(png)
             && let Value::Object(m) = &mut estado
         {
-            let parte = |a: usize, b: usize| be(png.get(a..b.min(png.len())).unwrap_or_default());
-            m.insert("imageSize".into(), json!({"width": parte(16, 20), "height": parte(20, 24)}));
+            m.insert("imageSize".into(), json!({"width": largura, "height": altura}));
         }
         let mut conteudo = vec![json!({"type": "text", "text": py_dumps(&estado)})];
         if !png.is_empty() {
@@ -108,13 +135,13 @@ impl Llm {
             }
             let formato = !self.sem_formato.load(Ordering::Relaxed);
             if formato { corpo["response_format"] = FORMATO.clone(); }
-            let r = match http::post(&self.http, &self.url, &corpo, chave, timeout).await {
+            let r = match http::post(&self.http, &self.url, &corpo, chave, &[], timeout).await {
                 // An endpoint without structured output still gets the request; the reply is parsed from the text.
                 // Endpoints name the refusal differently (response_format, json_schema, schema): any 400 counts.
                 Err(f) if formato && f.msg.starts_with("HTTP 400") => {
                     self.sem_formato.store(true, Ordering::Relaxed);
                     if let Value::Object(m) = &mut corpo { m.remove("response_format"); }
-                    http::post(&self.http, &self.url, &corpo, chave, timeout).await?
+                    http::post(&self.http, &self.url, &corpo, chave, &[], timeout).await?
                 }
                 r => r?,
             };

@@ -883,7 +883,7 @@ async fn batch_selection_returns_numeric_winner() {
         "batch_1":{"choice":"260","probabilities":{"260":0.8}}, "risky":{"noul":0},
     }}))).mount(&server).await;
     let c = candidatos(&obs, &Map::new(), &HashSet::new());
-    let d = Jev::new(server.uri(), "fake-key".into(), JEV_MODEL.into()).decidir(&json!({}), &c, seconds(10)).await.unwrap();
+    let d = Jev::new(server.uri(), "fake-key".into(), JEV_MODEL.into()).decidir(&json!({}), &c, None, seconds(10)).await.unwrap();
     assert_eq!((d.escolha, d.p, d.risco), (Escolha::Indice(260), 0.8, 0.0));
     assert_eq!(bodies(&server).await[0]["questions"]["batch_0"]["criteria"].as_object().unwrap().len(), LOTE + 3);
 }

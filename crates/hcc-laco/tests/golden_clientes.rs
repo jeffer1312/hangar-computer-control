@@ -107,7 +107,7 @@ async fn decidir_matches_python() {
     for caso in g["decidir"].as_array().unwrap() {
         let s = servidor(&caso["respostas"]).await;
         let cands: Vec<Candidato> = caso["candidatos"].as_array().unwrap().iter().map(candidato).collect();
-        let d = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).decidir(&caso["estado"], &cands, T).await.unwrap();
+        let d = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).decidir(&caso["estado"], &cands, None, T).await.unwrap();
         let r = &caso["resultado"];
         assert_eq!(d.escolha, escolha(r["choice"].as_str().unwrap()), "{}", caso["nome"]);
         perto(d.p, &r["probability"]);
@@ -124,7 +124,7 @@ async fn arriscado_matches_python() {
     let caso = &g["arriscado"];
     let s = servidor(&Value::Array(vec![caso["resposta"].clone()])).await;
     let jev = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into());
-    let p = jev.arriscado(&caso["estado"], caso["proposta"].as_str().unwrap(), T).await.unwrap();
+    let p = jev.arriscado(&caso["estado"], caso["proposta"].as_str().unwrap(), None, T).await.unwrap();
     perto(p, &caso["resultado"]);
     confere_pedidos(&s, &caso["pedidos"]).await;
 }

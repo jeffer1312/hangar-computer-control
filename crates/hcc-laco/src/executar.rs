@@ -524,7 +524,7 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
     let textos: Vec<String> = opcoes.iter().map(|o| secretos.texto(&o.texto)).collect();
     let estado = secretos.estado(op, &vista, recentes, None);
     let limite = controle.restante()?.min(Duration::from_secs(30));
-    let (i, p) = match controle.medir("jev", Progresso::Jev, jev.escolher(&estado, TRECHO, &textos, limite)).await {
+    let (i, p) = match controle.medir("jev", Progresso::Jev, jev.escolher(&estado, TRECHO, &textos, None, limite)).await {
         Ok(v) => v,
         Err(e) => { anotar_roteiro(r, format!("escolha de trecho falhou: {}", secretos.texto(&e))); return Ok(false); }
     };
@@ -611,7 +611,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let opcoes: Vec<String> = achados.iter().map(|(_, r)| secretos.texto(&r.objetivo)).collect();
             let estado = json!({"goal": secretos.texto(&op.texto), "data": op.dados.keys().collect::<Vec<_>>()});
             let limite = controle.restante()?.min(Duration::from_secs(30));
-            match controle.medir("jev", Progresso::Jev, jev.escolher(&estado, PARECIDO, &opcoes, limite)).await {
+            match controle.medir("jev", Progresso::Jev, jev.escolher(&estado, PARECIDO, &opcoes, None, limite)).await {
                 Ok((i, p)) => {
                     controle.rodar(registrar(&pasta, json!({"parecido": i.map(|i| &opcoes[i]), "probability": p}), secretos)).await?;
                     if let Some(i) = i.filter(|_| p >= 0.8) {
@@ -820,7 +820,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             }
             if let Some(proposta) = propostas.first().filter(|p| !ambigua && dentro(&p.acao, &obs) && !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
                 let limite = controle.restante()?.min(Duration::from_secs(30));
-                let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, limite)).await?;
+                let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, None, limite)).await?;
                 controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
                 let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
                 direta = Some(Decisao { escolha: Escolha::Indice(i), p: 1.0, risco, top: vec![] });
@@ -830,7 +830,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if let Some(d) = direta.take() { break d; }
             let estado = secretos.estado(op, &obs, recentes, Some(&dica));
             let limite = controle.restante()?.min(Duration::from_secs(30));
-            let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, limite)).await?;
+            let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, None, limite)).await?;
             let opcao = escolha(d.escolha);
             // Python conta caracteres do JSON ASCII, apesar do nome bytes_estado.
             let ascii = py_dumps(&estado).chars().map(|c| if c.is_ascii() { 1 } else if u32::from(c) > 0xffff { 12 } else { 6 }).sum::<usize>();
@@ -846,7 +846,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if ajudou {
                     let sem_dica = secretos.estado(op, &obs, recentes, None);
                     let limite = controle.restante()?.min(Duration::from_secs(30));
-                    let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, limite)).await?;
+                    let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, None, limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "sem_dica":true,
                         "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco}), secretos)).await?;
                     controle.restante()?;
@@ -936,7 +936,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if let Some(proposta) = primeira_ajuda.take() {
                     let estado = secretos.estado(op, &obs, recentes, Some(&dica));
                     let limite = controle.restante()?.min(Duration::from_secs(30));
-                    let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, limite)).await?;
+                    let risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, None, limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica}), secretos)).await?;
                     let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
                     // Jev's own confidence stays on record: the step came from the help, not from a sure vote.
@@ -1034,7 +1034,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 || Barreiras::tres_sem_efeito(recentes).is_some() || Barreiras::barrar(vec![proxima.clone()], recentes).is_empty() { break; }
             let estado = secretos.estado(op, &vista, recentes, None);
             let limite = controle.restante()?.min(Duration::from_secs(30));
-            decisao.risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proxima.descricao, limite)).await?;
+            decisao.risco = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proxima.descricao, None, limite)).await?;
             controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proxima.descricao, "risky":decisao.risco, "dica":dica}), secretos)).await?;
             candidato = proxima;
         }
