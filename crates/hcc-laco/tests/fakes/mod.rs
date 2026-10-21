@@ -142,8 +142,6 @@ pub enum Answer {
     SemTela(Box<Answer>),
     /// The inner answer plus `blocked` with this probability.
     Bloqueio(Box<Answer>, f64),
-    /// Answers `pick` like `Pick`, and every `box_*` question with [left, top, right, bottom, confidence].
-    Localiza(&'static str, f64, [f64; 5]),
 }
 
 #[derive(Clone)]
@@ -161,7 +159,7 @@ impl Respond for Script {
             return ResponseTemplate::new(400).set_body_string("image not supported");
         }
         // Jev's pick among the helper's proposals, unscripted: NONE, so the loop goes as it did without it.
-        if body["questions"]["pick"]["instructions"] == hcc_laco::prompts::PROPOSTA && !matches!(fila.front(), Some(Answer::Localiza(..))) {
+        if body["questions"]["pick"]["instructions"] == hcc_laco::prompts::PROPOSTA && !matches!(fila.front(), Some(Answer::Pick(..))) {
             return ResponseTemplate::new(200).set_body_json(json!({"answers": {"pick": {"choice": "NONE", "probabilities": {"NONE": 1.0}}}}));
         }
         let (answer, bloqueio) = match fila.pop_front().expect("unexpected model request") {
@@ -187,13 +185,6 @@ impl Respond for Script {
             }
             Answer::Vision(help) => json!({"choices": [{"message": {"content": help.to_string()}}]}),
             Answer::Pick(texto, p) => json!({"answers": {"pick": pick(&body, texto, p)}}),
-            Answer::Localiza(texto, p, [left, top, right, bottom, conf]) => {
-                let mut answers = json!({"pick": pick(&body, texto, p)});
-                for k in body["questions"].as_object().unwrap().keys().filter(|k| k.starts_with("box_")) {
-                    answers[k] = json!({"type": "box", "box": {"left": left, "top": top, "right": right, "bottom": bottom}, "confidence": conf});
-                }
-                json!({"answers": answers})
-            }
             Answer::SemTela(_) | Answer::Bloqueio(..) => panic!("wrappers do not nest"),
         };
         if let Some(b) = bloqueio { response["answers"]["blocked"] = json!({"noul": b}); }

@@ -34,9 +34,6 @@ const FRACO_COM_PRINT: f64 = 0.25;
 const DONE_COM_PRINT: f64 = 0.75;
 const TRUNCADA_COM_PRINT: f64 = 0.6;
 const LIMITE_BLOQUEIO: f64 = 0.5;
-/// Jev's box moves the helper's click only from this confidence up.
-const LIMITE_BOX: f64 = 0.5;
-
 /// `imagem` and `motivo` for the record, the reason masked before the cut so no piece of a secret survives it.
 fn envio_registro(envio: &Envio, secretos: &Segredos) -> (&'static str, Option<String>) {
     (envio.imagem, (!envio.motivo.is_empty()).then(|| secretos.texto(&envio.motivo).chars().take(300).collect()))
@@ -338,8 +335,8 @@ async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arqui
 }
 
 /// `print` is the cycle's capture; without one (it failed) the screen is captured here, and a failure stops the run.
-/// With `imagem`, Jev picks among the helper's proposals seeing it (the third value) and corrects each labelled click
-/// to where it finds the control.
+/// With `imagem`, Jev picks among the helper's proposals seeing it (the third value); the click points stay the
+/// helper's.
 #[allow(clippy::too_many_arguments)]
 async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_>, r: &mut Resultado, ciclo: u32,
     obs: &Observation, estado: &Value, secretos: &Segredos, print: Option<&[u8]>, jev: &Jev, imagem: Option<&Imagem>)
@@ -370,23 +367,14 @@ async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_
     }
     let mut escolha = None;
     if let (Some(imagem), Some(pasta), false) = (imagem, r.registro.clone(), ajuda.acoes.is_empty()) {
-        let propostas: Vec<(String, Option<String>)> = ajuda.acoes.iter().map(|a| (secretos.descricao(a, obs, true),
-            a.rotulo.as_deref().filter(|_| a.kind == ActionType::Mouse).map(|r| secretos.texto(r)))).collect();
+        let propostas: Vec<String> = ajuda.acoes.iter().map(|a| secretos.descricao(a, obs, true)).collect();
         let limite = controle.restante()?.min(Duration::from_secs(30));
-        let (envio, achado) = controle.medir("jev", Progresso::Jev, async { Ok(jev.localizar_e_escolher(estado, imagem, &propostas, limite).await) }).await?;
+        let (envio, achado) = controle.medir("jev", Progresso::Jev, async { Ok(jev.escolher_proposta(estado, imagem, &propostas, limite).await) }).await?;
         let (envio, motivo) = envio_registro(&envio, secretos);
         let mut linha = json!({"ciclo": ciclo, "imagem": envio, "motivo": motivo});
-        if let Some(((i, p), pontos)) = achado {
-            let mut locais = Vec::new();
-            for (a, ponto) in ajuda.acoes.iter_mut().zip(pontos) {
-                let Some((cx, cy, conf)) = ponto else { continue };
-                let (cx, cy) = (cx.round() as i32, cy.round() as i32);
-                locais.push(json!({"rotulo": a.rotulo, "auxiliar": [a.x, a.y], "box": [cx, cy], "conf": conf}));
-                if conf >= LIMITE_BOX { (a.x, a.y) = (Some(cx), Some(cy)); }
-            }
+        if let Some((i, p)) = achado {
             escolha = i.map(|i| (i, p));
-            linha["localizacao"] = json!(locais);
-            linha["escolha"] = json!(i.map(|i| &propostas[i].0));
+            linha["escolha"] = json!(i.map(|i| &propostas[i]));
             linha["probability"] = json!(p);
         }
         controle.rodar(registrar(&pasta, linha, secretos)).await?;

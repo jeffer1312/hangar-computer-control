@@ -2658,34 +2658,17 @@ fn sem_controles(id: &str) -> Observation {
     obs
 }
 
-/// Box of a control centered at (640, 360) on the 1280x720 print, with this confidence.
-const CENTRO: [f64; 4] = [0.45, 0.45, 0.55, 0.55];
-
-// The helper aims the click at (100,100); Jev finds "Salvar" at the print's center and the click goes there.
+// Jev picks which of the helper's clicks runs, never where it lands: the point is the helper's, whatever box comes back.
 #[tokio::test]
-async fn box_corrige_clique() {
+async fn escolha_do_jev_mantem_o_ponto_do_auxiliar() {
     let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
-    let [l, t, r, b] = CENTRO;
-    let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"Salvar"}])),
-        Answer::Localiza("Salvar", 0.9, [l, t, r, b, 0.8]), Answer::Risk(0.05), done()]).await;
+    let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"Não"},
+        {"type":"mouse","x":200,"y":200,"rotulo":"Salvar"}])),
+        Answer::Pick("Salvar", 0.9), Answer::Risk(0.05), done()]).await;
     let res = run(op, &con).await;
     let acao = con.state.lock().unwrap().acts[0].0.clone();
-    assert_eq!((acao.x, acao.y), (Some(640), Some(360)), "{}", res.resumo());
+    assert_eq!((acao.x, acao.y, acao.rotulo.as_deref()), (Some(200), Some(200), Some("Salvar")), "{}", res.resumo());
     assert!(res.ok, "{}", res.resumo());
-    let local = jev_log(&res).into_iter().find_map(|l| l.get("localizacao").cloned()).unwrap();
-    assert_eq!(local, json!([{"rotulo": "Salvar", "auxiliar": [100, 100], "box": [640, 360], "conf": 0.8}]));
-}
-
-// Jev unsure where the control is: the helper's point stays.
-#[tokio::test]
-async fn box_fraco_mantem() {
-    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
-    let [l, t, r, b] = CENTRO;
-    let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"Salvar"}])),
-        Answer::Localiza("Salvar", 0.9, [l, t, r, b, 0.2]), Answer::Risk(0.05), done()]).await;
-    let res = run(op, &con).await;
-    let acao = con.state.lock().unwrap().acts[0].0.clone();
-    assert_eq!((acao.x, acao.y), (Some(100), Some(100)), "{}", res.resumo());
 }
 
 fn duas_teclas() -> Answer { help(json!([{"type":"keys","keys":["Escape"]}, {"type":"keys","keys":["Enter"]}])) }
@@ -2694,7 +2677,7 @@ fn duas_teclas() -> Answer { help(json!([{"type":"keys","keys":["Escape"]}, {"ty
 #[tokio::test]
 async fn sem_controles_jev_escolhe() {
     let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![duas_teclas(), Answer::Localiza("Enter", 0.8, [0.0; 5]), Answer::Risk(0.05), done()]).await;
+    let (op, _server) = setup(vec![duas_teclas(), Answer::Pick("Enter", 0.8), Answer::Risk(0.05), done()]).await;
     let res = run(op, &con).await;
     let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|a| a.0.clone()).collect();
     assert_eq!(acts, vec![action(json!({"type":"keys","keys":["Enter"]}))], "{}", res.resumo());
@@ -2705,7 +2688,7 @@ async fn sem_controles_jev_escolhe() {
 #[tokio::test]
 async fn sem_controles_jev_fraco() {
     let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![duas_teclas(), Answer::Localiza("Enter", 0.1, [0.0; 5]), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
+    let (op, _server) = setup(vec![duas_teclas(), Answer::Pick("Enter", 0.1), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
     let res = run(op, &con).await;
     let primeira = con.state.lock().unwrap().acts[0].0.clone();
     assert_eq!(primeira, action(json!({"type":"keys","keys":["Escape"]})), "{}", res.resumo());
@@ -2716,7 +2699,7 @@ async fn sem_controles_jev_fraco() {
 #[tokio::test]
 async fn ajuda_jev_escolhe_a_proposta() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), duas_teclas(), Answer::Localiza("Enter", 0.8, [0.0; 5]),
+    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), duas_teclas(), Answer::Pick("Enter", 0.8),
         Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Risk(0.05), done()]).await;
     let res = run(op, &con).await;
     let primeira = con.state.lock().unwrap().acts[0].0.clone();

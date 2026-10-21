@@ -75,10 +75,6 @@ fn risco(r: &Map<String, Value>) -> Result<f64, String> {
 const FORA: &str = "IndexError: list index out of range";
 
 type Top = Vec<(String, f64, String)>;
-/// Center of a control in screenshot pixels, and Jev's confidence in it.
-pub type Ponto = (f64, f64, f64);
-/// Jev's pick among the proposals (index, probability) and, per proposal, where its labelled control is.
-pub type Localizacao = ((Option<usize>, f64), Vec<Option<Ponto>>);
 
 fn pergunta_escolha(instrucoes: &str, opcoes: &[String]) -> Value {
     let mut criterios = Map::new();
@@ -94,13 +90,6 @@ fn resposta_escolha(r: Option<&Value>, n: usize) -> Result<(Option<usize>, f64),
         Some("NONE") | None => Ok((None, p)),
         Some(o) => indice(o).filter(|&i| i < n.min(LOTE)).map(|i| (Some(i), p)).ok_or_else(|| FORA.into()),
     }
-}
-
-/// A `box` answer's center in screenshot pixels and its confidence; the edges come as fractions of the screenshot.
-fn ponto(r: &Value, imagem: &Imagem) -> Option<Ponto> {
-    let lado = |k: &str| r.get("box")?.get(k)?.as_f64().filter(|v| (0.0..=1.0).contains(v));
-    let (esquerda, topo, direita, base) = (lado("left")?, lado("top")?, lado("right")?, lado("bottom")?);
-    Some(((esquerda + direita) / 2.0 * imagem.largura as f64, (topo + base) / 2.0 * imagem.altura as f64, prob(r.get("confidence"))))
 }
 
 /// Python `round(p, 2)`: correctly rounded decimal, ties to even on the exact binary value.
@@ -189,26 +178,18 @@ impl Jev {
         resposta_escolha(r.get("pick"), opcoes.len())
     }
 
-    /// One request over the screenshot: which of `propostas` (description, label of the control a click aims at)
-    /// is the next step, and where each labelled control is on the screenshot. Nothing without the screenshot
-    /// (turned off, no time left: the request would be pointless); a failed request turns it off like any other.
-    pub async fn localizar_e_escolher(&self, estado: &Value, imagem: &Imagem, propostas: &[(String, Option<String>)],
-        timeout: Duration) -> (Envio, Option<Localizacao>) {
-        let opcoes: Vec<String> = propostas.iter().map(|(d, _)| d.clone()).collect();
-        let mut perguntas = Map::new();
-        perguntas.insert("pick".into(), pergunta_escolha(PROPOSTA, &opcoes));
-        for (i, (_, rotulo)) in propostas.iter().enumerate() {
-            if let Some(r) = rotulo {
-                perguntas.insert(format!("box_{i}"), json!({"type": "box", "instructions": format!("{r} on the screenshot `tela`")}));
-            }
-        }
+    /// Which of the helper's `propostas` is the next step, seeing the screenshot: the index (None for NONE) and its
+    /// probability. Nothing without the screenshot (turned off, no time left: the pick would be pointless); a failed
+    /// request turns it off like any other.
+    pub async fn escolher_proposta(&self, estado: &Value, imagem: &Imagem, propostas: &[String], timeout: Duration)
+        -> (Envio, Option<(Option<usize>, f64)>) {
+        let perguntas = Map::from_iter([("pick".to_owned(), pergunta_escolha(PROPOSTA, propostas))]);
         let r = match self.com_imagem(estado, perguntas, imagem, timeout).await {
             Ok(r) => r,
             Err(e) => return (e, None),
         };
-        let pontos = (0..propostas.len()).map(|i| r.get(&format!("box_{i}")).and_then(|b| ponto(b, imagem))).collect();
-        match resposta_escolha(r.get("pick"), opcoes.len()) {
-            Ok(escolha) => (Envio { imagem: "enviada", motivo: String::new() }, Some((escolha, pontos))),
+        match resposta_escolha(r.get("pick"), propostas.len()) {
+            Ok(escolha) => (Envio { imagem: "enviada", motivo: String::new() }, Some(escolha)),
             Err(e) => (Envio { imagem: "falhou", motivo: e }, None),
         }
     }
