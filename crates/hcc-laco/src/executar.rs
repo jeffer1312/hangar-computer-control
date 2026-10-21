@@ -916,8 +916,10 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     let sem_dica = secretos.estado(op, &obs, recentes, None);
                     let limite = controle.restante()?.min(Duration::from_secs(30));
                     let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, imagem.as_ref(), limite)).await?;
+                    let (envio2, motivo2) = envio_registro(sem_imagem.as_ref().unwrap_or(&d2.envio), secretos);
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "sem_dica":true,
-                        "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco}), secretos)).await?;
+                        "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco, "imagem":envio2, "motivo":motivo2,
+                        "blocked":d2.blocked}), secretos)).await?;
                     controle.restante()?;
                     // Without the hint Jev sees no reading at all: WAIT there is "cannot tell", not an objection.
                     // Below 95% the reading counts only where nothing else could: an empty tree, or a goal whose
@@ -1028,7 +1030,11 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             leitura = ajuda.interpretacao.clone();
             dica = com_dica(&nome, falta_dica.as_ref().map_or_else(|| ajuda.interpretacao.clone(), |f| format!("{f}\n{}", ajuda.interpretacao)));
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
-            if bloqueado { controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "auxiliar_discorda":true}), secretos)).await?; }
+            // Without a reading the helper neither confirmed nor denied the block; the loop goes on as it would without it.
+            if bloqueado {
+                let quem = if leu { "auxiliar_discorda" } else { "auxiliar_indisponivel" };
+                controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, quem:true}), secretos)).await?;
+            }
             let propostas = ajuda.acoes.into_iter().filter(|a| a.kind != ActionType::Focus && a.target.as_ref().is_none_or(|id|
                 obs.windows.iter().any(|w| &w.id == id) || obs.elements.iter().any(|e| &e.id == id)))
                 .flat_map(|a| no_campo(a, &obs, recentes)).map(|a| secretos.candidato(a, &obs)).collect();

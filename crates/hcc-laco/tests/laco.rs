@@ -2705,3 +2705,16 @@ async fn ajuda_jev_escolhe_a_proposta() {
     let primeira = con.state.lock().unwrap().acts[0].0.clone();
     assert_eq!(primeira, action(json!({"type":"keys","keys":["Enter"]})), "{}", res.resumo());
 }
+
+// Jev sees the screen blocked and the helper cannot read it: the record says the helper was unavailable, not that it disagreed.
+#[tokio::test]
+async fn bloqueio_com_auxiliar_indisponivel() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![Answer::Bloqueio(Box::new(select("set_value")), 0.9),
+        Answer::Vision(json!("sem o objeto")), Answer::Vision(json!("sem o objeto")),
+        Answer::Bloqueio(Box::new(select("set_value")), 0.9), done()]).await;
+    let r = run(op, &con).await;
+    let log = jev_log(&r);
+    assert!(log.iter().any(|l| l["auxiliar_indisponivel"] == true), "{log:?}");
+    assert!(!log.iter().any(|l| l.get("auxiliar_discorda").is_some()), "{log:?}");
+}
