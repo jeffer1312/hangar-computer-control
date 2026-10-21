@@ -2640,9 +2640,7 @@ async fn sem_print_segue_pela_arvore() {
 // must be on record too.
 #[tokio::test]
 async fn imagem_falha_na_ajuda_fica_no_registro() {
-    let mut antes = empty("o1");
-    antes.windows[0].rect = Rect(0, 0, 1280, 800);
-    let con = FakeConnector::new(vec![antes, tree("o2", "Ana")]);
+    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
     let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"botão Não"}])),
         Answer::SemTela(Box::new(Answer::Risk(0.05))), done()]).await;
     let r = run(op, &con).await;

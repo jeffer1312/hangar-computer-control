@@ -24,7 +24,7 @@ use crate::objetivo::{literais, nome_parecido, nomes_em_janela_nova, nomes_no_ti
 use crate::trecho;
 use crate::resultado::Resultado;
 use crate::roteiro;
-use crate::tipos::{Ajuda, Candidato, Decisao, Escolha, Progresso, Registro};
+use crate::tipos::{Ajuda, Candidato, Decisao, Envio, Escolha, Progresso, Registro};
 
 const CANCELADO: &str = "RuntimeError: objetivo cancelado; nenhuma nova ação será enviada";
 const SEM_PROGRESSO: u32 = 6;
@@ -37,11 +37,9 @@ const LIMITE_BLOQUEIO: f64 = 0.5;
 /// Jev's box moves the helper's click only from this confidence up.
 const LIMITE_BOX: f64 = 0.5;
 
-/// `imagem` and `motivo` for the record: the cycle's own reason (no print, out of limits) wins over the request's.
-/// The reason is masked before the cut, so no piece of a secret survives it.
-fn envio_registro(ciclo: &Option<(&'static str, String)>, imagem: &'static str, motivo: &str, secretos: &Segredos) -> (&'static str, Option<String>) {
-    let (imagem, motivo) = ciclo.as_ref().map_or((imagem, motivo), |(i, m)| (*i, m.as_str()));
-    (imagem, (!motivo.is_empty()).then(|| secretos.texto(motivo).chars().take(300).collect()))
+/// `imagem` and `motivo` for the record, the reason masked before the cut so no piece of a secret survives it.
+fn envio_registro(envio: &Envio, secretos: &Segredos) -> (&'static str, Option<String>) {
+    (envio.imagem, (!envio.motivo.is_empty()).then(|| secretos.texto(&envio.motivo).chars().take(300).collect()))
 }
 
 /// The lowest probability that still counts for a pick, a DONE and a pick on a truncated tree.
@@ -376,7 +374,7 @@ async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_
             a.rotulo.as_deref().filter(|_| a.kind == ActionType::Mouse).map(|r| secretos.texto(r)))).collect();
         let limite = controle.restante()?.min(Duration::from_secs(30));
         let (envio, achado) = controle.medir("jev", Progresso::Jev, async { Ok(jev.localizar_e_escolher(estado, imagem, &propostas, limite).await) }).await?;
-        let (envio, motivo) = envio_registro(&None, envio.imagem, &envio.motivo, secretos);
+        let (envio, motivo) = envio_registro(&envio, secretos);
         let mut linha = json!({"ciclo": ciclo, "imagem": envio, "motivo": motivo});
         if let Some(((i, p), pontos)) = achado {
             let mut locais = Vec::new();
@@ -799,10 +797,10 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         // Jev decides every step seeing the screen; without a usable print it decides from the tree alone.
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let (print, imagem, sem_imagem) = match capturar(s, controle, &pasta.join(format!("tela-{ciclo}.png"))).await? {
-            Err(e) => (None, None, Some(("sem_print", secretos.texto(&erro_sessao(e))))),
+            Err(e) => (None, None, Some(Envio { imagem: "sem_print", motivo: erro_sessao(e) })),
             Ok(png) => match Imagem::de_png(png.clone()) {
                 Ok(i) => (Some(png), Some(i), None),
-                Err(e) => (Some(png), None, Some(("fora_do_limite", e))),
+                Err(e) => (Some(png), None, Some(Envio { imagem: "fora_do_limite", motivo: e })),
             },
         };
         if barreiras.aviso_repetido(&obs).is_some() {
@@ -898,12 +896,12 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if let Some((proposta, p)) = proposta {
                 let limite = controle.restante()?.min(Duration::from_secs(30));
                 let (risco, envio) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem.as_ref(), limite)).await?;
-                let (envio, motivo) = envio_registro(&sem_imagem, envio.imagem, &envio.motivo, secretos);
+                let (envio, motivo) = envio_registro(sem_imagem.as_ref().unwrap_or(&envio), secretos);
                 controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica,
                     "imagem":envio, "motivo":motivo}), secretos)).await?;
                 let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
-                direta = Some(Decisao { escolha: Escolha::Indice(i), p, risco, top: vec![], com_imagem: false, imagem: "",
-                    motivo: String::new(), blocked: None });
+                direta = Some(Decisao { escolha: Escolha::Indice(i), p, risco, top: vec![], com_imagem: false,
+                    envio: Envio::default(), blocked: None });
             }
         }
         let mut decisao = loop {
@@ -912,7 +910,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let limite = controle.restante()?.min(Duration::from_secs(30));
             let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, imagem.as_ref(), limite)).await?;
             let opcao = escolha(d.escolha);
-            let (envio, motivo) = envio_registro(&sem_imagem, d.imagem, &d.motivo, secretos);
+            let (envio, motivo) = envio_registro(sem_imagem.as_ref().unwrap_or(&d.envio), secretos);
             // Python conta caracteres do JSON ASCII, apesar do nome bytes_estado.
             let ascii = py_dumps(&estado).chars().map(|c| if c.is_ascii() { 1 } else if u32::from(c) > 0xffff { 12 } else { 6 }).sum::<usize>();
             let mut log = json!({"ciclo":ciclo, "n_acoes":acoes.len(), "bytes_estado":ascii, "dica":dica,
@@ -1022,7 +1020,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     let estado = secretos.estado(op, &obs, recentes, Some(&dica));
                     let limite = controle.restante()?.min(Duration::from_secs(30));
                     let (risco, envio) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem.as_ref(), limite)).await?;
-                    let (envio, motivo) = envio_registro(&sem_imagem, envio.imagem, &envio.motivo, secretos);
+                    let (envio, motivo) = envio_registro(sem_imagem.as_ref().unwrap_or(&envio), secretos);
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica,
                         "imagem":envio, "motivo":motivo}), secretos)).await?;
                     let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;

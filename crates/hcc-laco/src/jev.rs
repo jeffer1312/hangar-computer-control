@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use crate::http::{self, prob};
 use crate::llm::Imagem;
 use crate::prompts::{DESFECHOS, PROPOSTA, REGRAS, REGRAS_LOTE, bloqueio_pergunta, risco_pergunta};
-use crate::tipos::{Candidato, Decisao, Escolha, Intencao};
+use crate::tipos::{Candidato, Decisao, Envio, Escolha, Intencao};
 
 pub const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
 pub const JEV_MODEL: &str = "jev-latest";
@@ -103,14 +103,6 @@ fn ponto(r: &Value, imagem: &Imagem) -> Option<Ponto> {
     Some(((esquerda + direita) / 2.0 * imagem.largura as f64, (topo + base) / 2.0 * imagem.altura as f64, prob(r.get("confidence"))))
 }
 
-/// What happened to the screenshot passed with a request: `enviada`, `falhou` (with the error in `motivo`),
-/// `desligada`, `sem_prazo`; empty without one.
-#[derive(Debug)]
-pub struct Envio {
-    pub imagem: &'static str,
-    pub motivo: String,
-}
-
 /// Python `round(p, 2)`: correctly rounded decimal, ties to even on the exact binary value.
 fn arredonda(p: f64) -> f64 {
     format!("{p:.2}").parse().unwrap_or(p)
@@ -121,32 +113,36 @@ impl Jev {
         Jev { url, key, model, http: http::cliente(), sem_imagem: AtomicBool::new(false) }
     }
 
-    /// The answers, and what happened to the screenshot (`enviada` when it went with them). A request with it that
-    /// fails is asked again without it, and the screenshot stays off for the rest of the run.
-    async fn perguntar(&self, state: &Value, questions: Value, imagem: Option<&Imagem>, timeout: Duration)
-        -> Result<(Map<String, Value>, Envio), String> {
-        let mut envio = Envio { imagem: "", motivo: String::new() };
+    /// The answers, and what happened to the screenshot (`enviada` when it went with them). `so_com_imagem` are
+    /// questions about the screenshot, asked only with it. A request with it that fails is asked again without it.
+    async fn perguntar(&self, state: &Value, questions: Map<String, Value>, so_com_imagem: &[(&str, Value)],
+        imagem: Option<&Imagem>, timeout: Duration) -> Result<(Map<String, Value>, Envio), String> {
+        let mut envio = Envio::default();
         if let Some(imagem) = imagem {
-            if self.sem_imagem.load(Ordering::Relaxed) {
-                envio.imagem = "desligada";
-            } else if timeout < PRAZO_IMAGEM {
-                envio.imagem = "sem_prazo";
-            } else {
-                match self.pedir(state, &questions, Some(imagem), timeout.min(TETO_IMAGEM)).await {
-                    Ok(r) => return Ok((r, Envio { imagem: "enviada", motivo: String::new() })),
-                    Err(e) => {
-                        self.sem_imagem.store(true, Ordering::Relaxed);
-                        envio = Envio { imagem: "falhou", motivo: e };
-                    }
-                }
+            let mut todas = questions.clone();
+            todas.extend(so_com_imagem.iter().map(|(k, v)| ((*k).to_owned(), v.clone())));
+            match self.com_imagem(state, todas, imagem, timeout).await {
+                Ok(r) => return Ok((r, Envio { imagem: "enviada", motivo: String::new() })),
+                Err(e) => envio = e,
             }
         }
-        // Without the screenshot, questions about it have nothing to look at. The retry gets the whole `timeout`, as
-        // the request without it always had: a slow Jev that just timed out would fail again in what was left.
-        let mut questions = questions;
-        if let Value::Object(q) = &mut questions { q.remove(BLOQUEIO); }
-        let r = self.pedir(state, &questions, None, timeout).await?;
+        // The retry gets the whole `timeout`, as the request without it always had: a slow Jev that just timed out
+        // would fail again in what was left.
+        let r = self.pedir(state, &Value::Object(questions), None, timeout).await?;
         Ok((r, envio))
+    }
+
+    /// The request with the screenshot, when it may go: never after one failed (the screenshot stays off for the
+    /// rest of the run), only with `PRAZO_IMAGEM` left, and capped at `TETO_IMAGEM`.
+    async fn com_imagem(&self, state: &Value, questions: Map<String, Value>, imagem: &Imagem, timeout: Duration)
+        -> Result<Map<String, Value>, Envio> {
+        let envio = |imagem, motivo| Envio { imagem, motivo };
+        if self.sem_imagem.load(Ordering::Relaxed) { return Err(envio("desligada", String::new())); }
+        if timeout < PRAZO_IMAGEM { return Err(envio("sem_prazo", String::new())); }
+        self.pedir(state, &Value::Object(questions), Some(imagem), timeout.min(TETO_IMAGEM)).await.map_err(|e| {
+            self.sem_imagem.store(true, Ordering::Relaxed);
+            envio("falhou", e)
+        })
     }
 
     async fn pedir(&self, state: &Value, questions: &Value, imagem: Option<&Imagem>, timeout: Duration) -> Result<Map<String, Value>, String> {
@@ -181,13 +177,15 @@ impl Jev {
         if let Value::Object(m) = &mut state {
             m.insert("proposedAction".into(), json!(proposta));
         }
-        let (r, envio) = self.perguntar(&state, json!({"risky": risco_pergunta()}), imagem, timeout).await?;
+        let questions = Map::from_iter([("risky".to_owned(), risco_pergunta())]);
+        let (r, envio) = self.perguntar(&state, questions, &[], imagem, timeout).await?;
         Ok((risco(&r)?, envio))
     }
 
     /// One `choice` among `opcoes` plus NONE: the index picked (None for NONE) and its probability.
     pub async fn escolher(&self, estado: &Value, instrucoes: &str, opcoes: &[String], imagem: Option<&Imagem>, timeout: Duration) -> Result<(Option<usize>, f64), String> {
-        let (r, _) = self.perguntar(estado, json!({"pick": pergunta_escolha(instrucoes, opcoes)}), imagem, timeout).await?;
+        let questions = Map::from_iter([("pick".to_owned(), pergunta_escolha(instrucoes, opcoes))]);
+        let (r, _) = self.perguntar(estado, questions, &[], imagem, timeout).await?;
         resposta_escolha(r.get("pick"), opcoes.len())
     }
 
@@ -196,9 +194,6 @@ impl Jev {
     /// (turned off, no time left: the request would be pointless); a failed request turns it off like any other.
     pub async fn localizar_e_escolher(&self, estado: &Value, imagem: &Imagem, propostas: &[(String, Option<String>)],
         timeout: Duration) -> (Envio, Option<Localizacao>) {
-        let envio = |imagem, motivo| Envio { imagem, motivo };
-        if self.sem_imagem.load(Ordering::Relaxed) { return (envio("desligada", String::new()), None); }
-        if timeout < PRAZO_IMAGEM { return (envio("sem_prazo", String::new()), None); }
         let opcoes: Vec<String> = propostas.iter().map(|(d, _)| d.clone()).collect();
         let mut perguntas = Map::new();
         perguntas.insert("pick".into(), pergunta_escolha(PROPOSTA, &opcoes));
@@ -207,17 +202,14 @@ impl Jev {
                 perguntas.insert(format!("box_{i}"), json!({"type": "box", "instructions": format!("{r} on the screenshot `tela`")}));
             }
         }
-        let lido = async {
-            let r = self.pedir(estado, &Value::Object(perguntas), Some(imagem), timeout.min(TETO_IMAGEM)).await?;
-            let pontos = (0..propostas.len()).map(|i| r.get(&format!("box_{i}")).and_then(|b| ponto(b, imagem))).collect();
-            Ok::<_, String>((resposta_escolha(r.get("pick"), opcoes.len())?, pontos))
-        }.await;
-        match lido {
-            Ok(l) => (envio("enviada", String::new()), Some(l)),
-            Err(e) => {
-                self.sem_imagem.store(true, Ordering::Relaxed);
-                (envio("falhou", e), None)
-            }
+        let r = match self.com_imagem(estado, perguntas, imagem, timeout).await {
+            Ok(r) => r,
+            Err(e) => return (e, None),
+        };
+        let pontos = (0..propostas.len()).map(|i| r.get(&format!("box_{i}")).and_then(|b| ponto(b, imagem))).collect();
+        match resposta_escolha(r.get("pick"), opcoes.len()) {
+            Ok(escolha) => (Envio { imagem: "enviada", motivo: String::new() }, Some((escolha, pontos))),
+            Err(e) => (Envio { imagem: "falhou", motivo: e }, None),
         }
     }
 
@@ -241,13 +233,11 @@ impl Jev {
                 perguntas.insert(nome, json!({"type": "choice", "instructions": regras, "criteria": criterios}));
             }
             perguntas.insert("risky".into(), risco_pergunta());
-            perguntas.insert(BLOQUEIO.into(), bloqueio_pergunta());
-            let (respostas, envio) = self.perguntar(estado, Value::Object(perguntas), imagem, timeout).await?;
+            let (respostas, envio) = self.perguntar(estado, perguntas, &[(BLOQUEIO, bloqueio_pergunta())], imagem, timeout).await?;
             let risco = risco(&respostas)?;
             let com_imagem = envio.imagem == "enviada";
-            let blocked = respostas.get(BLOQUEIO).and_then(|b| b.get("noul")).filter(|_| com_imagem).map(|v| prob(Some(v)));
-            let decisao = |escolha, p, top| Decisao { escolha, p, risco, top, com_imagem, imagem: envio.imagem,
-                motivo: envio.motivo.clone(), blocked };
+            let blocked = respostas.get(BLOQUEIO).and_then(|b| b.get("noul")).map(|v| prob(Some(v)));
+            let decisao = |escolha, p, top| Decisao { escolha, p, risco, top, com_imagem, envio: envio.clone(), blocked };
             if lotes.len() == 1 {
                 let (escolha, p, top) = um_lote(respostas.get("action"), cands)?;
                 return Ok(decisao(escolha, p, top));
