@@ -29,6 +29,9 @@ pub fn risco_pergunta() -> Value {
     })
 }
 
+pub const PROPOSTA: &str = "Pick the proposed action that is the next step toward `goal` on the screenshot `tela`; \
+a quoted label names the control the action is meant to hit. NONE when no option is a step toward `goal`.";
+
 /// Asked only with the screenshot. A message box that can be closed is not a blocker, as in AJUDA.
 pub fn bloqueio_pergunta() -> Value {
     json!({

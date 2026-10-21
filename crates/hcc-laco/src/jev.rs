@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use crate::http::{self, prob};
 use crate::llm::Imagem;
-use crate::prompts::{DESFECHOS, REGRAS, REGRAS_LOTE, bloqueio_pergunta, risco_pergunta};
+use crate::prompts::{DESFECHOS, PROPOSTA, REGRAS, REGRAS_LOTE, bloqueio_pergunta, risco_pergunta};
 use crate::tipos::{Candidato, Decisao, Escolha, Intencao};
 
 pub const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
@@ -75,6 +75,33 @@ fn risco(r: &Map<String, Value>) -> Result<f64, String> {
 const FORA: &str = "IndexError: list index out of range";
 
 type Top = Vec<(String, f64, String)>;
+/// Center of a control in screenshot pixels, and Jev's confidence in it.
+pub type Ponto = (f64, f64, f64);
+/// Jev's pick among the proposals (index, probability) and, per proposal, where its labelled control is.
+pub type Localizacao = ((Option<usize>, f64), Vec<Option<Ponto>>);
+
+fn pergunta_escolha(instrucoes: &str, opcoes: &[String]) -> Value {
+    let mut criterios = Map::new();
+    for (i, o) in opcoes.iter().take(LOTE).enumerate() { criterios.insert(i.to_string(), json!(o)); }
+    criterios.insert("NONE".into(), json!("None of the options."));
+    json!({"type": "choice", "instructions": instrucoes, "criteria": criterios})
+}
+
+fn resposta_escolha(r: Option<&Value>, n: usize) -> Result<(Option<usize>, f64), String> {
+    let opcao = r.and_then(|r| r.get("choice")).and_then(Value::as_str);
+    let p = prob(opcao.and_then(|o| r?.get("probabilities")?.get(o)));
+    match opcao {
+        Some("NONE") | None => Ok((None, p)),
+        Some(o) => indice(o).filter(|&i| i < n.min(LOTE)).map(|i| (Some(i), p)).ok_or_else(|| FORA.into()),
+    }
+}
+
+/// A `box` answer's center in screenshot pixels and its confidence; the edges come as fractions of the screenshot.
+fn ponto(r: &Value, imagem: &Imagem) -> Option<Ponto> {
+    let lado = |k: &str| r.get("box")?.get(k)?.as_f64().filter(|v| (0.0..=1.0).contains(v));
+    let (esquerda, topo, direita, base) = (lado("left")?, lado("top")?, lado("right")?, lado("bottom")?);
+    Some(((esquerda + direita) / 2.0 * imagem.largura as f64, (topo + base) / 2.0 * imagem.altura as f64, prob(r.get("confidence"))))
+}
 
 /// What happened to the screenshot passed with a request: `enviada`, `falhou` (with the error in `motivo`),
 /// `desligada`, `sem_prazo`; empty without one.
@@ -160,16 +187,37 @@ impl Jev {
 
     /// One `choice` among `opcoes` plus NONE: the index picked (None for NONE) and its probability.
     pub async fn escolher(&self, estado: &Value, instrucoes: &str, opcoes: &[String], imagem: Option<&Imagem>, timeout: Duration) -> Result<(Option<usize>, f64), String> {
-        let mut criterios = Map::new();
-        for (i, o) in opcoes.iter().take(LOTE).enumerate() { criterios.insert(i.to_string(), json!(o)); }
-        criterios.insert("NONE".into(), json!("None of the options."));
-        let (r, _) = self.perguntar(estado, json!({"pick": {"type": "choice", "instructions": instrucoes, "criteria": criterios}}), imagem, timeout).await?;
-        let r = r.get("pick");
-        let opcao = r.and_then(|r| r.get("choice")).and_then(Value::as_str);
-        let p = prob(opcao.and_then(|o| r?.get("probabilities")?.get(o)));
-        match opcao {
-            Some("NONE") | None => Ok((None, p)),
-            Some(o) => indice(o).filter(|&i| i < opcoes.len().min(LOTE)).map(|i| (Some(i), p)).ok_or_else(|| FORA.into()),
+        let (r, _) = self.perguntar(estado, json!({"pick": pergunta_escolha(instrucoes, opcoes)}), imagem, timeout).await?;
+        resposta_escolha(r.get("pick"), opcoes.len())
+    }
+
+    /// One request over the screenshot: which of `propostas` (description, label of the control a click aims at)
+    /// is the next step, and where each labelled control is on the screenshot. Nothing without the screenshot
+    /// (turned off, no time left: the request would be pointless); a failed request turns it off like any other.
+    pub async fn localizar_e_escolher(&self, estado: &Value, imagem: &Imagem, propostas: &[(String, Option<String>)],
+        timeout: Duration) -> (Envio, Option<Localizacao>) {
+        let envio = |imagem, motivo| Envio { imagem, motivo };
+        if self.sem_imagem.load(Ordering::Relaxed) { return (envio("desligada", String::new()), None); }
+        if timeout < PRAZO_IMAGEM { return (envio("sem_prazo", String::new()), None); }
+        let opcoes: Vec<String> = propostas.iter().map(|(d, _)| d.clone()).collect();
+        let mut perguntas = Map::new();
+        perguntas.insert("pick".into(), pergunta_escolha(PROPOSTA, &opcoes));
+        for (i, (_, rotulo)) in propostas.iter().enumerate() {
+            if let Some(r) = rotulo {
+                perguntas.insert(format!("box_{i}"), json!({"type": "box", "instructions": format!("{r} on the screenshot `tela`")}));
+            }
+        }
+        let lido = async {
+            let r = self.pedir(estado, &Value::Object(perguntas), Some(imagem), timeout.min(TETO_IMAGEM)).await?;
+            let pontos = (0..propostas.len()).map(|i| r.get(&format!("box_{i}")).and_then(|b| ponto(b, imagem))).collect();
+            Ok::<_, String>((resposta_escolha(r.get("pick"), opcoes.len())?, pontos))
+        }.await;
+        match lido {
+            Ok(l) => (envio("enviada", String::new()), Some(l)),
+            Err(e) => {
+                self.sem_imagem.store(true, Ordering::Relaxed);
+                (envio("falhou", e), None)
+            }
         }
     }
 

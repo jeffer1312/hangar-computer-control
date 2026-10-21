@@ -34,6 +34,8 @@ const FRACO_COM_PRINT: f64 = 0.25;
 const DONE_COM_PRINT: f64 = 0.75;
 const TRUNCADA_COM_PRINT: f64 = 0.6;
 const LIMITE_BLOQUEIO: f64 = 0.5;
+/// Jev's box moves the helper's click only from this confidence up.
+const LIMITE_BOX: f64 = 0.5;
 
 /// `imagem` and `motivo` for the record: the cycle's own reason (no print, out of limits) wins over the request's.
 /// The reason is masked before the cut, so no piece of a secret survives it.
@@ -338,19 +340,22 @@ async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arqui
 }
 
 /// `print` is the cycle's capture; without one (it failed) the screen is captured here, and a failure stops the run.
+/// With `imagem`, Jev picks among the helper's proposals seeing it (the third value) and corrects each labelled click
+/// to where it finds the control.
 #[allow(clippy::too_many_arguments)]
 async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_>, r: &mut Resultado, ciclo: u32,
-    obs: &Observation, estado: &Value, secretos: &Segredos, print: Option<&[u8]>) -> Result<(Ajuda, bool), String> {
+    obs: &Observation, estado: &Value, secretos: &Segredos, print: Option<&[u8]>, jev: &Jev, imagem: Option<&Imagem>)
+    -> Result<(Ajuda, bool, Option<(Action, f64)>), String> {
     let captura = r.registro.as_ref().ok_or("RuntimeError: registro indisponível")?.join(format!("tela-{ciclo}.png"));
     let capturada;
-    let imagem = match print {
+    let png = match print {
         Some(png) => png,
         None => { capturada = capturar(sessao, controle, &captura).await?.map_err(erro_sessao)?; &capturada[..] }
     };
     r.captura = Some(captura);
     let limite = controle.restante()?.min(Duration::from_secs(45));
     let (mut ajuda, leitura_valida) = controle.medir("llm", Progresso::Llm, async {
-        match op.llm.pedir(estado, imagem, limite).await {
+        match op.llm.pedir(estado, png, limite).await {
             Ok(a) => Ok((a, true)),
             Err(f) if matches!(f.tipo, "KeyError" | "IndexError" | "AttributeError") => Err(format!("{}: {}", f.tipo, secretos.texto(&f.msg))),
             Err(f) => Ok((Ajuda {
@@ -365,12 +370,37 @@ async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_
         let bruto = json!({"llm": ajuda.acoes, "interpretacao": ajuda.interpretacao, "impedimento": ajuda.impedimento});
         controle.rodar(registrar(&pasta, bruto, secretos)).await?;
     }
-    let propostas = ajuda.acoes.len();
-    ajuda.acoes = ajuda.acoes.iter().map(|a| para_tela(a, &obs.screen, &op.texto)).filter_map(|a| secretos.desmascarar(a)).collect();
-    if ajuda.acoes.len() < propostas {
-        ajuda.interpretacao.push_str(&format!(" [{} ação(ões) com <senha> descartada(s): não há um único segredo nos dados]", propostas - ajuda.acoes.len()));
+    let mut escolha = None;
+    if let (Some(imagem), Some(pasta), false) = (imagem, r.registro.clone(), ajuda.acoes.is_empty()) {
+        let propostas: Vec<(String, Option<String>)> = ajuda.acoes.iter().map(|a| (secretos.descricao(a, obs, true),
+            a.rotulo.as_deref().filter(|_| a.kind == ActionType::Mouse).map(|r| secretos.texto(r)))).collect();
+        let limite = controle.restante()?.min(Duration::from_secs(30));
+        let (envio, achado) = controle.medir("jev", Progresso::Jev, async { Ok(jev.localizar_e_escolher(estado, imagem, &propostas, limite).await) }).await?;
+        let (envio, motivo) = envio_registro(&None, envio.imagem, &envio.motivo, secretos);
+        let mut linha = json!({"ciclo": ciclo, "imagem": envio, "motivo": motivo});
+        if let Some(((i, p), pontos)) = achado {
+            let mut locais = Vec::new();
+            for (a, ponto) in ajuda.acoes.iter_mut().zip(pontos) {
+                let Some((cx, cy, conf)) = ponto else { continue };
+                let (cx, cy) = (cx.round() as i32, cy.round() as i32);
+                locais.push(json!({"rotulo": a.rotulo, "auxiliar": [a.x, a.y], "box": [cx, cy], "conf": conf}));
+                if conf >= LIMITE_BOX { (a.x, a.y) = (Some(cx), Some(cy)); }
+            }
+            escolha = i.map(|i| (i, p));
+            linha["localizacao"] = json!(locais);
+            linha["escolha"] = json!(i.map(|i| &propostas[i].0));
+            linha["probability"] = json!(p);
+        }
+        controle.rodar(registrar(&pasta, linha, secretos)).await?;
     }
-    Ok((ajuda, leitura_valida))
+    let total = ajuda.acoes.len();
+    let convertidas: Vec<Option<Action>> = ajuda.acoes.iter().map(|a| secretos.desmascarar(para_tela(a, &obs.screen, &op.texto))).collect();
+    let escolhida = escolha.and_then(|(i, p)| Some((convertidas.get(i)?.clone()?, p)));
+    ajuda.acoes = convertidas.into_iter().flatten().collect();
+    if ajuda.acoes.len() < total {
+        ajuda.interpretacao.push_str(&format!(" [{} ação(ões) com <senha> descartada(s): não há um único segredo nos dados]", total - ajuda.acoes.len()));
+    }
+    Ok((ajuda, leitura_valida, escolhida))
 }
 
 async fn reconectar<C: Connector>(conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>) -> Result<(), String> {
@@ -782,7 +812,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         if so_leitura(&op.texto) {
             // Nothing to do on screen: the tree text and one print reading are the answer; no Jev, no action.
             let estado = secretos.estado(op, &obs, recentes, None);
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos, print.as_deref()).await?;
+            let (ajuda, leu, _) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
+                print.as_deref(), jev, None).await?;
             let texto = texto_janela(&obs);
             if !leu && texto.is_empty() { r.motivo = format!("leitura sem resultado: {}", ajuda.interpretacao); return Ok(()); }
             r.ok = true;
@@ -828,11 +859,14 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let mut primeira_ajuda: Option<Candidato> = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, recentes, None);
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos, print.as_deref()).await?;
+            let (ajuda, leu, escolhida) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
+                print.as_deref(), jev, imagem.as_ref()).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
             dica = com_dica(&nome, ajuda.interpretacao); ajudou = true;
+            let escolhida = escolhida.and_then(|(a, p)| match &no_campo(alvo_observado(a, &obs), &obs, recentes)[..] {
+                [a] => Some((a.clone(), p)), _ => None });
             let grupos: Vec<Vec<Action>> = ajuda.acoes.into_iter()
                 .filter(|a| matches!(a.kind, ActionType::Mouse | ActionType::Keys | ActionType::Text))
                 .map(|a| no_campo(alvo_observado(a, &obs), &obs, recentes)).collect();
@@ -849,20 +883,26 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 .take(3).map(|g| g[0].clone()).collect();
             let propostas = grupos.into_iter().flatten().map(|a| secretos.candidato(a, &obs)).collect();
             let propostas: Vec<Candidato> = Barreiras::sem_confirmar(segurar_segredos(Barreiras::barrar(propostas, recentes), &op.texto, recentes, &secretos.valores), &obs, &op.texto).0;
+            let pode = |p: &Candidato| dentro(&p.acao, &obs) && !texto_sem_alvo_barrado(&p.acao, foco_escolhido);
+            // Jev, seeing the print, picks among the proposals; unsure, the first one decides, as before.
+            let pela_jev = escolhida.filter(|(_, p)| *p >= FRACO_COM_PRINT)
+                .and_then(|(a, p)| propostas.iter().find(|c| c.acao == a && pode(c)).map(|c| (c.clone(), p)));
             // A proposal dropped by the guards breaks the run: the rest waits for the next cycle.
             let seguidas = propostas.iter().zip(&teclado).take_while(|(p, a)| p.acao == **a && dentro(&p.acao, &obs)).count();
-            if seguidas >= 2 { fila = propostas[1..seguidas].to_vec(); }
-            for proposta in propostas.iter().filter(|p| dentro(&p.acao, &obs) && !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
+            // The queue follows the first proposal: another pick goes alone.
+            if seguidas >= 2 && pela_jev.as_ref().is_none_or(|(c, _)| propostas.first() == Some(c)) { fila = propostas[1..seguidas].to_vec(); }
+            for proposta in propostas.iter().filter(|p| pode(p)) {
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta.clone()); }
             }
-            if let Some(proposta) = propostas.first().filter(|p| !ambigua && dentro(&p.acao, &obs) && !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
+            let proposta = pela_jev.or_else(|| propostas.first().filter(|p| !ambigua && pode(p)).map(|p| (p.clone(), 1.0)));
+            if let Some((proposta, p)) = proposta {
                 let limite = controle.restante()?.min(Duration::from_secs(30));
                 let (risco, envio) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem.as_ref(), limite)).await?;
                 let (envio, motivo) = envio_registro(&sem_imagem, envio.imagem, &envio.motivo, secretos);
                 controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica,
                     "imagem":envio, "motivo":motivo}), secretos)).await?;
                 let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
-                direta = Some(Decisao { escolha: Escolha::Indice(i), p: 1.0, risco, top: vec![], com_imagem: false, imagem: "",
+                direta = Some(Decisao { escolha: Escolha::Indice(i), p, risco, top: vec![], com_imagem: false, imagem: "",
                     motivo: String::new(), blocked: None });
             }
         }
@@ -993,7 +1033,11 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 return Ok(());
             }
             ajudou = true;
-            let (ajuda, leu) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos, print.as_deref()).await?;
+            let (ajuda, leu, escolhida) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
+                print.as_deref(), jev, imagem.as_ref()).await?;
+            // Jev's pick on the print, when sure enough, is the help's action if Jev stays unsure; else the first one.
+            let pela_jev = escolhida.filter(|(_, p)| *p >= FRACO_COM_PRINT)
+                .and_then(|(a, _)| match &no_campo(a, &obs, recentes)[..] { [a] => Some(a.clone()), _ => None });
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             dica = com_dica(&nome, falta_dica.as_ref().map_or_else(|| ajuda.interpretacao.clone(), |f| format!("{f}\n{}", ajuda.interpretacao)));
@@ -1004,7 +1048,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 .flat_map(|a| no_campo(a, &obs, recentes)).map(|a| secretos.candidato(a, &obs)).collect();
             for proposta in Barreiras::sem_confirmar(segurar_segredos(Barreiras::barrar(sem_reabrir(apps_do_objetivo(propostas, &op.texto), &fechados), recentes), &op.texto, recentes, &secretos.valores), &obs, &op.texto).0
                 .into_iter().filter(|p| !texto_sem_alvo_barrado(&p.acao, foco_escolhido)) {
-                if primeira_ajuda.is_none() && dentro(&proposta.acao, &obs) { primeira_ajuda = Some(proposta.clone()); }
+                if (primeira_ajuda.is_none() || pela_jev.as_ref() == Some(&proposta.acao)) && dentro(&proposta.acao, &obs) {
+                    primeira_ajuda = Some(proposta.clone());
+                }
                 if !acoes.iter().any(|a| a.acao == proposta.acao) { acoes.push(proposta); }
             }
         };

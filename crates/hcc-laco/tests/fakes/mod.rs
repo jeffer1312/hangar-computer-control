@@ -142,6 +142,8 @@ pub enum Answer {
     SemTela(Box<Answer>),
     /// The inner answer plus `blocked` with this probability.
     Bloqueio(Box<Answer>, f64),
+    /// Answers `pick` like `Pick`, and every `box_*` question with [left, top, right, bottom, confidence].
+    Localiza(&'static str, f64, [f64; 5]),
 }
 
 #[derive(Clone)]
@@ -157,6 +159,10 @@ impl Respond for Script {
         let mut fila = self.0.lock().unwrap();
         if matches!(fila.front(), Some(Answer::SemTela(_))) && body["state"].get("tela").is_some() {
             return ResponseTemplate::new(400).set_body_string("image not supported");
+        }
+        // Jev's pick among the helper's proposals, unscripted: NONE, so the loop goes as it did without it.
+        if body["questions"]["pick"]["instructions"] == hcc_laco::prompts::PROPOSTA && !matches!(fila.front(), Some(Answer::Localiza(..))) {
+            return ResponseTemplate::new(200).set_body_json(json!({"answers": {"pick": {"choice": "NONE", "probabilities": {"NONE": 1.0}}}}));
         }
         let (answer, bloqueio) = match fila.pop_front().expect("unexpected model request") {
             Answer::SemTela(a) => (*a, None),
@@ -180,19 +186,29 @@ impl Respond for Script {
                 json!({"answers": {"risky": {"noul": risk}}})
             }
             Answer::Vision(help) => json!({"choices": [{"message": {"content": help.to_string()}}]}),
-            Answer::Pick(texto, p) => {
-                let criteria = body["questions"]["pick"]["criteria"].as_object().unwrap_or_else(|| panic!("no pick question: {body}"));
-                let k = if texto == "NONE" { "NONE".to_owned() } else {
-                    criteria.iter().find(|(k, v)| *k != "NONE" && v.as_str().is_some_and(|v| v.contains(texto)))
-                        .unwrap_or_else(|| panic!("missing pick {texto}: {criteria:?}")).0.clone()
-                };
-                json!({"answers": {"pick": {"choice": k, "probabilities": {k.clone(): p}}}})
+            Answer::Pick(texto, p) => json!({"answers": {"pick": pick(&body, texto, p)}}),
+            Answer::Localiza(texto, p, [left, top, right, bottom, conf]) => {
+                let mut answers = json!({"pick": pick(&body, texto, p)});
+                for k in body["questions"].as_object().unwrap().keys().filter(|k| k.starts_with("box_")) {
+                    answers[k] = json!({"type": "box", "box": {"left": left, "top": top, "right": right, "bottom": bottom}, "confidence": conf});
+                }
+                json!({"answers": answers})
             }
             Answer::SemTela(_) | Answer::Bloqueio(..) => panic!("wrappers do not nest"),
         };
         if let Some(b) = bloqueio { response["answers"]["blocked"] = json!({"noul": b}); }
         ResponseTemplate::new(200).set_body_json(response)
     }
+}
+
+/// The `pick` answer choosing the criterion that contains `texto` ("NONE" picks none).
+fn pick(body: &Value, texto: &str, p: f64) -> Value {
+    let criteria = body["questions"]["pick"]["criteria"].as_object().unwrap_or_else(|| panic!("no pick question: {body}"));
+    let k = if texto == "NONE" { "NONE".to_owned() } else {
+        criteria.iter().find(|(k, v)| *k != "NONE" && v.as_str().is_some_and(|v| v.contains(texto)))
+            .unwrap_or_else(|| panic!("missing pick {texto}: {criteria:?}")).0.clone()
+    };
+    json!({"choice": k, "probabilities": {k.clone(): p}})
 }
 
 pub fn tree(id: &str, value: &str) -> Observation {

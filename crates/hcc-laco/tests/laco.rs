@@ -42,8 +42,10 @@ async fn run(op: Opcoes, con: &FakeConnector) -> Resultado {
     executar(op, con, CancellationToken::new(), &|_| {}).await
 }
 
+/// Request bodies in order, without Jev's pick among the helper's proposals (its tests read it from the log).
 async fn bodies(server: &MockServer) -> Vec<Value> {
-    server.received_requests().await.unwrap().iter().map(|r| serde_json::from_slice(&r.body).unwrap()).collect()
+    server.received_requests().await.unwrap().iter().map(|r| serde_json::from_slice::<Value>(&r.body).unwrap())
+        .filter(|b| b["questions"]["pick"]["instructions"] != hcc_laco::prompts::PROPOSTA).collect()
 }
 
 /// Requests to the vision helper (the LLM), apart from Jev's.
@@ -2634,10 +2636,10 @@ async fn sem_print_segue_pela_arvore() {
     assert!(d.iter().all(|l| l["imagem"] == "sem_print" && l["motivo"].as_str().is_some_and(|m| m.contains("captura recusada"))), "{d:?}");
 }
 
-// A window with no controls never reaches `decidir`: the risk question is the cycle's request with the screenshot,
-// and its failure must be on record too.
+// A window with no controls never reaches `decidir`: the help's requests carry the screenshot, and a failure there
+// must be on record too.
 #[tokio::test]
-async fn imagem_falha_no_risco_fica_no_registro() {
+async fn imagem_falha_na_ajuda_fica_no_registro() {
     let mut antes = empty("o1");
     antes.windows[0].rect = Rect(0, 0, 1280, 800);
     let con = FakeConnector::new(vec![antes, tree("o2", "Ana")]);
@@ -2645,7 +2647,80 @@ async fn imagem_falha_no_risco_fica_no_registro() {
         Answer::SemTela(Box::new(Answer::Risk(0.05))), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    let direta = jev_log(&r).into_iter().find(|l| l.get("direta").is_some()).unwrap();
-    assert_eq!(direta["imagem"], "falhou", "{direta}");
-    assert!(direta["motivo"].as_str().is_some_and(|m| m.contains("400")), "{direta}");
+    let log = jev_log(&r);
+    assert!(log.iter().any(|l| l["imagem"] == "falhou" && l["motivo"].as_str().is_some_and(|m| m.contains("400"))), "{log:?}");
+    let direta = log.iter().find(|l| l.get("direta").is_some()).unwrap();
+    assert_eq!(direta["imagem"], "desligada", "{direta}");
+}
+
+/// A window drawn without controls (empty tree) over the whole 800x600 screen.
+fn sem_controles(id: &str) -> Observation {
+    let mut obs = empty(id);
+    obs.windows[0].rect = Rect(0, 0, 800, 600);
+    obs
+}
+
+/// Box of a control centered at (640, 360) on the 1280x720 print, with this confidence.
+const CENTRO: [f64; 4] = [0.45, 0.45, 0.55, 0.55];
+
+// The helper aims the click at (100,100); Jev finds "Salvar" at the print's center and the click goes there.
+#[tokio::test]
+async fn box_corrige_clique() {
+    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let [l, t, r, b] = CENTRO;
+    let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"Salvar"}])),
+        Answer::Localiza("Salvar", 0.9, [l, t, r, b, 0.8]), Answer::Risk(0.05), done()]).await;
+    let res = run(op, &con).await;
+    let acao = con.state.lock().unwrap().acts[0].0.clone();
+    assert_eq!((acao.x, acao.y), (Some(640), Some(360)), "{}", res.resumo());
+    assert!(res.ok, "{}", res.resumo());
+    let local = jev_log(&res).into_iter().find_map(|l| l.get("localizacao").cloned()).unwrap();
+    assert_eq!(local, json!([{"rotulo": "Salvar", "auxiliar": [100, 100], "box": [640, 360], "conf": 0.8}]));
+}
+
+// Jev unsure where the control is: the helper's point stays.
+#[tokio::test]
+async fn box_fraco_mantem() {
+    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let [l, t, r, b] = CENTRO;
+    let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"Salvar"}])),
+        Answer::Localiza("Salvar", 0.9, [l, t, r, b, 0.2]), Answer::Risk(0.05), done()]).await;
+    let res = run(op, &con).await;
+    let acao = con.state.lock().unwrap().acts[0].0.clone();
+    assert_eq!((acao.x, acao.y), (Some(100), Some(100)), "{}", res.resumo());
+}
+
+fn duas_teclas() -> Answer { help(json!([{"type":"keys","keys":["Escape"]}, {"type":"keys","keys":["Enter"]}])) }
+
+// Two proposals on a window with no controls: Jev, seeing the print, picks the second and only that one runs.
+#[tokio::test]
+async fn sem_controles_jev_escolhe() {
+    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![duas_teclas(), Answer::Localiza("Enter", 0.8, [0.0; 5]), Answer::Risk(0.05), done()]).await;
+    let res = run(op, &con).await;
+    let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|a| a.0.clone()).collect();
+    assert_eq!(acts, vec![action(json!({"type":"keys","keys":["Enter"]}))], "{}", res.resumo());
+    assert!(res.ok, "{}", res.resumo());
+}
+
+// Jev unsure among them: the first proposal decides, as before.
+#[tokio::test]
+async fn sem_controles_jev_fraco() {
+    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![duas_teclas(), Answer::Localiza("Enter", 0.1, [0.0; 5]), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
+    let res = run(op, &con).await;
+    let primeira = con.state.lock().unwrap().acts[0].0.clone();
+    assert_eq!(primeira, action(json!({"type":"keys","keys":["Escape"]})), "{}", res.resumo());
+    assert!(res.ok, "{}", res.resumo());
+}
+
+// Jev stays unsure after the help: its pick on the print, not the helper's first proposal, is the action that runs.
+#[tokio::test]
+async fn ajuda_jev_escolhe_a_proposta() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), duas_teclas(), Answer::Localiza("Enter", 0.8, [0.0; 5]),
+        Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Risk(0.05), done()]).await;
+    let res = run(op, &con).await;
+    let primeira = con.state.lock().unwrap().acts[0].0.clone();
+    assert_eq!(primeira, action(json!({"type":"keys","keys":["Enter"]})), "{}", res.resumo());
 }
