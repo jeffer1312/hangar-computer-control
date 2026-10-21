@@ -15,8 +15,6 @@ pub struct State {
     pub observe_errors: VecDeque<SessionError>,
     pub act_errors: VecDeque<SessionError>,
     pub screenshot_error: Option<SessionError>,
-    /// What a screenshot returns: not a PNG by default, so Jev never gets an image unless a test asks for one.
-    pub png: Vec<u8>,
     pub close_error: Option<String>,
     pub close_pending: bool,
     pub slow_drop: Option<Arc<SlowDrop>>,
@@ -62,7 +60,7 @@ impl FakeConnector {
         Self {
             state: Arc::new(Mutex::new(State {
                 views: views.into(), acts: vec![], observe_errors: VecDeque::new(), act_errors: VecDeque::new(),
-                screenshot_error: None, png: b"PNG".to_vec(), close_error: None, close_pending: false, slow_drop: None, connect_error: None,
+                screenshot_error: None, close_error: None, close_pending: false, slow_drop: None, connect_error: None,
                 connect_pending: false, observe_pending: false, advance_on_act: true,
                 connects: 0, closes: 0, captures: 0, observed: vec![], cancel_after_act: None,
             })),
@@ -117,7 +115,7 @@ impl Session for FakeSession {
         s.captures += 1;
         match &s.screenshot_error {
             Some(e) => Err(e.clone()),
-            None => Ok(s.png.clone()),
+            None => Ok(png_1280x720()),
         }
     }
 
@@ -161,6 +159,10 @@ impl Respond for Script {
         let mut fila = self.0.lock().unwrap();
         if matches!(fila.front(), Some(Answer::SemTela(_))) && body["state"].get("tela").is_some() {
             return ResponseTemplate::new(400).set_body_string("image not supported");
+        }
+        // Jev's pick among the helper's proposals, unscripted: NONE, so the loop goes as it did without it.
+        if body["questions"]["pick"]["instructions"] == hcc_laco::prompts::PROPOSTA && !matches!(fila.front(), Some(Answer::Localiza(..))) {
+            return ResponseTemplate::new(200).set_body_json(json!({"answers": {"pick": {"choice": "NONE", "probabilities": {"NONE": 1.0}}}}));
         }
         let (answer, bloqueio) = match fila.pop_front().expect("unexpected model request") {
             Answer::SemTela(a) => (*a, None),
