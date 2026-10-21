@@ -132,16 +132,19 @@ impl Jev {
         Ok((r, envio))
     }
 
-    /// The request with the screenshot, when it may go: never after one failed (the screenshot stays off for the
-    /// rest of the run), only with `PRAZO_IMAGEM` left, and capped at `TETO_IMAGEM`.
+    /// Why a request with `timeout` cannot carry the screenshot: `desligada` after one failed (it stays off for the
+    /// rest of the run), `sem_prazo` under `PRAZO_IMAGEM`.
+    pub fn sem_imagem_por(&self, timeout: Duration) -> Option<&'static str> {
+        if self.sem_imagem.load(Ordering::Relaxed) { Some("desligada") } else if timeout < PRAZO_IMAGEM { Some("sem_prazo") } else { None }
+    }
+
+    /// The request with the screenshot, when it may go, capped at `TETO_IMAGEM`.
     async fn com_imagem(&self, state: &Value, questions: Map<String, Value>, imagem: &Imagem, timeout: Duration)
         -> Result<Map<String, Value>, Envio> {
-        let envio = |imagem, motivo| Envio { imagem, motivo };
-        if self.sem_imagem.load(Ordering::Relaxed) { return Err(envio("desligada", String::new())); }
-        if timeout < PRAZO_IMAGEM { return Err(envio("sem_prazo", String::new())); }
+        if let Some(imagem) = self.sem_imagem_por(timeout) { return Err(Envio { imagem, motivo: String::new() }); }
         self.pedir(state, &Value::Object(questions), Some(imagem), timeout.min(TETO_IMAGEM)).await.map_err(|e| {
             self.sem_imagem.store(true, Ordering::Relaxed);
-            envio("falhou", e)
+            Envio { imagem: "falhou", motivo: e }
         })
     }
 

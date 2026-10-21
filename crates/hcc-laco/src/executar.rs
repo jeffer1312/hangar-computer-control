@@ -337,6 +337,40 @@ async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arqui
     Ok(png)
 }
 
+/// The cycle's print: the PNG the helper reads, the screenshot Jev may get, and why Jev gets none (capture failed,
+/// out of Typesafe's limits).
+struct Print {
+    png: Option<Vec<u8>>,
+    imagem: Option<Imagem>,
+    sem: Option<Envio>,
+}
+
+async fn tirar_print<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arquivo: &Path) -> Result<Print, String> {
+    Ok(match capturar(sessao, controle, arquivo).await? {
+        Err(e) => Print { png: None, imagem: None, sem: Some(Envio { imagem: "sem_print", motivo: erro_sessao(e) }) },
+        Ok(png) => match Imagem::de_png(png.clone()) {
+            Ok(i) => Print { png: Some(png), imagem: Some(i), sem: None },
+            Err(e) => Print { png: Some(png), imagem: None, sem: Some(Envio { imagem: "fora_do_limite", motivo: e }) },
+        },
+    })
+}
+
+fn imagem_de(print: &Option<Print>) -> Option<&Imagem> {
+    print.as_ref().and_then(|p| p.imagem.as_ref())
+}
+
+fn png_de(print: &Option<Print>) -> Option<&[u8]> {
+    print.as_ref().and_then(|p| p.png.as_deref())
+}
+
+static NAO_PRECISOU: Envio = Envio { imagem: "nao_precisou", motivo: String::new() };
+
+/// What the record says about a request's screenshot: no print taken (the step did without), why the print gave
+/// Jev none, or what happened to the screenshot.
+fn envio_do_passo<'a>(print: &'a Option<Print>, envio: &'a Envio) -> &'a Envio {
+    match print { None => &NAO_PRECISOU, Some(p) => p.sem.as_ref().unwrap_or(envio) }
+}
+
 /// `print` is the cycle's capture; without one (it failed) the screen is captured here, and a failure stops the run.
 /// With `imagem`, Jev picks among the helper's proposals seeing it (the third value) and corrects each labelled click
 /// to where it finds the control.
@@ -794,15 +828,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         controle.rodar(async { tokio::fs::write(pasta.join("observacao.json"), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
         // Every cycle's screen stays, so a run can be read back step by step.
         controle.rodar(async { tokio::fs::write(pasta.join(format!("observacao-{ciclo}.json")), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
-        // Jev decides every step seeing the screen; without a usable print it decides from the tree alone.
-        let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let (print, imagem, sem_imagem) = match capturar(s, controle, &pasta.join(format!("tela-{ciclo}.png"))).await? {
-            Err(e) => (None, None, Some(Envio { imagem: "sem_print", motivo: erro_sessao(e) })),
-            Ok(png) => match Imagem::de_png(png.clone()) {
-                Ok(i) => (Some(png), Some(i), None),
-                Err(e) => (Some(png), None, Some(Envio { imagem: "fora_do_limite", motivo: e })),
-            },
-        };
+        let tela = pasta.join(format!("tela-{ciclo}.png"));
+        // Taken only when Jev is unsure without it, or the window has no controls for the tree to show.
+        let mut print: Option<Print> = None;
         if barreiras.aviso_repetido(&obs).is_some() {
             let texto: String = secretos.texto(&aviso(&obs).unwrap_or_default()).chars().take(400).collect();
             r.motivo = format!("o aplicativo respondeu duas vezes com o mesmo aviso: {texto}"); return Ok(());
@@ -811,7 +839,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             // Nothing to do on screen: the tree text and one print reading are the answer; no Jev, no action.
             let estado = secretos.estado(op, &obs, recentes, None);
             let (ajuda, leu, _) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
-                print.as_deref(), jev, None).await?;
+                None, jev, None).await?;
             let texto = texto_janela(&obs);
             if !leu && texto.is_empty() { r.motivo = format!("leitura sem resultado: {}", ajuda.interpretacao); return Ok(()); }
             r.ok = true;
@@ -857,8 +885,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let mut primeira_ajuda: Option<Candidato> = None;
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, recentes, None);
+            print = Some(tirar_print(sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, &tela).await?);
             let (ajuda, leu, escolhida) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
-                print.as_deref(), jev, imagem.as_ref()).await?;
+                png_de(&print), jev, imagem_de(&print)).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
@@ -895,8 +924,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let proposta = pela_jev.or_else(|| propostas.first().filter(|p| !ambigua && pode(p)).map(|p| (p.clone(), 1.0)));
             if let Some((proposta, p)) = proposta {
                 let limite = controle.restante()?.min(Duration::from_secs(30));
-                let (risco, envio) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem.as_ref(), limite)).await?;
-                let (envio, motivo) = envio_registro(sem_imagem.as_ref().unwrap_or(&envio), secretos);
+                let (risco, envio) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem_de(&print), limite)).await?;
+                let (envio, motivo) = envio_registro(envio_do_passo(&print, &envio), secretos);
                 controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica,
                     "imagem":envio, "motivo":motivo}), secretos)).await?;
                 let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
@@ -908,9 +937,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if let Some(d) = direta.take() { break d; }
             let estado = secretos.estado(op, &obs, recentes, Some(&dica));
             let limite = controle.restante()?.min(Duration::from_secs(30));
-            let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, imagem.as_ref(), limite)).await?;
+            let d = controle.medir("jev", Progresso::Jev, jev.decidir(&estado, &acoes, imagem_de(&print), limite)).await?;
             let opcao = escolha(d.escolha);
-            let (envio, motivo) = envio_registro(sem_imagem.as_ref().unwrap_or(&d.envio), secretos);
+            let (envio, motivo) = envio_registro(envio_do_passo(&print, &d.envio), secretos);
             // Python conta caracteres do JSON ASCII, apesar do nome bytes_estado.
             let ascii = py_dumps(&estado).chars().map(|c| if c.is_ascii() { 1 } else if u32::from(c) > 0xffff { 12 } else { 6 }).sum::<usize>();
             let mut log = json!({"ciclo":ciclo, "n_acoes":acoes.len(), "bytes_estado":ascii, "dica":dica,
@@ -927,7 +956,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if ajudou {
                     let sem_dica = secretos.estado(op, &obs, recentes, None);
                     let limite = controle.restante()?.min(Duration::from_secs(30));
-                    let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, imagem.as_ref(), limite)).await?;
+                    let d2 = controle.medir("jev", Progresso::Jev, jev.decidir(&sem_dica, &acoes, imagem_de(&print), limite)).await?;
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "sem_dica":true,
                         "choice":escolha(d2.escolha), "probability":d2.p, "risky":d2.risco}), secretos)).await?;
                     controle.restante()?;
@@ -1019,8 +1048,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if let Some(proposta) = primeira_ajuda.take() {
                     let estado = secretos.estado(op, &obs, recentes, Some(&dica));
                     let limite = controle.restante()?.min(Duration::from_secs(30));
-                    let (risco, envio) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem.as_ref(), limite)).await?;
-                    let (envio, motivo) = envio_registro(sem_imagem.as_ref().unwrap_or(&envio), secretos);
+                    let (risco, envio) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proposta.descricao, imagem_de(&print), limite)).await?;
+                    let (envio, motivo) = envio_registro(envio_do_passo(&print, &envio), secretos);
                     controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proposta.descricao, "risky":risco, "dica":dica,
                         "imagem":envio, "motivo":motivo}), secretos)).await?;
                     let i = acoes.iter().position(|a| a.acao == proposta.acao).ok_or("IndexError: list index out of range")?;
@@ -1030,9 +1059,19 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 r.motivo = format!("sem ação segura: Jev escolheu {opcao} com {}. {dica}", percentual(d.p)).trim().into();
                 return Ok(());
             }
+            // Unsure without the print: the same question once more seeing it, before the helper.
+            if print.is_none() {
+                let tirado = tirar_print(sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, &tela).await?;
+                let limite = controle.restante()?.min(Duration::from_secs(30));
+                let sem = tirado.sem.clone().or_else(|| jev.sem_imagem_por(limite).map(|imagem| Envio { imagem, motivo: String::new() }));
+                print = Some(tirado);
+                let Some(sem) = sem else { continue };
+                let (envio, motivo) = envio_registro(&sem, secretos);
+                controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "imagem":envio, "motivo":motivo}), secretos)).await?;
+            }
             ajudou = true;
             let (ajuda, leu, escolhida) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
-                print.as_deref(), jev, imagem.as_ref()).await?;
+                png_de(&print), jev, imagem_de(&print)).await?;
             // Jev's pick on the print, when sure enough, is the help's action if Jev stays unsure; else the first one.
             let pela_jev = escolhida.filter(|(_, p)| *p >= FRACO_COM_PRINT)
                 .and_then(|(a, _)| match &no_campo(a, &obs, recentes)[..] { [a] => Some(a.clone()), _ => None });

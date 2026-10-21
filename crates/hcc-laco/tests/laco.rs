@@ -42,10 +42,13 @@ async fn run(op: Opcoes, con: &FakeConnector) -> Resultado {
     executar(op, con, CancellationToken::new(), &|_| {}).await
 }
 
-/// Request bodies in order, without Jev's pick among the helper's proposals (its tests read it from the log).
 async fn bodies(server: &MockServer) -> Vec<Value> {
-    server.received_requests().await.unwrap().iter().map(|r| serde_json::from_slice::<Value>(&r.body).unwrap())
-        .filter(|b| b["questions"]["pick"]["instructions"] != hcc_laco::prompts::PROPOSTA).collect()
+    server.received_requests().await.unwrap().iter().map(|r| serde_json::from_slice(&r.body).unwrap()).collect()
+}
+
+/// The agent's screenshots become a real 1280x720 PNG: Jev may get the image.
+fn com_print(con: &FakeConnector) {
+    con.state.lock().unwrap().png = fakes::png_1280x720();
 }
 
 /// Requests to the vision helper (the LLM), apart from Jev's.
@@ -2538,36 +2541,72 @@ fn decisoes(r: &Resultado) -> Vec<Value> {
     jev_log(r).into_iter().filter(|l| l.get("choice").is_some() && l.get("sem_dica").is_none()).collect()
 }
 
+// A sure step needs no print: no capture, and the request is the one Jev got before screenshots existed.
 #[tokio::test]
-async fn print_em_todo_passo() {
+async fn passo_forte_sem_print() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    com_print(&con);
     let (op, server) = setup(vec![select("set_value"), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
-    let pedidos = bodies(&server).await;
-    assert_eq!(pedidos.len(), 2);
-    for p in &pedidos {
-        assert!(p["questions"].get("action").is_some());
-        assert!(p["state"]["tela"].as_str().is_some_and(|t| p["assets"][t]["format"] == "png"), "{p}");
+    assert_eq!(con.state.lock().unwrap().captures, 0);
+    for p in bodies(&server).await {
+        assert!(p["state"].get("tela").is_none() && p.get("assets").is_none() && p["questions"].get("blocked").is_none(), "{p}");
     }
+    assert!(decisoes(&r).iter().all(|l| l["imagem"] == "nao_precisou"), "{:?}", decisoes(&r));
+}
+
+// Jev unsure without the print: one capture, and the same question again with the screenshot and the blocked one.
+#[tokio::test]
+async fn passo_fraco_pergunta_com_print() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    com_print(&con);
+    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    assert_eq!(con.state.lock().unwrap().captures, 1);
+    let pedidos = bodies(&server).await;
+    assert!(pedidos[0]["state"].get("tela").is_none());
+    assert_eq!(pedidos[1]["questions"]["action"], pedidos[0]["questions"]["action"]);
+    assert!(pedidos[1]["state"]["tela"].as_str().is_some_and(|t| pedidos[1]["assets"][t]["format"] == "png"), "{}", pedidos[1]);
+    assert!(pedidos[1]["questions"].get("blocked").is_some());
     let d = decisoes(&r);
-    assert_eq!(d.len(), 2);
-    assert!(d.iter().all(|l| l["imagem"] == "enviada" && l["blocked"].is_null()), "unanswered `blocked` is not 0: {d:?}");
-    assert_eq!(con.state.lock().unwrap().captures, 2);
+    assert_eq!([&d[0]["imagem"], &d[1]["imagem"], &d[2]["imagem"]], ["nao_precisou", "enviada", "nao_precisou"], "{d:?}");
+    assert!(d[1]["blocked"].is_null(), "unanswered `blocked` is not 0: {d:?}");
+}
+
+// Still unsure with the print: the helper reads that same print, no second capture.
+#[tokio::test]
+async fn ainda_fraco_vai_ao_auxiliar_com_o_mesmo_print() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    com_print(&con);
+    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Choice("BLOCKED", 0.9, 0.05),
+        help(json!([{"type":"text","target":"e0","value":"Ana"}])), Answer::Localiza("NONE", 1.0, [0.0; 5]), select("text 'Ana'"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(ajudas(&server).await, 1);
+    assert_eq!(con.state.lock().unwrap().captures, 1);
+    let ajuda = bodies(&server).await.into_iter().find(|b| b.get("messages").is_some()).unwrap();
+    assert!(ajuda["messages"][1]["content"].to_string().contains("data:image/png;base64,"), "the helper got the print");
+    assert_eq!(r.captura, Some(r.registro.clone().unwrap().join("tela-0.png")));
 }
 
 // A request with the screenshot that fails is asked again without it, and the rest of the run goes without.
 #[tokio::test]
 async fn imagem_falha_refaz_sem() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (op, server) = setup(vec![Answer::SemTela(Box::new(select("set_value"))), done()]).await;
+    com_print(&con);
+    let blocked = || Answer::Choice("BLOCKED", 0.9, 0.05);
+    let (mut op, server) = setup(vec![blocked(), Answer::SemTela(Box::new(select("set_value"))),
+        blocked(), help(json!([])), blocked()]).await;
+    op.max_passos = 1;
     let r = run(op, &con).await;
-    assert!(r.ok, "{}", r.resumo());
-    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1, "{}", r.resumo());
     let d = decisoes(&r);
-    assert_eq!(d[0]["imagem"], "falhou", "{d:?}");
-    assert!(d[0]["motivo"].as_str().is_some_and(|m| m.contains("400")), "{d:?}");
-    assert_eq!(d[1]["imagem"], "desligada", "{d:?}");
+    assert_eq!(d[1]["imagem"], "falhou", "{d:?}");
+    assert!(d[1]["motivo"].as_str().is_some_and(|m| m.contains("400")), "{d:?}");
+    assert!(jev_log(&r).iter().any(|l| l["ciclo"] == 1 && l["imagem"] == "desligada"), "{:?}", jev_log(&r));
     let com_tela = bodies(&server).await.iter().filter(|b| b["state"].get("tela").is_some()).count();
     assert_eq!(com_tela, 1, "only the request that failed carried the screenshot");
 }
@@ -2576,71 +2615,61 @@ async fn imagem_falha_refaz_sem() {
 #[tokio::test]
 async fn imagem_sem_prazo() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (mut op, server) = setup(vec![select("set_value"), done()]).await;
+    com_print(&con);
+    let (mut op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), help(json!([])), Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
     op.limite = seconds(15);
     let r = run(op, &con).await;
-    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(ajudas(&server).await, 1, "{}", r.resumo());
     assert!(bodies(&server).await.iter().all(|b| b["state"].get("tela").is_none()));
-    assert!(decisoes(&r).iter().all(|l| l["imagem"] == "sem_prazo"), "{:?}", decisoes(&r));
+    assert!(jev_log(&r).iter().any(|l| l["imagem"] == "sem_prazo"), "{:?}", jev_log(&r));
 }
 
 // Jev sees a screen nothing on it can clear: the helper is asked and writes why the run stops.
 #[tokio::test]
 async fn bloqueio_pelo_jev() {
     let con = FakeConnector::new(vec![tree("o1", "")]);
-    let (op, server) = setup(vec![Answer::Bloqueio(Box::new(select("set_value")), 0.9),
+    com_print(&con);
+    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Bloqueio(Box::new(select("set_value")), 0.9),
         Answer::Vision(json!({"interpretacao": "diálogo pedindo a senha da rede", "acoes": [], "impedimento": "diálogo de rede"}))]).await;
     let r = run(op, &con).await;
     assert!(!r.ok);
     assert_eq!(r.motivo, "diálogo de rede", "{}", r.resumo());
     assert!(con.state.lock().unwrap().acts.is_empty());
-    assert!(bodies(&server).await[0]["questions"].get("blocked").is_some());
-    assert_eq!(decisoes(&r)[0]["blocked"], 0.9);
+    assert!(bodies(&server).await[1]["questions"].get("blocked").is_some());
+    assert_eq!(decisoes(&r)[1]["blocked"], 0.9);
 }
 
 // The helper sees no blocker: its word stands, the loop goes on and the disagreement is on record.
 #[tokio::test]
 async fn bloqueio_auxiliar_discorda() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![Answer::Bloqueio(Box::new(select("set_value")), 0.9), help(json!([])),
-        Answer::Bloqueio(Box::new(select("set_value")), 0.9), done()]).await;
+    com_print(&con);
+    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Bloqueio(Box::new(select("set_value")), 0.9),
+        help(json!([])), Answer::Bloqueio(Box::new(select("set_value")), 0.9), done()]).await;
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     assert_eq!(con.state.lock().unwrap().acts.len(), 1);
     assert!(jev_log(&r).iter().any(|l| l["auxiliar_discorda"] == true), "{:?}", jev_log(&r));
 }
 
-// The helper reads the cycle's print: one capture per cycle, never a second one for the help.
+// A failed capture is on record; the helper then captures as before, and its failure stops the run as before.
 #[tokio::test]
-async fn captura_reaproveitada() {
-    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05),
-        help(json!([{"type":"text","target":"e0","value":"Ana"}])), select("text 'Ana'"), done()]).await;
-    let r = run(op, &con).await;
-    assert!(r.ok, "{}", r.resumo());
-    assert_eq!(ajudas(&server).await, 1);
-    assert_eq!(con.state.lock().unwrap().captures, 2, "two cycles, one capture each");
-    assert_eq!(r.captura, Some(r.registro.clone().unwrap().join("tela-0.png")));
-}
-
-// A failed capture does not stop the cycle: Jev decides from the tree, and the record says why there was no print.
-#[tokio::test]
-async fn sem_print_segue_pela_arvore() {
-    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+async fn sem_print_fica_no_registro() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
     con.state.lock().unwrap().screenshot_error = Some(SessionError::Agent("captura recusada".into()));
-    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    let (op, server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
     let r = run(op, &con).await;
-    assert!(r.ok, "{}", r.resumo());
+    assert!(!r.ok && r.motivo.contains("captura recusada"), "{}", r.resumo());
     assert!(bodies(&server).await.iter().all(|b| b["state"].get("tela").is_none()));
-    let d = decisoes(&r);
-    assert!(d.iter().all(|l| l["imagem"] == "sem_print" && l["motivo"].as_str().is_some_and(|m| m.contains("captura recusada"))), "{d:?}");
+    assert!(jev_log(&r).iter().any(|l| l["imagem"] == "sem_print" && l["motivo"].as_str().is_some_and(|m| m.contains("captura recusada"))),
+        "{:?}", jev_log(&r));
 }
 
 // A window with no controls never reaches `decidir`: the help's requests carry the screenshot, and a failure there
 // must be on record too.
 #[tokio::test]
 async fn imagem_falha_na_ajuda_fica_no_registro() {
-    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let con = sem_controles();
     let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"botão Não"}])),
         Answer::SemTela(Box::new(Answer::Risk(0.05))), done()]).await;
     let r = run(op, &con).await;
@@ -2651,11 +2680,13 @@ async fn imagem_falha_na_ajuda_fica_no_registro() {
     assert_eq!(direta["imagem"], "desligada", "{direta}");
 }
 
-/// A window drawn without controls (empty tree) over the whole 800x600 screen.
-fn sem_controles(id: &str) -> Observation {
-    let mut obs = empty(id);
+/// A window drawn without controls (empty tree) over the whole 800x600 screen, then the filled form; with the print.
+fn sem_controles() -> FakeConnector {
+    let mut obs = empty("o1");
     obs.windows[0].rect = Rect(0, 0, 800, 600);
-    obs
+    let con = FakeConnector::new(vec![obs, tree("o2", "Ana")]);
+    com_print(&con);
+    con
 }
 
 /// Box of a control centered at (640, 360) on the 1280x720 print, with this confidence.
@@ -2664,7 +2695,7 @@ const CENTRO: [f64; 4] = [0.45, 0.45, 0.55, 0.55];
 // The helper aims the click at (100,100); Jev finds "Salvar" at the print's center and the click goes there.
 #[tokio::test]
 async fn box_corrige_clique() {
-    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let con = sem_controles();
     let [l, t, r, b] = CENTRO;
     let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"Salvar"}])),
         Answer::Localiza("Salvar", 0.9, [l, t, r, b, 0.8]), Answer::Risk(0.05), done()]).await;
@@ -2679,7 +2710,7 @@ async fn box_corrige_clique() {
 // Jev unsure where the control is: the helper's point stays.
 #[tokio::test]
 async fn box_fraco_mantem() {
-    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let con = sem_controles();
     let [l, t, r, b] = CENTRO;
     let (op, _server) = setup(vec![help(json!([{"type":"mouse","x":100,"y":100,"rotulo":"Salvar"}])),
         Answer::Localiza("Salvar", 0.9, [l, t, r, b, 0.2]), Answer::Risk(0.05), done()]).await;
@@ -2693,7 +2724,7 @@ fn duas_teclas() -> Answer { help(json!([{"type":"keys","keys":["Escape"]}, {"ty
 // Two proposals on a window with no controls: Jev, seeing the print, picks the second and only that one runs.
 #[tokio::test]
 async fn sem_controles_jev_escolhe() {
-    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let con = sem_controles();
     let (op, _server) = setup(vec![duas_teclas(), Answer::Localiza("Enter", 0.8, [0.0; 5]), Answer::Risk(0.05), done()]).await;
     let res = run(op, &con).await;
     let acts: Vec<Action> = con.state.lock().unwrap().acts.iter().map(|a| a.0.clone()).collect();
@@ -2704,7 +2735,7 @@ async fn sem_controles_jev_escolhe() {
 // Jev unsure among them: the first proposal decides, as before.
 #[tokio::test]
 async fn sem_controles_jev_fraco() {
-    let con = FakeConnector::new(vec![sem_controles("o1"), tree("o2", "Ana")]);
+    let con = sem_controles();
     let (op, _server) = setup(vec![duas_teclas(), Answer::Localiza("Enter", 0.1, [0.0; 5]), Answer::Risk(0.05), Answer::Risk(0.05), done()]).await;
     let res = run(op, &con).await;
     let primeira = con.state.lock().unwrap().acts[0].0.clone();
@@ -2716,8 +2747,10 @@ async fn sem_controles_jev_fraco() {
 #[tokio::test]
 async fn ajuda_jev_escolhe_a_proposta() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![Answer::Choice("BLOCKED", 0.9, 0.05), duas_teclas(), Answer::Localiza("Enter", 0.8, [0.0; 5]),
-        Answer::Choice("BLOCKED", 0.9, 0.05), Answer::Risk(0.05), done()]).await;
+    com_print(&con);
+    let blocked = || Answer::Choice("BLOCKED", 0.9, 0.05);
+    let (op, _server) = setup(vec![blocked(), blocked(), duas_teclas(), Answer::Localiza("Enter", 0.8, [0.0; 5]),
+        blocked(), Answer::Risk(0.05), done()]).await;
     let res = run(op, &con).await;
     let primeira = con.state.lock().unwrap().acts[0].0.clone();
     assert_eq!(primeira, action(json!({"type":"keys","keys":["Enter"]})), "{}", res.resumo());
