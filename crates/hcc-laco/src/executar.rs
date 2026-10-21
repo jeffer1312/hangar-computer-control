@@ -371,8 +371,7 @@ fn envio_do_passo<'a>(print: &'a Option<Print>, envio: &'a Envio) -> &'a Envio {
     match print { None => &NAO_PRECISOU, Some(p) => p.sem.as_ref().unwrap_or(envio) }
 }
 
-/// `print` is the cycle's capture; without one (not taken, or it failed) the screen is captured here, and a failure
-/// stops the run.
+/// `print` is the cycle's capture; without one (it failed) the screen is captured here, and a failure stops the run.
 /// With `imagem`, Jev picks among the helper's proposals seeing it (the third value) and corrects each labelled click
 /// to where it finds the control.
 #[allow(clippy::too_many_arguments)]
