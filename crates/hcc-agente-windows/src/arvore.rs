@@ -160,13 +160,19 @@ pub(crate) fn focar_hwnd(h: isize) {
     }
 }
 
-/// A menu, dropdown or dialog of the window's process is open over it, or the window itself is one (a modal
-/// dialog in front has an owner).
-pub(crate) fn menu_aberto(h: isize) -> bool {
+/// Menus, dropdowns and dialogs of the window's process.
+pub(crate) fn popups_de(h: isize) -> Vec<isize> {
+    let hwnd = HWND(h as *mut _);
+    popups(hwnd, pid(hwnd))
+}
+
+/// The action opened a menu, dropdown or dialog of the window's process (one not in `antes`), or the window in
+/// front is itself one (a modal dialog has an owner). A bubble that was already there does not count.
+pub(crate) fn menu_aberto(h: isize, antes: &[isize]) -> bool {
     let hwnd = HWND(h as *mut _);
     // SAFETY: a stale handle only makes the query fail.
     let tem_dono = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|d| !d.is_invalid());
-    tem_dono || !popups(hwnd, pid(hwnd)).is_empty()
+    tem_dono || popups_de(h).iter().any(|p| !antes.contains(p))
 }
 
 pub(crate) fn mesmo_processo(a: isize, b: isize) -> bool {
@@ -388,7 +394,8 @@ fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element
     } else {
         None
     };
-    if let Some(edit) = padrao(el.get_cached_pattern::<UIValuePattern>())? {
+    // A checkbox's state is its value: Chromium also gives it an empty ValuePattern.
+    if let Some(edit) = padrao(el.get_cached_pattern::<UIValuePattern>())?.filter(|_| toggle.is_none()) {
         // A password field enters the tree to be typed into, but its content never leaves Windows.
         value = if senha { None } else { Some(edit.get_cached_value().map_err(com)?) };
         if !edit.cached_is_readonly().map_err(com)? {

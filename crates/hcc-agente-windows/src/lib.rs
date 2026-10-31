@@ -416,6 +416,8 @@ mod desktop {
         entrada_propria: Option<u32>,
         /// The last observation read a window by id: it may stay behind others.
         por_id: bool,
+        /// The window given back last, should the app take the front again right after.
+        janela_devolvida: Option<isize>,
         /// The drawn cursor of `ver`, made on the first action that asks for it.
         cursor: Option<crate::overlay::Cursor>,
     }
@@ -444,7 +446,7 @@ mod desktop {
             sessao_win::dpi_por_monitor();
             let sessao = sessao_win::Sessao::abrir().map_err(|e| e.to_string())?;
             let ua = UIAutomation::new().map_err(|e| arvore::com(e).to_string())?;
-            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false, cursor: None })
+            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false, janela_devolvida: None, cursor: None })
         }
 
         /// Today's path: real clicks and keys where the app needs them.
@@ -640,10 +642,11 @@ mod desktop {
         }
 
         /// Whether it moved the focus (an Alt tap may have been sent).
-        fn devolver_janela(&mut self) -> bool {
+        fn devolver_janela(&mut self, popups_antes: &[isize]) -> bool {
             let frente = sessao_win::primeiro_plano();
-            if regras::devolver(self.janela_do_usuario, frente, arvore::menu_aberto(frente)) {
-                arvore::focar_hwnd(self.janela_do_usuario.take().unwrap_or_default());
+            if regras::devolver(self.janela_do_usuario, frente, arvore::menu_aberto(frente, popups_antes)) {
+                self.janela_devolvida = self.janela_do_usuario.take();
+                arvore::focar_hwnd(self.janela_devolvida.unwrap_or_default());
                 return true;
             }
             if self.janela_do_usuario == Some(frente) {
@@ -718,7 +721,9 @@ mod desktop {
             if action.cursor {
                 self.mostrar_cursor(action);
             }
-            let alvo = self.janelas.get(&observed.foreground).map_or(0, |j| j.hwnd);
+            // The window the action is aimed at: the one activated, else the one read.
+            let mirada = if action.kind == ActionType::Activate { action.target.as_deref().unwrap_or_default() } else { observed.foreground.as_str() };
+            let alvo = self.janelas.get(mirada).map_or(0, |j| j.hwnd);
             let frente = sessao_win::primeiro_plano();
             if action.input.is_none_or(|m| m == InputMode::Real) {
                 // Real input lands on whatever is in front: never on a window read behind others.
@@ -741,15 +746,28 @@ mod desktop {
             if frente != alvo && !arvore::mesmo_processo(frente, alvo) {
                 self.janela_do_usuario = Some(frente);
             }
+            let mut popups_antes = arvore::popups_de(alvo);
+            if let Some(j) = action.target.as_deref().and_then(|t| self.janelas.get(t)).filter(|_| action.kind == ActionType::Activate) {
+                popups_antes.extend(arvore::popups_de(j.hwnd));
+            }
             let feito = if caminho == regras::Caminho::Padrao {
                 self.agir_padrao(action)
             } else {
-                if let Some(j) = self.janelas.get(&observed.foreground) {
+                if action.kind != ActionType::Activate && let Some(j) = self.janelas.get(&observed.foreground) {
                     arvore::focar_janela(j);
                 }
                 self.agir_real(action)
             };
-            let tocou = self.devolver_janela();
+            // Chromium brings its window up a moment after the accessibility call returns: look twice.
+            pausa(0.25);
+            let mut tocou = self.devolver_janela(&popups_antes);
+            if tocou {
+                pausa(0.25);
+                if self.janela_do_usuario.is_none() && sessao_win::primeiro_plano() == alvo {
+                    self.janela_do_usuario = self.janela_devolvida;
+                    tocou |= self.devolver_janela(&popups_antes);
+                }
+            }
             // The input just sent is ours (keys, clicks, the Alt that unlocks the focus): not the user being active.
             if caminho == regras::Caminho::Real || tocou {
                 self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);

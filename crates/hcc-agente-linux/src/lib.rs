@@ -271,22 +271,26 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
             .ok_or_else(|| runtime("a janela fechou; observe novamente"))
     }
 
-    /// A menu, popup or tooltip of the client's app is showing.
-    fn menu_aberto(&self, client: &Value) -> bool {
-        let Some(pid) = client["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else { return false };
-        let Ok(apps) = self.tree.apps() else { return false };
+    /// The menus, popups and tooltips of the client's app that are showing, as `role:name`.
+    fn popups_de(&self, client: &Value) -> Vec<String> {
+        let Some(pid) = client["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else { return vec![] };
+        let Ok(apps) = self.tree.apps() else { return vec![] };
         apps.iter().filter(|a| self.tree.pid(a).is_ok_and(|p| p == Some(pid)))
             .flat_map(|a| self.tree.children(a).unwrap_or_default())
+            .filter_map(|top| self.tree.read(&top).ok())
             // GTK4 gives the main window the role "window" too: only one not named as the client counts.
-            .any(|top| self.tree.read(&top).is_ok_and(|i| i.has("showing") && (["popup menu", "menu", "tool tip"].contains(&i.role.as_str())
-                || (i.role == "window" && client["title"].as_str() != Some(i.name().as_str())))))
+            .filter(|i| i.has("showing") && (["popup menu", "menu", "tool tip"].contains(&i.role.as_str())
+                || (i.role == "window" && client["title"].as_str() != Some(i.name().as_str()))))
+            .map(|i| format!("{}:{}", i.role, i.name())).collect()
     }
 
     /// The user's window goes back in front unless the app opened a menu the next action needs.
-    fn devolver_janela(&mut self) {
+    /// A popup the action opened (not in `antes`) holds it: a bubble already there does not.
+    fn devolver_janela(&mut self, antes: &[String]) {
         let Ok(frente) = hypr::query(&self.commands, "activewindow") else { return };
         let id = foreground_id(&frente);
-        if self.janela_do_usuario.as_ref().is_some_and(|u| *u != id) && !self.menu_aberto(&frente) {
+        let menu = self.popups_de(&frente).iter().any(|p| !antes.contains(p));
+        if self.janela_do_usuario.as_ref().is_some_and(|u| *u != id) && !menu {
             let usuario = self.janela_do_usuario.take().unwrap_or_default();
             if let Err(e) = self.focar(&usuario) { ignorado("devolver_janela", &e); }
         } else if self.janela_do_usuario.as_deref() == Some(id.as_str()) {
@@ -610,22 +614,28 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         }
         if !self.parado.load(Ordering::Relaxed) { return Err(runtime("usuário ativo").nao_entregue()); }
         self.observed_at = None;
-        // The window in front now is the user's unless it belongs to the app (its dialog or menu).
-        let do_app = self.windows.get(&observed.foreground).is_some_and(|c| c["pid"] == ativa["pid"]);
-        if frente != observed.foreground && !do_app { self.janela_do_usuario = Some(frente.clone()); }
+        // The window the action is aimed at: the one activated, else the one read. The window in front now is the
+        // user's unless it is that one or belongs to the same app (its dialog or menu).
+        let mirada = if action.kind == ActionType::Activate { action.target.clone().unwrap_or_default() } else { observed.foreground.clone() };
+        let do_app = self.windows.get(&mirada).is_some_and(|c| c["pid"] == ativa["pid"]);
+        if frente != mirada && !do_app { self.janela_do_usuario = Some(frente.clone()); }
+        let mut popups_antes = self.windows.get(&observed.foreground).map(|c| self.popups_de(c)).unwrap_or_default();
+        if action.kind == ActionType::Activate && let Some(c) = action.target.as_ref().and_then(|t| self.windows.get(t)) {
+            popups_antes.extend(self.popups_de(c));
+        }
         let feito = if padrao { self.agir_padrao(action) } else {
-            if frente != observed.foreground {
+            if frente != observed.foreground && action.kind != ActionType::Activate {
                 self.focar(&observed.foreground).map_err(DesktopError::nao_entregue)?;
                 std::thread::sleep(Duration::from_millis(150));
                 let agora = hypr::query(&self.commands, "activewindow").map_err(|e| runtime(e).nao_entregue())?;
                 if foreground_id(&agora) != observed.foreground {
-                    self.devolver_janela();
+                    self.devolver_janela(&popups_antes);
                     return Err(runtime("o Hyprland não trouxe a janela do app").nao_entregue());
                 }
             }
             self.agir(action)
         };
-        self.devolver_janela();
+        self.devolver_janela(&popups_antes);
         feito
     }
 

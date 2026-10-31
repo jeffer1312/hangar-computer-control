@@ -1124,3 +1124,19 @@ fn window_is_captured_by_its_toplevel_identifier() {
     assert_eq!(desktop.screenshot_png(Some("w0xa")).unwrap(), b"PNG");
     assert!(commands.calls.borrow().iter().any(|c| c.0[..3] == ["grim", "-T", "abc123"]), "{:?}", commands.calls.borrow());
 }
+
+#[test]
+fn activating_the_app_from_the_user_window_gives_that_window_back() {
+    let (mut desktop, commands, _) = desktop(vec![node("push button", "Salvar")]);
+    let terminal = json!({"address":"0xb","title":"Terminal","pid":9,"class":"kitty","monitor":1,"at":[1542,51],"size":[800,600],"mapped":true,"hidden":false});
+    commands.clients.borrow_mut().as_array_mut().unwrap().push(terminal.clone());
+    *commands.active.borrow_mut() = terminal;
+    let observed = desktop.observe(&Scope::default()).unwrap();
+    assert_eq!(observed.foreground, "w0xb");
+    commands.calls.borrow_mut().clear();
+    let ativar = Action { input: Some(hcc_protocolo::InputMode::Polite), ..action(ActionType::Activate, Some("w0xa")) };
+    desktop.act(&observed, &ativar).unwrap();
+    let chamadas: Vec<String> = commands.calls.borrow().iter().map(|c| c.0.join(" ")).collect();
+    assert!(chamadas.iter().any(|c| c.contains("dispatch") && c.contains("0xa")), "{chamadas:?}");
+    assert_eq!(commands.active.borrow()["address"], "0xb", "o terminal do usuário volta: {chamadas:?}");
+}
