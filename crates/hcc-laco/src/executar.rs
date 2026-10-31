@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hcc_protocolo::{Action, ActionType, Connector, Delivery, Observation, RootSpec, Scope, Session, SessionError};
+use hcc_protocolo::{Action, ActionType, Connector, Delivery, InputMode, Observation, RootSpec, Scope, Session, SessionError};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -13,10 +13,11 @@ use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use crate::barreiras::{Barreiras, aviso, escolhe_foco, literais_atendidos, sem_acao_pedida, sem_localizadores, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
+use crate::modo::modo_entrada;
 use crate::candidatos::{apps_do_objetivo, candidatos, descrever_acao, mesmo_alvo, py_str, segredos, sem_app_aberto, texto_no_editavel};
 use crate::descrever::{intencao, py_repr};
 use crate::estado::{AssinaturaTela, assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
-use crate::geometria::{dentro, para_tela};
+use crate::geometria::{dentro, para_janela, para_tela};
 use crate::http::py_dumps;
 use crate::jev::Jev;
 use crate::llm::{Imagem, Llm};
@@ -27,6 +28,8 @@ use crate::roteiro;
 use crate::tipos::{Ajuda, Candidato, Decisao, Envio, Escolha, Progresso, Registro};
 
 const CANCELADO: &str = "RuntimeError: objetivo cancelado; nenhuma nova ação será enviada";
+/// How long the loop waits for the user to stop using the computer before giving up an action.
+const USUARIO_ATIVO: Duration = Duration::from_secs(60);
 const SEM_PROGRESSO: u32 = 6;
 const LIMITE: &str = "TimeoutError: limite de duração atingido; objetivo não confirmado";
 // Limits for a decision Jev made seeing the screenshot: equal to the tree-only ones until calibrated on live runs.
@@ -55,6 +58,8 @@ pub struct Opcoes {
     /// Folder of recorded scripts; `None` turns record and replay off.
     pub roteiros: Option<PathBuf>,
     pub refazer: bool,
+    /// The app window stays in front, actions use real input and the agent draws the cursor: the user watches.
+    pub ver: bool,
 }
 
 struct Controle<'a> {
@@ -346,8 +351,9 @@ async fn registrar(pasta: &Path, mut valor: Value, secretos: &Segredos) -> Resul
 }
 
 /// The screen as PNG, saved to `arquivo`. The outer error stops the run (cancel, time, disk); the inner one is the agent's.
-async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arquivo: &Path) -> Result<Result<Vec<u8>, SessionError>, String> {
-    let png = controle.medir("captura", Progresso::Captura, async { Ok(sessao.screenshot(None).await) }).await?;
+/// With `janela`, only that window: the rest of the user's screen never reaches the vision model.
+async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arquivo: &Path, janela: Option<&str>) -> Result<Result<Vec<u8>, SessionError>, String> {
+    let png = controle.medir("captura", Progresso::Captura, async { Ok(sessao.screenshot(janela).await) }).await?;
     if let Ok(png) = &png { controle.rodar(async { tokio::fs::write(arquivo, png).await.map_err(erro_io) }).await?; }
     Ok(png)
 }
@@ -357,13 +363,13 @@ async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arqui
 /// helper's.
 #[allow(clippy::too_many_arguments)]
 async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_>, r: &mut Resultado, ciclo: u32,
-    obs: &Observation, estado: &Value, secretos: &Segredos, print: Option<&[u8]>, jev: &Jev, imagem: Option<&Imagem>)
-    -> Result<(Ajuda, bool, Option<(Action, f64)>), String> {
+    obs: &Observation, estado: &Value, secretos: &Segredos, print: Option<&[u8]>, jev: &Jev, imagem: Option<&Imagem>,
+    janela: Option<&str>) -> Result<(Ajuda, bool, Option<(Action, f64)>), String> {
     let captura = r.registro.as_ref().ok_or("RuntimeError: registro indisponível")?.join(format!("tela-{ciclo}.png"));
     let capturada;
     let png = match print {
         Some(png) => png,
-        None => { capturada = capturar(sessao, controle, &captura).await?.map_err(erro_sessao)?; &capturada[..] }
+        None => { capturada = capturar(sessao, controle, &captura, janela).await?.map_err(erro_sessao)?; &capturada[..] }
     };
     r.captura = Some(captura);
     let limite = controle.restante()?.min(Duration::from_secs(45));
@@ -398,7 +404,13 @@ async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_
         controle.rodar(registrar(&pasta, linha, secretos)).await?;
     }
     let total = ajuda.acoes.len();
-    let convertidas: Vec<Option<Action>> = ajuda.acoes.iter().map(|a| secretos.desmascarar(para_tela(a, &obs.screen, &op.texto))).collect();
+    // A print of one window: its pixels map to that window's place on the screen.
+    let retangulo = janela.and_then(|j| obs.windows.iter().find(|w| w.id == j)).map(|w| w.rect);
+    let largura = png.get(16..20).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let convertidas: Vec<Option<Action>> = ajuda.acoes.iter().map(|a| secretos.desmascarar(match retangulo {
+        Some(j) => para_janela(a, j, largura, &op.texto),
+        None => para_tela(a, &obs.screen, &op.texto),
+    })).collect();
     let escolhida = escolha.and_then(|(i, p)| Some((convertidas.get(i)?.clone()?, p)));
     ajuda.acoes = convertidas.into_iter().flatten().collect();
     if ajuda.acoes.len() < total {
@@ -418,7 +430,7 @@ async fn reconectar<C: Connector>(conector: &C, sessao: &mut Option<C::S>, contr
 }
 
 async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
-    acao: &Action, vista: &Observation, atual: &AssinaturaTela, secretos: &Segredos, escopo: &Scope) -> Result<(), String> {
+    acao: &Action, vista: &Observation, atual: &AssinaturaTela, secretos: &Segredos, escopo: &Scope) -> Result<bool, String> {
     // Blind (empty tree): only the title could change; no polling, the next observation looks.
     let prazo = Instant::now() + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
         else if vista.elements.is_empty() { Duration::from_millis(800) } else { Duration::from_secs(3) };
@@ -426,7 +438,7 @@ async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, c
     while Instant::now() < prazo {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         match controle.rodar(async { Ok(observar(s, escopo).await) }).await? {
-            Ok(nova) if assinatura_tela(&nova) != *atual => break,
+            Ok(nova) if assinatura_tela(&nova) != *atual => return Ok(true),
             Ok(_) => {}
             Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
             Err(e) if e.tipo() == "RuntimeError" => eprintln!("observação durante espera ignorada: {}", secretos.texto(&e.to_string())),
@@ -434,7 +446,7 @@ async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, c
         }
         controle.esperar(Duration::from_secs(1)).await?;
     }
-    Ok(())
+    Ok(false)
 }
 
 /// The pieces of a run that went right, under `trechos/` of the scripts folder: each cut is a new piece file or
@@ -769,33 +781,59 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     // A window whose whole read was cut is read as a skeleton; `regiao` is where Jev drilled into.
     let mut esqueleto: Option<String> = None;
     let mut regiao: Option<RootSpec> = None;
+    // The app's window, read (and shot) by id so it may stay behind the user's; while watching, the front one.
+    let mut janela_app: Option<String> = None;
+    let mut janelas_antes: HashSet<String> = HashSet::new();
+    let mut abriu = false;
+    let mut aprendido = crate::modo::Aprendido::ler(op.roteiros.as_deref());
     for ciclo in 0..=op.max_passos {
-        let mut lido_como = Scope { root: regiao.clone(), skeleton: esqueleto.is_some() && regiao.is_none(), window: None };
+        let mut base = Scope { window: janela_app.clone().filter(|_| !op.ver), ..Scope::default() };
+        let mut lido_como = Scope { root: regiao.clone(), skeleton: esqueleto.is_some() && regiao.is_none(), ..base.clone() };
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let mut obs = match controle.medir("observacao", Progresso::Observacao, async { Ok(observar(s, &lido_como).await) }).await? {
             Ok(o) => o,
+            // The app's window closed: back to whatever is in front.
+            Err(e) if lido_como.window.is_some() && e.to_string().contains("a janela fechou") => {
+                (janela_app, esqueleto, regiao) = (None, None, None);
+                (base, lido_como) = (Scope::default(), Scope::default());
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                controle.medir("observacao", Progresso::Observacao, async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?
+            }
             // The drilled region closed or re-rendered: back to the skeleton.
             Err(e) if lido_como.root.is_some() && e.to_string().contains("região sumiu") => {
                 regiao = None;
-                lido_como = Scope { skeleton: true, ..Scope::default() };
+                lido_como = Scope { skeleton: true, ..base.clone() };
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 controle.medir("observacao", Progresso::Observacao, async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?
             }
             Err(e) => return Err(erro_sessao(e)),
         };
+        // A new window of the app (its dialog) becomes the window read.
+        let pid_app = base.window.as_ref().and_then(|j| obs.windows.iter().find(|w| &w.id == j)).map(|w| w.process_id);
+        if let Some(nova) = obs.windows.iter().find(|w| (abriu || Some(w.process_id) == pid_app) && Some(&w.id) != base.window.as_ref()
+            && !janelas_antes.is_empty() && !janelas_antes.contains(&w.id)).map(|w| w.id.clone()) {
+            janela_app = Some(nova);
+            abriu = false;
+            (esqueleto, regiao) = (None, None);
+            base = Scope { window: janela_app.clone(), ..Scope::default() };
+            lido_como = base.clone();
+            let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+            obs = controle.medir("observacao", Progresso::Observacao, async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?;
+        }
+        janelas_antes = obs.windows.iter().map(|w| w.id.clone()).collect();
         // Another window or a dialog: the partial read no longer fits, read it whole.
-        let completa = lido_como.is_default()
+        let completa = lido_como == base
             || Some(chave_janela(&obs)) != esqueleto || crate::estado::dialogo_aberto(&obs).is_some();
         if completa {
-            if !lido_como.is_default() {
+            if lido_como != base {
                 (esqueleto, regiao) = (None, None);
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 obs = controle.medir("observacao", Progresso::Observacao,
-                    async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
+                    async { observar(s, &base).await.map_err(erro_sessao) }).await?;
             }
             if obs.truncated && crate::estado::dialogo_aberto(&obs).is_none() { esqueleto = Some(chave_janela(&obs)); }
         }
-        let lido_como = if completa { Scope::default() } else { lido_como };
+        let lido_como = if completa { base.clone() } else { lido_como };
         let atual = assinatura_tela(&obs);
         sem_tela_nova = if vistas.insert(atual.clone()) { 0 } else { sem_tela_nova + 1 };
         iniciais.get_or_insert_with(|| obs.windows.iter().map(|w| w.id.clone()).collect());
@@ -828,7 +866,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         controle.rodar(async { tokio::fs::write(pasta.join(format!("observacao-{ciclo}.json")), py_dumps(&gravada)).await.map_err(erro_io) }).await?;
         // Jev decides every step seeing the screen; without a usable print it decides from the tree alone.
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let (print, imagem, sem_imagem) = match capturar(s, controle, &pasta.join(format!("tela-{ciclo}.png"))).await? {
+        let (print, imagem, sem_imagem) = match capturar(s, controle, &pasta.join(format!("tela-{ciclo}.png")), lido_como.window.as_deref()).await? {
             Err(e) => (None, None, Some(Envio { imagem: "sem_print", motivo: erro_sessao(e) })),
             Ok(png) => match Imagem::de_png(png.clone()) {
                 Ok(i) => (Some(png), Some(i), None),
@@ -843,7 +881,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             // Nothing to do on screen: the tree text and one print reading are the answer; no Jev, no action.
             let estado = secretos.estado(op, &obs, recentes, None);
             let (ajuda, leu, _) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
-                print.as_deref(), jev, None).await?;
+                print.as_deref(), jev, None, lido_como.window.as_deref()).await?;
             let texto = texto_janela(&obs);
             if !leu && texto.is_empty() { r.motivo = format!("leitura sem resultado: {}", ajuda.interpretacao); return Ok(()); }
             r.ok = true;
@@ -890,7 +928,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         if sem_controles(&obs) {
             let estado = secretos.estado(op, &obs, recentes, None);
             let (ajuda, leu, escolhida) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
-                print.as_deref(), jev, imagem.as_ref()).await?;
+                print.as_deref(), jev, imagem.as_ref(), lido_como.window.as_deref()).await?;
             leitura_valida = leu;
             leitura = ajuda.interpretacao.clone();
             if !ajuda.impedimento.is_empty() { r.motivo = ajuda.impedimento; return Ok(()); }
@@ -1074,7 +1112,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             }
             ajudou = true;
             let (ajuda, leu, escolhida) = ver(op, sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?, controle, r, ciclo, &obs, &estado, secretos,
-                print.as_deref(), jev, imagem.as_ref()).await?;
+                print.as_deref(), jev, imagem.as_ref(), lido_como.window.as_deref()).await?;
             // Jev's pick on the print, when sure enough, is the help's action if Jev stays unsure; else the first one.
             let pela_jev = escolhida.filter(|(_, p)| *p >= FRACO_COM_PRINT)
                 .and_then(|(a, _)| match &no_campo(a, &obs, recentes)[..] { [a] => Some(a.clone()), _ => None });
@@ -1111,6 +1149,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             continue;
         }
         let mut candidato = acoes.get(i).ok_or("IndexError: list index out of range")?.clone();
+        candidato.acao.input = modo_entrada(&candidato.acao, &obs, &aprendido, op.ver);
+        candidato.acao.cursor = op.ver;
         let mut fila = fila.into_iter();
         let primeiro_plano = obs.foreground.clone();
         let mut vista = obs;
@@ -1128,26 +1168,46 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let rotulo = secretos.descricao(acao, &vista, false);
             let mut retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone()),
                 async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
-            // Refused before it touched the app: the same control on a fresh look, once.
-            if matches!(retorno, Err(SessionError::NotDelivered(_))) {
+            // Refused before it touched the app, on a fresh look of the same screen: with real input when only that
+            // reaches it, after the user stops (up to a minute), or once more for any other refusal.
+            let (mut reenviou, mut subiu, desde) = (false, false, Instant::now());
+            while let Err(SessionError::NotDelivered(motivo)) = &retorno {
+                let ativo = motivo.contains("usuário ativo");
+                if (motivo.contains("precisa de entrada real") || motivo.contains("use entrada polite")) && !subiu {
+                    subiu = true;
+                    candidato.acao.input = Some(InputMode::Polite);
+                } else if ativo && desde.elapsed() < USUARIO_ATIVO {
+                    controle.esperar(Duration::from_secs(1)).await?;
+                } else if !ativo && !reenviou {
+                    reenviou = true;
+                } else {
+                    break;
+                }
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let nova = controle.medir("observacao", Progresso::Observacao,
                     async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?;
-                if let Some(de_novo) = mesmo_alvo(acao, &vista, &nova) {
-                    candidato.acao = de_novo;
-                    vista = nova;
-                    atual = assinatura_tela(&vista);
-                    anterior = Some(atual.clone());
-                    let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                    let (acao, id) = (&candidato.acao, &vista.observation_id);
-                    retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),
-                        async { Ok(s.act(id, acao).await) }).await?;
-                }
+                let Some(de_novo) = mesmo_alvo(&candidato.acao, &vista, &nova) else { break };
+                candidato.acao = de_novo;
+                vista = nova;
+                atual = assinatura_tela(&vista);
+                anterior = Some(atual.clone());
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                let (acao, id) = (&candidato.acao, &vista.observation_id);
+                retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone()),
+                    async { Ok(s.act(id, acao).await) }).await?;
             }
             let acao = &candidato.acao;
             let falhou = match retorno {
                 Ok(ret) => {
                     if ret.ok {
+                        // A control acted on names the app's window; a launch or activation brings another to the front.
+                        match acao.kind {
+                            ActionType::Activate if !op.ver => janela_app = acao.target.clone(),
+                            // The launched app's window shows up in a later look: the first new window becomes the app's.
+                            ActionType::Launch => { janela_app = None; abriu = !op.ver; }
+                            _ if acao.target.as_ref().is_some_and(|t| vista.elements.iter().any(|e| &e.id == t)) && !op.ver => janela_app = Some(vista.foreground.clone()),
+                            _ => {}
+                        }
                         foco_escolhido |= escolhe_foco(acao) || invoca_editavel(acao, &vista);
                         em_foco_nas_acoes.extend(vista.windows.iter().find(|w| w.id == vista.foreground).cloned());
                     }
@@ -1185,7 +1245,34 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if !falhou && op.roteiros.is_some() {
                 gravados.push((roteiro::passo(acao, &vista, &op.dados), Some(recentes.len() - 1), hash_tela(&atual), trecho::forma(&vista, &valores_meta)));
             }
-            esperar_efeito(conector, sessao, controle, acao, &vista, &atual, secretos, &lido_como).await?;
+            let mudou_tela = esperar_efeito(conector, sessao, controle, acao, &vista, &atual, secretos, &lido_como).await?;
+            // Background accepted but nothing changed: the app may ignore accessibility for this control. Once with real
+            // input; when that works, the app is remembered. Never for invoke (a save or send with no visible effect
+            // would run twice), nor for a value the agent read back.
+            if !mudou_tela && !falhou && acao.input == Some(InputMode::Background) && acao.kind != ActionType::Invoke
+                && recentes.last().is_some_and(|u| u.result == "ok") {
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                let nova = controle.medir("observacao", Progresso::Observacao,
+                    async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?;
+                if let Some(real) = mesmo_alvo(acao, &vista, &nova).map(|a| Action { input: Some(InputMode::Polite), ..a }) {
+                    vista = nova;
+                    atual = assinatura_tela(&vista);
+                    anterior = Some(atual.clone());
+                    let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                    let id = vista.observation_id.clone();
+                    let feito = controle.medir(&format!("acao:{}", real.kind), Progresso::Acao(secretos.descricao(&real, &vista, false)),
+                        async { Ok(s.act(&id, &real).await) }).await?;
+                    if feito.as_ref().is_ok_and(|r| r.ok) {
+                        if let Some(u) = recentes.last_mut() { u.result = "ok (refeito com entrada real)".into(); }
+                        if esperar_efeito(conector, sessao, controle, &real, &vista, &atual, secretos, &lido_como).await?
+                            && aprendido.aprender(&vista, &real) && let Some(d) = op.roteiros.as_deref()
+                            && let Err(e) = aprendido.gravar(d) {
+                            eprintln!("não foi possível gravar {}: {e}", crate::modo::ARQUIVO);
+                        }
+                    }
+                    candidato.acao = real;
+                }
+            }
             let Some(proxima) = fila.next().filter(|_| !falhou) else { break };
             // The agent consumes each observation id: the next key/text needs a fresh one.
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
@@ -1209,6 +1296,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             (decisao.risco, _) = controle.medir("jev", Progresso::Jev, jev.arriscado(&estado, &proxima.descricao, None, limite)).await?;
             controle.rodar(registrar(&pasta, json!({"ciclo":ciclo, "direta":proxima.descricao, "risky":decisao.risco, "dica":dica}), secretos)).await?;
             candidato = proxima;
+            candidato.acao.input = modo_entrada(&candidato.acao, &vista, &aprendido, op.ver);
+            candidato.acao.cursor = op.ver;
         }
     }
     r.motivo = format!("limite de {} ciclos; objetivo não confirmado", op.max_passos);

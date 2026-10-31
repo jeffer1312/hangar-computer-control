@@ -114,6 +114,7 @@ impl Motor for MotorReal {
                 roteiros: std::env::var_os("HCC_ROTEIROS").filter(|v| !v.is_empty()).map(PathBuf::from)
                     .or_else(|| std::env::home_dir().map(|h| h.join(".cache/hangar-computer-control/roteiros"))),
                 refazer: p.refazer,
+                ver: p.ver,
             };
             let etapa = move |e: Progresso| progresso(rotulo(&e));
             executar(op, &conector, cancel, &etapa).await.resumo()

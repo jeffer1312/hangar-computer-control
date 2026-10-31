@@ -24,7 +24,7 @@ use crate::alvos;
 use crate::motor::{Motor, PedidoObjetivo};
 use crate::progresso;
 
-const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    Segue até concluir, até um impedimento real ou até ficar sem progresso (ciclos\n    sem tela nova). limite_segundos e max_passos são tetos opcionais: só passe se\n    quiser cortar antes.\n\n    Objetivo concluído vira roteiro: a mesma frase, com as mesmas chaves em `dados`,\n    no mesmo alvo repete os passos sem consultar o Jev a cada um e volta ao Jev se a\n    tela divergir. refazer=true ignora o roteiro gravado.";
+const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    Segue até concluir, até um impedimento real ou até ficar sem progresso (ciclos\n    sem tela nova). limite_segundos e max_passos são tetos opcionais: só passe se\n    quiser cortar antes.\n\n    Objetivo concluído vira roteiro: a mesma frase, com as mesmas chaves em `dados`,\n    no mesmo alvo repete os passos sem consultar o Jev a cada um e volta ao Jev se a\n    tela divergir. refazer=true ignora o roteiro gravado.\n\n    Por padrão age em segundo plano: lê a janela do app mesmo atrás de outras, espera\n    você parar de mexer e devolve a sua janela. ver=true traz a janela para a frente e\n    mostra o cursor indo até cada controle.";
 const DESC_VER_TELA: &str = "Captura a tela do desktop e devolve o caminho do arquivo PNG.\n\n    Para quando o `objetivo` parou e você precisa olhar o que há na tela.\n    Cite o caminho devolvido na sua resposta para que o usuário veja a imagem.";
 const DESC_ESTADO: &str = "Diz se o desktop está acessível e em qual resolução.";
 
@@ -72,6 +72,7 @@ fn ferramentas() -> Vec<Tool> {
                         {"type": "null"}], "default": null, "title": "Dados"},
                     "limite_segundos": {"default": 14400, "title": "Limite Segundos", "type": "number"},
                     "refazer": {"default": false, "title": "Refazer", "type": "boolean"},
+                    "ver": {"default": false, "title": "Ver", "type": "boolean"},
                     "alvo": alvo_schema()
                 },
                 "required": ["texto"], "type": "object", "title": "objetivoArguments"
@@ -102,6 +103,8 @@ struct ArgsObjetivo {
     limite_segundos: f64,
     #[serde(default)]
     refazer: bool,
+    #[serde(default)]
+    ver: bool,
     #[serde(default)]
     alvo: Option<String>,
 }
@@ -192,6 +195,7 @@ impl Servidor {
             ),
             config,
             refazer: a.refazer,
+            ver: a.ver,
         };
 
         let cancel = self.cancelamento(ctx.ct.clone());

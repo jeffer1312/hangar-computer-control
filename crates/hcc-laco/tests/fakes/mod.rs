@@ -32,6 +32,10 @@ pub struct State {
     pub advance_on_observe: bool,
     /// The Nth observe (1-based) fails with this error.
     pub fail_observe_at: Option<(usize, SessionError)>,
+    /// The window of every screenshot, in order.
+    pub shot_windows: Vec<Option<String>>,
+    /// Input mode and cursor of every act; `acts` keeps the action without them.
+    pub modos: Vec<(Option<hcc_protocolo::InputMode>, bool)>,
     pub connects: usize,
     pub closes: usize,
     pub captures: usize,
@@ -72,7 +76,7 @@ impl FakeConnector {
                 views: views.into(), acts: vec![], observe_errors: VecDeque::new(), act_errors: VecDeque::new(),
                 screenshot_error: None, close_error: None, close_pending: false, slow_drop: None, connect_error: None,
                 connect_pending: false, observe_pending: false, advance_on_act: true, advance_on_error: false,
-                act_deliveries: VecDeque::new(), scopes: vec![], advance_on_observe: false, fail_observe_at: None,
+                act_deliveries: VecDeque::new(), scopes: vec![], advance_on_observe: false, fail_observe_at: None, shot_windows: vec![], modos: vec![],
                 connects: 0, closes: 0, captures: 0, observed: vec![], cancel_after_act: None,
             })),
             entered: Arc::new(Notify::new()),
@@ -120,7 +124,8 @@ impl Session for FakeSession {
     async fn act(&mut self, id: &str, action: &Action) -> Result<ActResult, SessionError> {
         let mut s = self.0.state.lock().unwrap();
         assert_eq!(id, s.views.front().unwrap().observation_id);
-        s.acts.push((action.clone(), id.into(), Instant::now()));
+        s.modos.push((action.input, action.cursor));
+        s.acts.push((Action { input: None, cursor: false, ..action.clone() }, id.into(), Instant::now()));
         if let Some(c) = &s.cancel_after_act { c.cancel(); }
         if let Some(e) = s.act_errors.pop_front() {
             if s.advance_on_error && s.views.len() > 1 { s.views.pop_front(); }
@@ -130,9 +135,10 @@ impl Session for FakeSession {
         Ok(ActResult { ok: true, delivery: s.act_deliveries.pop_front().unwrap_or(Delivery::DeliveredUnverified) })
     }
 
-    async fn screenshot(&mut self, _: Option<&str>) -> Result<Vec<u8>, SessionError> {
+    async fn screenshot(&mut self, window: Option<&str>) -> Result<Vec<u8>, SessionError> {
         let mut s = self.0.state.lock().unwrap();
         s.captures += 1;
+        s.shot_windows.push(window.map(str::to_owned));
         match &s.screenshot_error {
             Some(e) => Err(e.clone()),
             None => Ok(png_1280x720()),

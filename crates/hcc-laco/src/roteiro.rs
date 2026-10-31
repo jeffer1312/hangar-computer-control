@@ -165,7 +165,8 @@ pub fn passo(acao: &Action, obs: &Observation, dados: &Map<String, Value>) -> Pa
     let valor = acao.value.as_ref().map(|v| {
         dados.iter().find(|(_, d)| py_str(d) == *v).map_or_else(|| Valor::Literal(v.clone()), |(k, _)| Valor::Dados(k.clone()))
     });
-    Passo { janela: janela(obs), alvo, acao: Action { target: None, value: None, ..acao.clone() }, valor, mudou_tela: None,
+    // The input mode is the loop's choice at replay time, not part of the step (the Hangar recorder shares the format).
+    Passo { janela: janela(obs), alvo, acao: Action { target: None, value: None, input: None, cursor: false, ..acao.clone() }, valor, mudou_tela: None,
         dialogo: crate::estado::dialogo_aberto(obs).map(|(d, _)| d.name.clone()) }
 }
 

@@ -33,7 +33,7 @@ async fn setup(answers: Vec<Answer>) -> (Opcoes, MockServer) {
         dados: json!({"nome":"Ana"}).as_object().unwrap().clone(), limite: seconds(240), config: Some(config),
         jev: Some(Jev::new(format!("{}/jev", server.uri()), "fake-key".into(), JEV_MODEL.into())),
         llm: Llm::new(format!("{}/llm", server.uri()), "fake-model".into(), None, Some("fake-key".into())),
-        roteiros: None, refazer: false,
+        roteiros: None, refazer: false, ver: false,
     };
     (op, server)
 }
@@ -908,6 +908,8 @@ async fn reasoning_effort_is_optional() {
 #[tokio::test]
 async fn three_without_effect_asks_for_another_route_instead_of_stopping() {
     let con = FakeConnector::new(vec![tree("o1", "")]);
+    // The agents read a typed value back: a background set_value comes confirmed and is never redone.
+    con.state.lock().unwrap().act_deliveries.push_back(Delivery::DeliveredVerified);
     // The field stayed empty after the typing: that cycle goes through the vision model before picking.
     let (mut op, server) = setup(vec![select("set_value"), select("invoke"), help(json!([])), select("invoke"), select("keys Enter"),
         select("keys Escape"), help(json!([])), Answer::Choice("BLOCKED", 0.9, 0.05)]).await;
@@ -2848,4 +2850,86 @@ async fn a_drilled_region_that_closed_falls_back_to_the_skeleton() {
     assert!(scopes[2].root.is_some(), "{scopes:?}");
     assert!(scopes[3].skeleton && scopes[3].root.is_none(), "{scopes:?}");
     assert!(!r.motivo.contains("região sumiu"), "{}", r.resumo());
+}
+
+fn combo(id: &str, aberta: bool) -> Observation {
+    let mut obs = tree(id, "");
+    obs.elements.push(serde_json::from_value(json!({"id":"e2", "name":"Tipo", "role":"ComboBox", "value": if aberta { "aberta" } else { "fechada" },
+        "enabled":true, "rect":null, "focused":false, "actions":["expand"]})).unwrap());
+    obs
+}
+
+#[tokio::test]
+async fn a_control_action_goes_background_and_the_app_window_is_read_and_shot_by_id() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let s = con.state.lock().unwrap();
+    assert_eq!(s.modos[0], (Some(hcc_protocolo::InputMode::Background), false));
+    assert_eq!(s.scopes.last().unwrap().window.as_deref(), Some("w1"), "{:?}", s.scopes);
+    assert_eq!(s.shot_windows.last().unwrap().as_deref(), Some("w1"), "{:?}", s.shot_windows);
+}
+
+#[tokio::test]
+async fn keys_go_polite() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![select("keys Enter"), done()]).await;
+    run(op, &con).await;
+    assert_eq!(con.state.lock().unwrap().modos[0].0, Some(hcc_protocolo::InputMode::Polite));
+}
+
+#[tokio::test]
+async fn background_without_effect_is_redone_with_real_input_once_and_the_app_learns() {
+    let pasta = tempfile::tempdir().unwrap();
+    let con = FakeConnector::new(vec![combo("o1", false), combo("o2", false), combo("o3", true)]);
+    let (mut op, _server) = setup(vec![select("expand ComboBox 'Tipo'"), done()]).await;
+    op.roteiros = Some(pasta.path().to_path_buf());
+    op.texto = "abrir a lista Tipo".into();
+    run(op, &con).await;
+    let acts = con.state.lock().unwrap().acts.clone();
+    assert_eq!(con.state.lock().unwrap().modos.iter().map(|m| m.0).collect::<Vec<_>>(),
+        vec![Some(hcc_protocolo::InputMode::Background), Some(hcc_protocolo::InputMode::Polite)]);
+    assert_eq!(acts[1].0.target.as_deref(), Some("e2"));
+    let aprendido: Value = serde_json::from_str(&std::fs::read_to_string(pasta.path().join("entrada-real.json")).unwrap()).unwrap();
+    assert_eq!(aprendido["apps"]["TMainForm"], json!(["expand:ComboBox"]));
+}
+
+#[tokio::test]
+async fn an_active_user_makes_the_loop_wait_and_try_again() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    for _ in 0..2 {
+        con.state.lock().unwrap().act_errors.push_back(SessionError::NotDelivered("RuntimeError: usuário ativo".into()));
+    }
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 3);
+    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["result"], "ok");
+}
+
+#[tokio::test]
+async fn watching_keeps_real_input_draws_the_cursor_and_reads_the_front() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.ver = true;
+    run(op, &con).await;
+    let s = con.state.lock().unwrap();
+    assert_eq!(s.modos[0], (None, true));
+    assert!(s.scopes.iter().all(|e| e.window.is_none()), "{:?}", s.scopes);
+}
+
+#[tokio::test]
+async fn the_window_a_launch_opens_becomes_the_app_window_read_by_id() {
+    let mut antes = tree("o1", "");
+    antes.apps = vec!["Calculadora => calc".into()];
+    let mut depois = tree("o2", "");
+    depois.windows.push(serde_json::from_value(json!({"id":"w7", "name":"Calculadora", "process_id": 77, "class_name":"calc", "rect":[0,0,10,10]})).unwrap());
+    let con = FakeConnector::new(vec![antes, depois.clone(), depois]);
+    con.state.lock().unwrap().advance_on_observe = true;
+    let (mut op, _server) = setup(vec![select("Calculadora"), done()]).await;
+    op.texto = "abrir a calculadora".into();
+    run(op, &con).await;
+    let scopes = con.state.lock().unwrap().scopes.clone();
+    assert!(scopes.iter().any(|s| s.window.as_deref() == Some("w7")), "{scopes:?}");
 }

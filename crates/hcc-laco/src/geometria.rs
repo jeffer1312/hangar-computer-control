@@ -41,3 +41,25 @@ pub fn dentro(acao: &Action, obs: &Observation) -> bool {
         .find(|w| w.id == obs.foreground)
         .is_some_and(|w| w.rect.0 <= x && x < w.rect.2 && w.rect.1 <= y && y < w.rect.3)
 }
+
+/// Like `para_tela`, for a print of one window: image pixels scale to the window and start at its corner.
+pub fn para_janela(acao: &Action, janela: hcc_protocolo::Rect, largura_imagem: u32, goal: &str) -> Action {
+    let mut a = acao.clone();
+    if a.kind != ActionType::Mouse || largura_imagem == 0 {
+        return a;
+    }
+    let escala = f64::from(janela.2 - janela.0) / f64::from(largura_imagem);
+    let literais: HashSet<(&str, &str)> =
+        PAR.captures_iter(goal).map(|c| (c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str())).collect();
+    let converter = |x: &mut Option<i32>, y: &mut Option<i32>| {
+        if let (Some(px), Some(py)) = (*x, *y)
+            && !literais.contains(&(px.to_string().as_str(), py.to_string().as_str()))
+        {
+            *x = Some(janela.0 + (f64::from(px) * escala).round_ties_even() as i32);
+            *y = Some(janela.1 + (f64::from(py) * escala).round_ties_even() as i32);
+        }
+    };
+    converter(&mut a.x, &mut a.y);
+    converter(&mut a.x2, &mut a.y2);
+    a
+}

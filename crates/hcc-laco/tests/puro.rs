@@ -1090,3 +1090,41 @@ fn a_page_named_with_a_destructive_word_still_takes_clicks() {
     let (ficam, _) = Barreiras::sem_confirmar(vec![candidato(mouse(200, 200, MouseMode::Click))], &o, "abrir a pasta Fotos");
     assert_eq!(ficam.len(), 1);
 }
+
+#[test]
+fn element_actions_go_background_unless_the_app_taught_otherwise() {
+    use hcc_laco::modo::{Aprendido, modo_entrada};
+    use hcc_protocolo::InputMode;
+    let mut tela = obs(vec![
+        el("e0", "Lembrar", "CheckBox", &[ElementAction::Toggle], Some("off"), None),
+        el("e1", "Salvar", "Button", &[ElementAction::Invoke], None, None),
+    ]);
+    tela.windows[0].process = "app.exe".into();
+    let marcar = Action { kind: ActionType::Check, target: Some("e0".into()), ..Default::default() };
+    let salvar = Action { kind: ActionType::Invoke, target: Some("e1".into()), ..Default::default() };
+    let enter = Action { kind: ActionType::Keys, keys: Some(vec!["Enter".into()]), ..Default::default() };
+    let mut aprendido = Aprendido::default();
+    assert_eq!(modo_entrada(&marcar, &tela, &aprendido, false), Some(InputMode::Background));
+    assert_eq!(modo_entrada(&enter, &tela, &aprendido, false), Some(InputMode::Polite));
+    assert_eq!(modo_entrada(&marcar, &tela, &aprendido, true), None, "ver: entrada real de sempre");
+    assert!(aprendido.aprender(&tela, &marcar));
+    assert!(!aprendido.aprender(&tela, &marcar), "já sabia");
+    assert_eq!(modo_entrada(&marcar, &tela, &aprendido, false), Some(InputMode::Polite));
+    assert_eq!(modo_entrada(&salvar, &tela, &aprendido, false), Some(InputMode::Background), "outro controle do mesmo app");
+    let pasta = tempfile::tempdir().unwrap();
+    aprendido.gravar(pasta.path()).unwrap();
+    let lido: Value = serde_json::from_str(&std::fs::read_to_string(pasta.path().join("entrada-real.json")).unwrap()).unwrap();
+    assert_eq!(lido, json!({"versao": 1, "apps": {"app.exe": ["check:CheckBox"]}}));
+    assert_eq!(modo_entrada(&marcar, &tela, &Aprendido::ler(Some(pasta.path())), false), Some(InputMode::Polite));
+}
+
+#[test]
+fn a_click_on_a_window_print_lands_by_the_window_position() {
+    use hcc_laco::geometria::para_janela;
+    let clique = mouse(100, 50, MouseMode::Click);
+    // A 1000-px-wide window at (200, 300) captured at 500 px: the image is half size.
+    let tela = para_janela(&clique, Rect(200, 300, 1200, 900), 500, "clicar no botão");
+    assert_eq!((tela.x, tela.y), (Some(400), Some(400)));
+    let literal = para_janela(&mouse(10, 20, MouseMode::Click), Rect(200, 300, 1200, 900), 500, "clicar em 10,20");
+    assert_eq!((literal.x, literal.y), (Some(10), Some(20)), "par escrito no objetivo já é da tela");
+}
