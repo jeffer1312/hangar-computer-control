@@ -162,6 +162,22 @@ pub mod regras {
         na_tela && !matches!(role, "ListItem" | "TreeItem" | "DataItem")
     }
 
+    /// Children read per node; a Delphi grid or a long list would eat the whole node budget.
+    pub const MAX_FILHOS: usize = 40;
+
+    /// `(read, left unread)` for a node with `total` children.
+    pub fn cortar_filhos(total: usize) -> (usize, u32) {
+        let lidos = total.min(MAX_FILHOS);
+        (lidos, u32::try_from(total - lidos).unwrap_or(u32::MAX))
+    }
+
+    /// Unread children count on the nearest ancestor that became an element; without one they only cut the read.
+    pub fn somar_nao_lidos(elementos: &mut [hcc_protocolo::Element], ancestral: Option<usize>, n: u32) {
+        if let Some(e) = ancestral.and_then(|i| elementos.get_mut(i)).filter(|_| n > 0) {
+            *e.unread.get_or_insert(0) += n;
+        }
+    }
+
     pub fn na_tela(rect: [i32; 4], offscreen: bool) -> bool {
         rect[2] - rect[0] > 0 && rect[3] - rect[1] > 0 && !offscreen
     }

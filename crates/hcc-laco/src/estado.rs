@@ -84,6 +84,9 @@ pub fn estado_compacto(
             if e.password {
                 m.insert("password".into(), json!(true));
             }
+            if let Some(n) = e.unread {
+                m.insert("unreadChildren".into(), json!(n));
+            }
             Value::Object(m)
         })
         .collect();
@@ -107,6 +110,9 @@ pub fn estado_compacto(
     });
     if !obs.apps.is_empty() {
         estado["installedApps"] = json!(obs.apps);
+    }
+    if obs.truncated {
+        estado["incomplete"] = json!(true);
     }
     if let Some(h) = hint.filter(|h| !h.is_empty()) {
         estado["hint"] = json!(h);

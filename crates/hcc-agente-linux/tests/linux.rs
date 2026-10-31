@@ -264,6 +264,30 @@ fn corte_por_limite_e_informado() {
 }
 
 #[test]
+fn corte_soma_filhos_nao_lidos_no_controle_ancestral() {
+    // lista (controle) > painel (não vira controle) > 3 itens; limite 3 lê lista, painel e um item.
+    let mut lista = node("list", "Resultados"); lista.children = vec![1];
+    let mut painel = node("panel", ""); painel.children = vec![2, 3, 4];
+    let mut quebrado = node("push button", "Quebrado"); quebrado.read_error = Some("timeout".into());
+    let mut raiz = node("panel", ""); raiz.children = vec![0, 5];
+    let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![lista, painel, node("label","a"), node("label","b"), node("label","c"), quebrado, raiz])), ..Default::default() };
+    let (controls,_,cut) = walk(&tree,vec![6],Rect(100,100,600,500), 1.0,Duration::from_secs(4),5).unwrap();
+    assert!(cut);
+    let lista = controls.iter().find(|e| e.name == "Resultados").unwrap();
+    assert_eq!(lista.unread, Some(2), "b e c ficaram na fila, abaixo da lista");
+    assert!(controls.iter().all(|e| e.name == "Resultados" || e.unread.is_none()));
+
+    // Sem corte, nó que falhou ao ler conta no ancestral (a leitura não vira cortada); o que sumiu não conta.
+    let mut lista = node("list", "Resultados"); lista.children = vec![1, 2];
+    let mut quebrado = node("push button", "Quebrado"); quebrado.read_error = Some("timeout".into());
+    let mut sumiu = node("push button", "Sumiu"); sumiu.vanish = true;
+    let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![lista, quebrado, sumiu])), ..Default::default() };
+    let (controls,_,cut) = walk(&tree,vec![0],Rect(100,100,600,500), 1.0,Duration::from_secs(4),800).unwrap();
+    assert!(!cut);
+    assert_eq!(controls[0].unread, Some(1));
+}
+
+#[test]
 fn frame_pelo_titulo_senao_o_ativo() {
     assert_eq!(choose_frame(&[("Outra".into(),vec!["showing".into()]),("Editor".into(),vec!["showing".into()])],"Editor"),Some(1));
     assert_eq!(choose_frame(&[("a".into(),vec![]),("b".into(),vec!["active".into()])],"x"),Some(1));

@@ -262,6 +262,21 @@ fn pendente_apostrofo_nao_abre_literal() {
 }
 
 #[test]
+fn cut_tree_reaches_jev_as_incomplete_with_unread_children() {
+    let mut lista = el("e0", "Resultados", "List", &[ElementAction::Scroll], None, None);
+    lista.unread = Some(3);
+    let mut cortada = obs(vec![lista, el("e1", "Ok", "Button", &[ElementAction::Invoke], None, None)]);
+    cortada.truncated = true;
+    let estado = estado_compacto("abrir o item", &Map::new(), &cortada, &[], None);
+    assert_eq!(estado["incomplete"], true);
+    assert_eq!(estado["elements"][0]["unreadChildren"], 3);
+    assert!(estado["elements"][1].get("unreadChildren").is_none());
+
+    let inteira = obs(vec![el("e1", "Ok", "Button", &[ElementAction::Invoke], None, None)]);
+    assert!(estado_compacto("abrir o item", &Map::new(), &inteira, &[], None).get("incomplete").is_none());
+}
+
+#[test]
 fn installed_apps_are_offered_to_jev_and_omitted_when_empty() {
     let original = obs(vec![]);
     let mut wire = serde_json::to_value(&original).unwrap();

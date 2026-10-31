@@ -309,3 +309,19 @@ fn observe_real_desktop() {
     assert!(obs.windows.iter().any(|w| w.id == obs.foreground));
     assert!(obs.screen.width > 0 && obs.screen.height > 0);
 }
+
+#[test]
+fn children_past_the_limit_become_unread_on_the_nearest_element() {
+    assert_eq!(cortar_filhos(45), (40, 5));
+    assert_eq!(cortar_filhos(3), (3, 0));
+    let el = |id: &str| hcc_protocolo::Element {
+        id: id.into(), name: String::new(), role: "List".into(), value: None, enabled: true, rect: None,
+        focused: false, actions: vec![], password: false, unread: None,
+    };
+    let mut elementos = vec![el("e0"), el("e1")];
+    somar_nao_lidos(&mut elementos, Some(1), 5);
+    somar_nao_lidos(&mut elementos, Some(1), 2);
+    somar_nao_lidos(&mut elementos, None, 9);
+    assert_eq!(elementos[1].unread, Some(7));
+    assert_eq!(elementos[0].unread, None);
+}

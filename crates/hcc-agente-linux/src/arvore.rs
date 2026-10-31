@@ -289,15 +289,26 @@ pub type WalkResult<N> = (Vec<Element>, Vec<(N, f64)>, bool);
 /// `escala` is the monitor's: Chromium/Electron web content on a scaled Wayland output reports physical pixels
 /// while the frame reports logical ones; each node carries the factor that brings its extents to logical.
 pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64, budget: Duration, limit: usize) -> Result<WalkResult<T::Node>, String> {
-    // Each pending node with its scale factor and its parent's raw extents.
-    type Pendente<N> = (N, f64, Option<(i32, i32, i32, i32)>);
-    let mut pending: VecDeque<Pendente<T::Node>> = roots.into_iter().map(|n| (n, 1.0, None)).collect();
-    let (mut controls, mut nodes, mut visited) = (vec![], vec![], 0);
+    // Each pending node with its scale factor, its parent's raw extents and its nearest ancestor that became a control.
+    type Pendente<N> = (N, f64, Option<(i32, i32, i32, i32)>, Option<usize>);
+    let mut pending: VecDeque<Pendente<T::Node>> = roots.into_iter().map(|n| (n, 1.0, None, None)).collect();
+    let (mut controls, mut nodes, mut visited): (Vec<Element>, _, _) = (vec![], vec![], 0);
+    let nao_lido = |controls: &mut Vec<Element>, ancestral: Option<usize>| {
+        if let Some(c) = ancestral.and_then(|i| controls.get_mut(i)) { *c.unread.get_or_insert(0) += 1; }
+    };
     let start = Instant::now();
     while !pending.is_empty() && visited < limit && start.elapsed() < budget {
-        let Some((node, mut fator, pai)) = pending.pop_front() else { break; };
+        let Some((node, mut fator, pai, ancestral)) = pending.pop_front() else { break; };
         visited += 1;
-        let mut info = match tree.read(&node) { Ok(info) => info, Err(error) => { crate::ignorado("walk.read", &error); continue; } };
+        let mut info = match tree.read(&node) {
+            Ok(info) => info,
+            Err(error) => {
+                crate::ignorado("walk.read", &error);
+                // A node that closed is gone; one that failed to answer is content the loop did not see.
+                if !matches!(error, TreeError::Vanished(_)) { nao_lido(&mut controls, ancestral); }
+                continue;
+            }
+        };
         if !info.has("showing") { continue; }
         let bruto = info.extents;
         if fator == 1.0 && fisico(&info, pai, escala) { fator = 1.0 / escala; }
@@ -308,17 +319,21 @@ pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64,
         // Only sideways is not enough: a CSS box does not bound its children (Chromium puts a whole page under one
         // section at x=2213).
         if rect.is_some_and(|r| r.3 <= window.1 || r.1 >= window.3) { continue; }
-        match tree.children(&node) {
-            Ok(children) => pending.extend(children.into_iter().map(|c| (c, fator, bruto.or(pai)))),
-            Err(error) => crate::ignorado("walk.children", &error),
-        }
-        if outside { continue; }
-        if let Some(mut element) = element_from(&info, window) {
+        let filhos = match tree.children(&node) {
+            Ok(children) => children,
+            Err(error) => { crate::ignorado("walk.children", &error); vec![] }
+        };
+        let mut ancestral_dos_filhos = ancestral;
+        if !outside && let Some(mut element) = element_from(&info, window) {
             element.id = format!("e{}", controls.len());
+            ancestral_dos_filhos = Some(controls.len());
             controls.push(element); nodes.push((node, fator));
         }
+        pending.extend(filhos.into_iter().map(|c| (c, fator, bruto.or(pai), ancestral_dos_filhos)));
     }
-    Ok((controls, nodes, !pending.is_empty()))
+    let cortado = !pending.is_empty();
+    for (_, _, _, ancestral) in pending { nao_lido(&mut controls, ancestral); }
+    Ok((controls, nodes, cortado))
 }
 
 #[cfg(test)]

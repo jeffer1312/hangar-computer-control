@@ -422,7 +422,9 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 
     fn has_window(&mut self, id: &str) -> Result<bool, DesktopError> {
         let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
-        Ok(clients.as_array().is_some_and(|cs| cs.iter().any(|c| c["address"].as_str().is_some_and(|a| format!("w{a}") == id))))
+        // The same windows the observation lists: a hidden one cannot be read or acted on.
+        let origem = (self.area.0, self.area.1);
+        Ok(hypr::windows_from(&clients, origem).map_err(runtime)?.iter().any(|w| w.id == id))
     }
 
     fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {

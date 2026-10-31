@@ -17,7 +17,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, w};
 
 const MAX_NOS: usize = 800;
-const MAX_FILHOS: usize = 40;
 const PRAZO: Duration = Duration::from_secs(4);
 
 pub(crate) struct Janela {
@@ -194,11 +193,12 @@ pub(crate) fn ler(ua: &UIAutomation) -> Result<Lido, DesktopError> {
     let foreground = id_janela(fg);
     let ativa = janelas.get(&foreground).ok_or_else(|| runtime_err("a janela ativa mudou durante a observação"))?;
     // Read limit, not an application limit: `truncated` says when it cut.
-    let mut pendentes: VecDeque<UIElement> = filhos(ua, &ativa.el)?.into();
+    // Each pending node with the index of its nearest ancestor that became an element.
+    let mut pendentes: VecDeque<(UIElement, Option<usize>)> = filhos(ua, &ativa.el)?.into_iter().map(|e| (e, None)).collect();
     let pid_ativa = ativa.el.get_process_id().map_err(com)?;
     for h in popups(HWND(fg as *mut _), pid_ativa) {
         if let Ok(f) = ua.element_from_handle(Handle::from(h)).and_then(|p| p.find_all(TreeScope::Children, &ua.create_true_condition()?)) {
-            pendentes.extend(f);
+            pendentes.extend(f.into_iter().map(|e| (e, None)));
         }
     }
     // Taskbar buttons always: a minimised VCL app (hidden window) only comes back through them.
@@ -208,31 +208,42 @@ pub(crate) fn ler(ua: &UIAutomation) -> Result<Lido, DesktopError> {
         && barra.0 as isize != fg
         && let Ok(f) = ua.element_from_handle(Handle::from(barra.0 as isize)).and_then(|p| p.find_all(TreeScope::Children, &ua.create_true_condition()?))
     {
-        pendentes.extend(f);
+        pendentes.extend(f.into_iter().map(|e| (e, None)));
     }
     let mut elements = Vec::new();
     let mut controles = HashMap::new();
     let mut visitados = 0;
+    let mut cortou_filhos = false;
     // Time budget, not just nodes: Chrome gives 800 nodes in 2 s, the Delphi IDE ~150 in 4 s.
     let prazo = Instant::now() + PRAZO;
     while visitados < MAX_NOS && Instant::now() < prazo {
-        let Some(el) = pendentes.pop_front() else { break };
+        let Some((el, ancestral)) = pendentes.pop_front() else { break };
         visitados += 1;
         let senha = el.is_password().map_err(com)?;
         // An "invisible" container (popup host, pane without a rect) still has visible children.
-        pendentes.extend(filhos(ua, &el)?.into_iter().take(MAX_FILHOS));
-        if el.is_offscreen().map_err(com)? {
-            continue;
-        }
-        if let Some(e) = elemento(&el, senha, elements.len())? {
+        let mut seus = filhos(ua, &el)?;
+        let (lidos, cortados) = regras::cortar_filhos(seus.len());
+        seus.truncate(lidos);
+        let mut ancestral_dos_filhos = ancestral;
+        if !el.is_offscreen().map_err(com)?
+            && let Some(e) = elemento(&el, senha, elements.len())?
+        {
+            ancestral_dos_filhos = Some(elements.len());
             controles.insert(e.id.clone(), Controle { el, name: e.name.clone(), role: e.role.clone() });
             elements.push(e);
         }
+        cortou_filhos |= cortados > 0;
+        regras::somar_nao_lidos(&mut elements, ancestral_dos_filhos, cortados);
+        pendentes.extend(seus.into_iter().map(|f| (f, ancestral_dos_filhos)));
     }
     if sessao_win::primeiro_plano() != fg {
         return Err(runtime_err("a janela ativa mudou durante a observação; tente novamente"));
     }
-    Ok(Lido { foreground, windows, elements, truncated: !pendentes.is_empty(), janelas, controles })
+    let truncated = cortou_filhos || !pendentes.is_empty();
+    for (_, ancestral) in pendentes {
+        regras::somar_nao_lidos(&mut elements, ancestral, 1);
+    }
+    Ok(Lido { foreground, windows, elements, truncated, janelas, controles })
 }
 
 fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element>, DesktopError> {
