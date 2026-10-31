@@ -30,6 +30,8 @@ pub struct State {
     pub scopes: Vec<Scope>,
     /// Every observe after the first moves to the next view.
     pub advance_on_observe: bool,
+    /// The Nth observe (1-based) fails with this error.
+    pub fail_observe_at: Option<(usize, SessionError)>,
     pub connects: usize,
     pub closes: usize,
     pub captures: usize,
@@ -70,7 +72,7 @@ impl FakeConnector {
                 views: views.into(), acts: vec![], observe_errors: VecDeque::new(), act_errors: VecDeque::new(),
                 screenshot_error: None, close_error: None, close_pending: false, slow_drop: None, connect_error: None,
                 connect_pending: false, observe_pending: false, advance_on_act: true, advance_on_error: false,
-                act_deliveries: VecDeque::new(), scopes: vec![], advance_on_observe: false,
+                act_deliveries: VecDeque::new(), scopes: vec![], advance_on_observe: false, fail_observe_at: None,
                 connects: 0, closes: 0, captures: 0, observed: vec![], cancel_after_act: None,
             })),
             entered: Arc::new(Notify::new()),
@@ -101,6 +103,7 @@ impl Session for FakeSession {
         let pending = {
             let mut s = self.0.state.lock().unwrap();
             s.scopes.push(scope.clone());
+            if let Some((n, e)) = s.fail_observe_at.clone() && n == s.scopes.len() { return Err(e); }
             if s.advance_on_observe && s.scopes.len() > 1 && s.views.len() > 1 { s.views.pop_front(); }
             s.observe_pending
         };

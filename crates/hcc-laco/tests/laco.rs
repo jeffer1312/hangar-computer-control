@@ -2831,3 +2831,21 @@ async fn a_cut_read_with_a_dialog_open_stays_whole() {
     let scopes = con.state.lock().unwrap().scopes.clone();
     assert!(scopes.iter().all(|s| *s == Scope::default()), "{scopes:?}");
 }
+
+#[tokio::test]
+async fn a_drilled_region_that_closed_falls_back_to_the_skeleton() {
+    let con = FakeConnector::new(vec![cortada("o1"), esqueleto("o2"), esqueleto("o3"), tree("o4", "Ana")]);
+    {
+        let mut s = con.state.lock().unwrap();
+        s.advance_on_act = false;
+        s.advance_on_observe = true;
+        s.fail_observe_at = Some((3, SessionError::Agent("ValueError: região sumiu; observe a janela inteira".into())));
+    }
+    let (mut op, _server) = setup(vec![Answer::Choice("WAIT", 0.9, 0.05), select("DRILL List 'Resultados'"), done()]).await;
+    op.max_passos = 5;
+    let r = run(op, &con).await;
+    let scopes = con.state.lock().unwrap().scopes.clone();
+    assert!(scopes[2].root.is_some(), "{scopes:?}");
+    assert!(scopes[3].skeleton && scopes[3].root.is_none(), "{scopes:?}");
+    assert!(!r.motivo.contains("região sumiu"), "{}", r.resumo());
+}

@@ -299,8 +299,9 @@ fn escolha(e: Escolha) -> String {
 }
 fn percentual(p: f64) -> String { format!("{:.0}%", p * 100.0) }
 
-fn chave_janela(obs: &Observation) -> (String, String) {
-    obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| (w.class_name.clone(), w.name.clone())).unwrap_or_default()
+/// The window itself, not its title: Explorer and browsers retitle it on every navigation.
+fn chave_janela(obs: &Observation) -> String {
+    obs.foreground.clone()
 }
 
 /// On a skeleton, a DRILL per named container with unread children; inside a region, WIDEN back to the skeleton.
@@ -417,14 +418,14 @@ async fn reconectar<C: Connector>(conector: &C, sessao: &mut Option<C::S>, contr
 }
 
 async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
-    acao: &Action, vista: &Observation, atual: &AssinaturaTela, secretos: &Segredos) -> Result<(), String> {
+    acao: &Action, vista: &Observation, atual: &AssinaturaTela, secretos: &Segredos, escopo: &Scope) -> Result<(), String> {
     // Blind (empty tree): only the title could change; no polling, the next observation looks.
     let prazo = Instant::now() + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
         else if vista.elements.is_empty() { Duration::from_millis(800) } else { Duration::from_secs(3) };
     controle.esperar(Duration::from_millis(800)).await?;
     while Instant::now() < prazo {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        match controle.rodar(async { Ok(observar(s, &Scope::default()).await) }).await? {
+        match controle.rodar(async { Ok(observar(s, escopo).await) }).await? {
             Ok(nova) if assinatura_tela(&nova) != *atual => break,
             Ok(_) => {}
             Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
@@ -629,7 +630,7 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
         if !ok { parou = Some(format!("trecho {} parou no passo {}: {resultado}", textos[i], n + 1)); break; }
         *foco_escolhido |= escolhe_foco(&acao) || invoca_editavel(&acao, &vista);
         gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1), hash_tela(&atual), trecho::forma(&vista, valores)));
-        esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
+        esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos, &Scope::default()).await?;
     }
     anotar_roteiro(r, parou.unwrap_or_else(|| format!("trecho repetido: {}", textos[i])));
     Ok(rodou)
@@ -748,7 +749,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 }
                 foco_escolhido |= escolhe_foco(&acao) || invoca_editavel(&acao, &vista);
                 gravados.push((roteiro::passo(&acao, &vista, &op.dados), Some(recentes.len() - 1), hash_tela(&atual), trecho::forma(&vista, &valores_meta)));
-                esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos).await?;
+                esperar_efeito(conector, sessao, controle, &acao, &vista, &atual, secretos, &Scope::default()).await?;
             }
             r.roteiro = Some(if passos.is_empty() { format!("{origem}{}", parou.unwrap_or_default()) } else {
                 let pulados = gravados.iter().filter(|(_, i, _, _)| i.is_none()).count();
@@ -765,14 +766,23 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         Some(d) if !op.refazer && !so_leitura(&op.texto) => trecho::todos(&d.join("trechos")), _ => vec![] };
     let mut feitas: Vec<(usize, BTreeMap<String, String>)> = Vec::new();
     let mut escopo: Option<(String, Option<String>)> = None;
-    // A window whose whole read was cut (class and title) is read as a skeleton; `regiao` is where Jev drilled into.
-    let mut esqueleto: Option<(String, String)> = None;
+    // A window whose whole read was cut is read as a skeleton; `regiao` is where Jev drilled into.
+    let mut esqueleto: Option<String> = None;
     let mut regiao: Option<RootSpec> = None;
     for ciclo in 0..=op.max_passos {
-        let lido_como = Scope { root: regiao.clone(), skeleton: esqueleto.is_some() && regiao.is_none(), window: None };
+        let mut lido_como = Scope { root: regiao.clone(), skeleton: esqueleto.is_some() && regiao.is_none(), window: None };
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let mut obs = controle.medir("observacao", Progresso::Observacao,
-            async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?;
+        let mut obs = match controle.medir("observacao", Progresso::Observacao, async { Ok(observar(s, &lido_como).await) }).await? {
+            Ok(o) => o,
+            // The drilled region closed or re-rendered: back to the skeleton.
+            Err(e) if lido_como.root.is_some() && e.to_string().contains("região sumiu") => {
+                regiao = None;
+                lido_como = Scope { skeleton: true, ..Scope::default() };
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                controle.medir("observacao", Progresso::Observacao, async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?
+            }
+            Err(e) => return Err(erro_sessao(e)),
+        };
         // Another window or a dialog: the partial read no longer fits, read it whole.
         let completa = lido_como.is_default()
             || Some(chave_janela(&obs)) != esqueleto || crate::estado::dialogo_aberto(&obs).is_some();
@@ -1044,7 +1054,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let fraco = d.escolha == Escolha::Blocked || d.p < if d.escolha == Escolha::Done { done_min } else { fraco_min }
                 || (d.escolha == Escolha::Wait && esperando) || (bloqueado && !ajudou);
             // A truncated tree may hide the control the goal needs, but a sure pick was found in what came.
-            if !fraco && (!obs.elements.is_empty() && (!obs.truncated || d.p >= truncada_min) && divergencia.is_none() || ajudou) { break d; }
+            // A skeleton is partial on purpose: Jev reaches the rest by DRILL, not by a stricter pick.
+            if !fraco && (!obs.elements.is_empty() && (!obs.truncated || lido_como.skeleton || d.p >= truncada_min) && divergencia.is_none() || ajudou) { break d; }
             if ajudou {
                 // Jev still unsure: the help's first action decides, after the risk question.
                 if let Some(proposta) = primeira_ajuda.take() {
@@ -1121,7 +1132,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if matches!(retorno, Err(SessionError::NotDelivered(_))) {
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let nova = controle.medir("observacao", Progresso::Observacao,
-                    async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
+                    async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?;
                 if let Some(de_novo) = mesmo_alvo(acao, &vista, &nova) {
                     candidato.acao = de_novo;
                     vista = nova;
@@ -1174,12 +1185,12 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if !falhou && op.roteiros.is_some() {
                 gravados.push((roteiro::passo(acao, &vista, &op.dados), Some(recentes.len() - 1), hash_tela(&atual), trecho::forma(&vista, &valores_meta)));
             }
-            esperar_efeito(conector, sessao, controle, acao, &vista, &atual, secretos).await?;
+            esperar_efeito(conector, sessao, controle, acao, &vista, &atual, secretos, &lido_como).await?;
             let Some(proxima) = fila.next().filter(|_| !falhou) else { break };
             // The agent consumes each observation id: the next key/text needs a fresh one.
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             vista = controle.medir("observacao", Progresso::Observacao,
-                async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
+                async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?;
             let nova = assinatura_tela(&vista);
             if let Some(ultima) = recentes.last_mut() { ultima.screen_changed = mudou(&atual, &nova); }
             atual = nova;

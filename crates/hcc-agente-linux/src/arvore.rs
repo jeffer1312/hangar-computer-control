@@ -295,14 +295,15 @@ pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64,
 /// The node (and its scale factor) of the `spec.index`-th control with that role and name, in the order `walk`
 /// lists controls.
 pub fn achar_regiao<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64, spec: &hcc_protocolo::RootSpec) -> Option<(T::Node, f64)> {
-    let mut pending: VecDeque<(T::Node, f64)> = roots.into_iter().map(|n| (n, 1.0)).collect();
+    let mut pending: VecDeque<(T::Node, f64, Option<(i32, i32, i32, i32)>)> = roots.into_iter().map(|n| (n, 1.0, None)).collect();
     let mut iguais = 0;
     let start = Instant::now();
-    while let Some((node, mut fator)) = pending.pop_front() {
+    while let Some((node, mut fator, pai)) = pending.pop_front() {
         if start.elapsed() > Duration::from_secs(4) { return None; }
         let Ok(mut info) = tree.read(&node) else { continue };
         if !info.has("showing") { continue; }
-        if fator == 1.0 && fisico(&info, None, escala) { fator = 1.0 / escala; }
+        let bruto = info.extents;
+        if fator == 1.0 && fisico(&info, pai, escala) { fator = 1.0 / escala; }
         info.extents = info.extents.map(|e| escalar(e, fator));
         // Same skips as `walk`, so the order among equals is the one the observation showed.
         let rect = info.extents.and_then(|e| element_rect(e, window));
@@ -312,7 +313,7 @@ pub fn achar_regiao<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, esca
             if iguais == spec.index { return Some((node, fator)); }
             iguais += 1;
         }
-        pending.extend(tree.children(&node).unwrap_or_default().into_iter().map(|c| (c, fator)));
+        pending.extend(tree.children(&node).unwrap_or_default().into_iter().map(|c| (c, fator, bruto.or(pai))));
     }
     None
 }
