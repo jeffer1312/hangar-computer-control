@@ -501,6 +501,22 @@ fn observation_uses_own_pid_and_includes_visible_popups() {
 }
 
 #[test]
+fn check_on_a_box_already_checked_touches_nothing() {
+    let mut caixa = node("check box", "Lembrar"); caixa.info.states.extend(["checkable".into(), "checked".into()]); caixa.info.actions = vec!["Toggle".into()];
+    let (mut desktop, commands, tree) = desktop(vec![caixa]);
+    let observed = desktop.observe(&Scope::default()).unwrap();
+    commands.calls.borrow_mut().clear();
+    assert_eq!(desktop.act(&observed, &action(ActionType::Check, Some("e0"))).unwrap(), Delivery::DeliveredVerified);
+    assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool"));
+    assert!(!tree.events.borrow().iter().any(|e| e.starts_with("invoke")));
+
+    let observed = desktop.observe(&Scope::default()).unwrap();
+    commands.calls.borrow_mut().clear();
+    assert_eq!(desktop.act(&observed, &action(ActionType::Uncheck, Some("e0"))).unwrap(), Delivery::DeliveredUnverified, "a caixa do fake não muda");
+    assert!(commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool"), "desmarcar alterna pelo caminho de hoje");
+}
+
+#[test]
 fn changed_control_is_not_clicked() {
     let (mut desktop, commands, tree) = desktop(vec![node("push button","Salvar")]);
     let observed = desktop.observe(&Scope::default()).unwrap(); tree.nodes.borrow_mut()[2].info.name = b"Apagar".to_vec();

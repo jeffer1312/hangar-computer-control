@@ -2489,7 +2489,7 @@ fn pagina(id: &str, dialogo: Option<(&str, &str, bool)>) -> Observation {
 async fn preenchido_uma_vez(pasta: &std::path::Path) {
     let con = FakeConnector::new(vec![pagina("o1", Some(("Motivo para Ana", "", false))), pagina("o2", Some(("Motivo para Ana", "texto A", false))),
         pagina("o3", Some(("Motivo para Ana", "texto A", true))), pagina("o4", None)]);
-    let (mut op, _server) = setup(vec![select("= 'texto A'"), select("toggle CheckBox 'Concordo'"), select("invoke Button 'Salvar'"), done()]).await;
+    let (mut op, _server) = setup(vec![select("= 'texto A'"), select("check CheckBox 'Concordo'"), select("invoke Button 'Salvar'"), done()]).await;
     op.roteiros = Some(pasta.to_path_buf());
     op.texto = "preencher o diálogo do Motivo para Ana com a descrição, marcar Concordo e salvar".into();
     op.dados = json!({"descricao": "texto A"}).as_object().unwrap().clone();
@@ -2514,7 +2514,7 @@ async fn a_dialog_of_the_same_shape_is_filled_by_the_piece_learned_on_another() 
     let r = run(op, &con).await;
     assert!(r.ok, "{}", r.resumo());
     assert_eq!(atos(&con), vec![action(json!({"type":"set_value","target":"c1","value":"texto B"})),
-        action(json!({"type":"toggle","target":"c2"})), action(json!({"type":"invoke","target":"b2"}))], "{:?}", r.roteiro);
+        action(json!({"type":"check","target":"c2"})), action(json!({"type":"invoke","target":"b2"}))], "{:?}", r.roteiro);
     assert!(r.passos.iter().all(|p| p.ends_with("[trecho]")), "{}", r.resumo());
     assert_eq!(bodies(&server).await.len(), 3, "similar-goal pick, piece pick, final DONE");
 }

@@ -162,6 +162,46 @@ pub mod regras {
         na_tela && !matches!(role, "ListItem" | "TreeItem" | "DataItem")
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Marca {
+        On,
+        Off,
+        Indeterminate,
+    }
+
+    /// Check (`quer`) or uncheck: nothing when already there; else toggles and reads back for up to `prazo`,
+    /// toggling once more only when the box landed on indeterminate.
+    pub fn marcar<E>(
+        quer: bool,
+        mut ler: impl FnMut() -> Result<Marca, E>,
+        mut alternar: impl FnMut() -> Result<(), E>,
+        prazo: std::time::Duration,
+    ) -> Result<hcc_protocolo::Delivery, E> {
+        use hcc_protocolo::Delivery;
+        let alvo = if quer { Marca::On } else { Marca::Off };
+        if ler()? == alvo {
+            return Ok(Delivery::DeliveredVerified);
+        }
+        for _ in 0..2 {
+            alternar()?;
+            let fim = std::time::Instant::now() + prazo;
+            loop {
+                let agora = ler()?;
+                if agora == alvo {
+                    return Ok(Delivery::DeliveredVerified);
+                }
+                if agora == Marca::Indeterminate {
+                    break;
+                }
+                if std::time::Instant::now() >= fim {
+                    return Ok(Delivery::DeliveredUnverified);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        Ok(Delivery::DeliveredUnverified)
+    }
+
     /// Children read per node; a Delphi grid or a long list would eat the whole node budget.
     pub const MAX_FILHOS: usize = 40;
 
@@ -328,7 +368,7 @@ mod desktop {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use uiautomation::UIAutomation;
     use uiautomation::patterns::{UIExpandCollapsePattern, UIInvokePattern, UIScrollPattern, UISelectionItemPattern, UITogglePattern, UIValuePattern};
-    use uiautomation::types::ScrollAmount;
+    use uiautomation::types::{ScrollAmount, ToggleState};
 
     pub struct WindowsDesktop {
         sessao: sessao_win::Sessao,
@@ -414,7 +454,6 @@ mod desktop {
             let target = action.target.as_deref();
             let mut entrega = Delivery::DeliveredUnverified;
             match action.kind {
-                ActionType::Check | ActionType::Uncheck => return Err(valor_err(format!("{} ainda não suportado", action.kind))),
                 ActionType::Activate => {
                     let janela = target.and_then(|t| self.janelas.get(t)).ok_or_else(|| valor_err("janela não pertence à observação").nao_entregue())?;
                     arvore::focar_janela(janela);
@@ -452,6 +491,8 @@ mod desktop {
                 | ActionType::SetValue
                 | ActionType::Select
                 | ActionType::Toggle
+                | ActionType::Check
+                | ActionType::Uncheck
                 | ActionType::Expand
                 | ActionType::Collapse
                 | ActionType::Focus
@@ -495,6 +536,19 @@ mod desktop {
                         ActionType::Select | ActionType::Toggle if na_tela => entrada::clicar_centro(rect)?,
                         ActionType::Select => padrao(padrao(el.get_pattern::<UISelectionItemPattern>())?.select())?,
                         ActionType::Toggle => padrao(padrao(el.get_pattern::<UITogglePattern>())?.toggle())?,
+                        ActionType::Check | ActionType::Uncheck => {
+                            let caixa = padrao(el.get_pattern::<UITogglePattern>()).map_err(DesktopError::nao_entregue)?;
+                            let ler = || {
+                                padrao(caixa.get_toggle_state()).map(|s| match s {
+                                    ToggleState::On => regras::Marca::On,
+                                    ToggleState::Off => regras::Marca::Off,
+                                    _ => regras::Marca::Indeterminate,
+                                })
+                            };
+                            // Same path as toggle: a click on screen fires the app's own click handler.
+                            let alternar = || if na_tela { entrada::clicar_centro(rect) } else { padrao(caixa.toggle()) };
+                            entrega = regras::marcar(action.kind == ActionType::Check, ler, alternar, Duration::from_millis(500))?;
+                        }
                         ActionType::Expand => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>())?.expand())?,
                         ActionType::Collapse => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>())?.collapse())?,
                         ActionType::Focus => arvore::focar(el),

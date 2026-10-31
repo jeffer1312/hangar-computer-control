@@ -352,12 +352,38 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         dialogos.last().map(|(_, r)| *r)
     }
 
+    /// Check/Uncheck: nothing when the box is already there; else toggles and reads it back, toggling once more
+    /// only when it landed on indeterminate.
+    fn marcar(&self, action: &Action, node: &T::Node, info: &NoInfo) -> Result<Delivery, DesktopError> {
+        let quer = action.kind == ActionType::Check;
+        let pronto = |i: &NoInfo| i.has("checked") == quer && !i.has("indeterminate");
+        if pronto(info) { return Ok(Delivery::DeliveredVerified); }
+        let alternar = Action { kind: ActionType::Toggle, ..action.clone() };
+        for vez in 0..2 {
+            // After the first toggle the box may have changed: a later refusal is no longer "not delivered".
+            let r = self.element_action(&alternar);
+            if vez > 0 { r.map_err(|e| DesktopError { delivery: Delivery::Unknown, ..e })?; } else { r?; }
+            let fim = Instant::now() + Duration::from_millis(500);
+            loop {
+                let agora = self.tree.read(node).map_err(tree_error)?;
+                if pronto(&agora) { return Ok(Delivery::DeliveredVerified); }
+                if agora.has("indeterminate") { break; }
+                if Instant::now() >= fim { return Ok(Delivery::DeliveredUnverified); }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        Ok(Delivery::DeliveredUnverified)
+    }
+
     fn element_action(&self, action: &Action) -> Result<Delivery, DesktopError> {
         // Refusals before any input: a fresh look may find the control again.
         let element = action.target.as_ref().and_then(|t| self.elements.get(t)).ok_or_else(|| invalid("controle não pertence à observação").nao_entregue())?;
         let info = self.tree.read(&element.node).map_err(|e| tree_error(e).nao_entregue())?;
         if info.name() != element.name || role_name(&info.role, &info.states) != element.role || (!info.has("enabled") && !info.has("sensitive")) {
             return Err(runtime("controle mudou; observe novamente").nao_entregue());
+        }
+        if matches!(action.kind, ActionType::Check | ActionType::Uncheck) {
+            return self.marcar(action, &element.node, &info);
         }
         let feito = |r: Result<(), DesktopError>| r.map(|()| Delivery::DeliveredUnverified);
         let active = hypr::query(&self.commands, "activewindow").map_err(runtime)?;
@@ -522,8 +548,8 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                 }
             }
             ActionType::Mouse => self.mouse(action),
-            ActionType::Check | ActionType::Uncheck => Err(invalid(format!("{} ainda não suportado", action.kind))),
-            ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle | ActionType::Expand | ActionType::Collapse | ActionType::Focus | ActionType::Scroll => return self.element_action(action),
+            ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle | ActionType::Check | ActionType::Uncheck
+            | ActionType::Expand | ActionType::Collapse | ActionType::Focus | ActionType::Scroll => return self.element_action(action),
         };
         feito.map(|()| Delivery::DeliveredUnverified)
     }

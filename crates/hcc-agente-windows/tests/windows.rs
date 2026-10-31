@@ -325,3 +325,20 @@ fn children_past_the_limit_become_unread_on_the_nearest_element() {
     assert_eq!(elementos[1].unread, Some(7));
     assert_eq!(elementos[0].unread, None);
 }
+
+#[test]
+fn check_reads_first_and_toggles_again_only_past_indeterminate() {
+    use hcc_protocolo::Delivery;
+    use std::time::Duration;
+    let rodar = |inicial: Marca, depois: Vec<Marca>, quer: bool, prazo: Duration| {
+        let mut estados = std::iter::once(inicial).chain(depois).collect::<std::collections::VecDeque<_>>();
+        let mut alternou = 0;
+        let r = marcar(quer, || Ok::<_, ()>(if estados.len() > 1 { estados.pop_front().unwrap() } else { estados[0] }), || { alternou += 1; Ok(()) }, prazo);
+        (r.unwrap(), alternou)
+    };
+    let s = Duration::from_millis(500);
+    assert_eq!(rodar(Marca::On, vec![], true, s), (Delivery::DeliveredVerified, 0));
+    assert_eq!(rodar(Marca::Off, vec![Marca::On], true, s), (Delivery::DeliveredVerified, 1));
+    assert_eq!(rodar(Marca::Off, vec![Marca::Indeterminate, Marca::On], true, s), (Delivery::DeliveredVerified, 2));
+    assert_eq!(rodar(Marca::On, vec![Marca::On], false, Duration::ZERO), (Delivery::DeliveredUnverified, 1));
+}
