@@ -154,9 +154,6 @@ impl Action {
         if self.rotulo.as_ref().is_some_and(|r| r.chars().count() > 200) {
             return Err("rotulo com mais de 200 caracteres".into());
         }
-        if self.kind == ActionType::Launch && self.input.is_some() {
-            return Err("launch não aceita input".into());
-        }
         let target = ("target", self.target.is_some());
         let exigidos: &[(&str, bool)] = match self.kind {
             ActionType::SetValue => &[target, ("value", self.value.is_some())],

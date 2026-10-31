@@ -248,10 +248,11 @@ pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError
     let mut windows = Vec::new();
     let mut janelas = HashMap::new();
     for el in enumeradas {
-        if el.is_offscreen().map_err(com)? {
+        let hwnd = handle(&el)?;
+        // A minimized window is offscreen; the one read by id stays, so its read comes back empty instead of failing.
+        if el.is_offscreen().map_err(com)? && (scope.window.is_none() || hwnd != fg) {
             continue;
         }
-        let hwnd = handle(&el)?;
         let wid = id_janela(hwnd);
         let process_id = el.get_process_id().map_err(com)?;
         windows.push(Window {
@@ -265,7 +266,9 @@ pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError
         janelas.insert(wid, Janela { hwnd, el });
     }
     let foreground = id_janela(fg);
-    let ativa = janelas.get(&foreground).ok_or_else(|| runtime_err("a janela ativa mudou durante a observação"))?;
+    let ativa = janelas.get(&foreground).ok_or_else(|| {
+        runtime_err(if scope.window.is_some() { "a janela fechou; observe novamente" } else { "a janela ativa mudou durante a observação" })
+    })?;
     // Read limit, not an application limit: `truncated` says when it cut.
     // Each pending node with the index of its nearest ancestor that became an element, and its depth.
     let pedido = pedido_cache(ua)?;

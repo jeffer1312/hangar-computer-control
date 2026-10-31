@@ -679,7 +679,8 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                 if info.role == "password text" { return Ok(Delivery::DeliveredUnverified); }
                 let lido = self.tree.text(&element.node).map_err(tree_error)?;
                 if lido.replace("\r\n", "\n").trim() != valor.replace("\r\n", "\n").trim() {
-                    return Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&lido.chars().take(80).collect::<String>()))));
+                    // The field holds something else: typing it for real replaces it, so a redo is safe.
+                    return Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&lido.chars().take(80).collect::<String>()))).nao_entregue());
                 }
                 Ok(Delivery::DeliveredVerified)
             }

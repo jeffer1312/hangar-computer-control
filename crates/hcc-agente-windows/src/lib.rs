@@ -596,7 +596,8 @@ mod desktop {
                     }
                     let lido = padrao(campo.get_value())?;
                     if !regras::valor_confirmado(&lido, valor) {
-                        return Err(regras::valor_nao_confirmado(&lido));
+                        // The field holds something else: typing it for real replaces it, so a redo is safe.
+                        return Err(regras::valor_nao_confirmado(&lido).nao_entregue());
                     }
                     Ok(Delivery::DeliveredVerified)
                 }

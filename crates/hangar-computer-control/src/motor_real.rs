@@ -96,10 +96,17 @@ async fn consultar(config: Option<PathBuf>, cancel: CancellationToken) -> String
 /// The `act` answer: the pick, its runner-up, the risk, the delivery and whether the screen changed.
 fn um_passo_json(r: &hcc_laco::resultado::Resultado) -> String {
     let u = r.ultima.clone().unwrap_or_default();
-    let agiu = u.entrega.as_deref().is_some_and(|e| e.starts_with("delivered"));
+    // A timeout may have acted: "incerto" tells the caller not to simply try again.
+    let decisao = match u.entrega.as_deref() {
+        Some(e) if e.starts_with("delivered") => "agiu",
+        Some("unknown") => "incerto",
+        _ => "parou",
+    };
+    // Why it stopped: the action's own result when it was tried, the run's reason otherwise.
+    let motivo = (decisao != "agiu").then(|| u.resultado.clone().filter(|_| u.entrega.is_some()).unwrap_or_else(|| r.motivo.clone()));
     serde_json::json!({
-        "decisao": if agiu { "agiu" } else { "parou" },
-        "motivo": if agiu { None } else { Some(&r.motivo) },
+        "decisao": decisao,
+        "motivo": motivo,
         "acao": r.ultima.as_ref().map(|u| &u.acao),
         "confianca": r.ultima.as_ref().map(|u| u.confianca),
         "segundo": u.segundo.as_ref().map(|(acao, p)| serde_json::json!({"acao": acao, "confianca": p})),

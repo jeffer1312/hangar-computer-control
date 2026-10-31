@@ -32,5 +32,7 @@ pub struct UmPasso {
     pub segundo: Option<(String, f64)>,
     pub risco: f64,
     pub entrega: Option<String>,
+    /// What happened to the action, as recentActions shows it ("NOT executed: … usuário ativo").
+    pub resultado: Option<String>,
     pub tela_mudou: Option<bool>,
 }

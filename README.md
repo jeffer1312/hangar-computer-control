@@ -136,8 +136,10 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   Cada ação também deixa `acao-N.png`: o print do ciclo com a caixa do controle e o ponto do clique marcados.
 - `act(intencao, dados={}, executar=true, ver=false)`: um passo só. O Jev escolhe o controle para a intenção
   ("clicar em Salvar") e o agente age, com as mesmas barreiras e a mesma trava do `objetivo`, sem roteiro.
-  Responde JSON: `decisao` (`agiu`/`parou`), `motivo`, `acao`, `confianca`, `segundo` (o segundo colocado do
-  Jev, quando ele mandou), `risco`, `entrega` e `tela_mudou`. `executar=false` decide e para antes de agir.
+  Responde JSON: `decisao` (`agiu`, `parou`, ou `incerto` quando a ação estourou o prazo e pode ter rodado: não
+  repita sem olhar a tela), `motivo` (o resultado da ação, como "usuário ativo", ou por que o laço parou), `acao`,
+  `confianca`, `segundo` (o segundo colocado do Jev, quando ele mandou), `risco`, `entrega` e `tela_mudou`.
+  `executar=false` decide e para antes de agir.
 - `ver_tela()`: print do desktop, devolve o caminho do PNG. Pra quando `objetivo` parou e você quer olhar.
 - `estado()`: diz se o desktop está acessível e a resolução.
 

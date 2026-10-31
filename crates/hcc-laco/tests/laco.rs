@@ -2973,3 +2973,20 @@ async fn one_step_without_executing_decides_and_touches_nothing() {
     assert_eq!((u.acao.as_str(), u.entrega), ("set_value Edit 'Nome' = 'Ana'", None));
     assert!(con.state.lock().unwrap().acts.is_empty());
 }
+
+#[tokio::test]
+async fn when_the_app_dialog_closes_the_loop_goes_back_to_the_app_window_not_the_users() {
+    let antes = tree("o1", "");
+    let mut com_dialogo = tree("o2", "Ana");
+    com_dialogo.windows.push(serde_json::from_value(json!({"id":"w2", "name":"Confirmar", "process_id": 10, "class_name":"#32770", "rect":[0,0,10,10]})).unwrap());
+    let depois = tree("o3", "Ana");
+    let con = FakeConnector::new(vec![antes, com_dialogo, depois]);
+    con.state.lock().unwrap().fail_observe_at = Some((6, SessionError::Agent("RuntimeError: a janela fechou; observe novamente".into())));
+    let (op, _server) = setup(vec![select("set_value"), select("invoke Button 'Salvar'"), done()]).await;
+    let r = run(op, &con).await;
+    let scopes = con.state.lock().unwrap().scopes.iter().map(|s| s.window.clone()).collect::<Vec<_>>();
+    assert!(r.ok, "{} {scopes:?}", r.resumo());
+    let i = scopes.iter().position(|w| w.as_deref() == Some("w2")).expect("leu o diálogo");
+    assert_eq!(scopes.last().unwrap().as_deref(), Some("w1"), "volta à janela do app, não à da frente: {scopes:?}");
+    assert!(scopes[i..].iter().all(Option::is_some), "nunca leu a janela da frente depois do diálogo: {scopes:?}");
+}
