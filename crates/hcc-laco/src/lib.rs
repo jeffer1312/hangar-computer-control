@@ -7,6 +7,7 @@ pub mod estado;
 pub mod barreiras;
 pub mod geometria;
 pub mod modo;
+pub mod print;
 pub mod prompts;
 pub mod http;
 pub mod jev;

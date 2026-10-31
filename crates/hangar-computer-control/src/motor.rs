@@ -28,11 +28,19 @@ pub trait Motor: Send + Sync + 'static {
         &self,
         p: PedidoObjetivo,
         cancel: CancellationToken,
-        progresso: Box<dyn Fn(String) + Send + Sync>,
+        progresso: Box<dyn Fn(String, Option<PathBuf>) + Send + Sync>,
     ) -> Futuro<String>;
     /// `"<png path>; <secs>s"`.
     fn ver_tela(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<Result<String, String>>;
     fn estado(&self, config: Option<PathBuf>, cancel: CancellationToken) -> Futuro<String>;
+}
+
+/// The marked print of an action, when there is one.
+pub fn imagem(p: &Progresso) -> Option<PathBuf> {
+    match p {
+        Progresso::Acao(_, img) => img.clone(),
+        _ => None,
+    }
 }
 
 pub fn rotulo(p: &Progresso) -> String {
@@ -43,7 +51,7 @@ pub fn rotulo(p: &Progresso) -> String {
         Progresso::Jev => "decidindo o próximo passo",
         Progresso::Captura => "capturando a tela",
         Progresso::Llm => "pedindo ajuda visual",
-        Progresso::Acao(d) => d,
+        Progresso::Acao(d, _) => d,
     }
     .to_owned()
 }
@@ -58,10 +66,13 @@ impl Motor for FakeMotor {
         &self,
         p: PedidoObjetivo,
         cancel: CancellationToken,
-        progresso: Box<dyn Fn(String) + Send + Sync>,
+        progresso: Box<dyn Fn(String, Option<PathBuf>) + Send + Sync>,
     ) -> Futuro<String> {
         Box::pin(async move {
-            progresso(rotulo(&Progresso::Observacao));
+            progresso(rotulo(&Progresso::Observacao), None);
+            if p.texto.contains("imagem") {
+                progresso(rotulo(&Progresso::Acao("clicar em Salvar".into(), None)), Some(PathBuf::from("/tmp/hcc/acao-0.png")));
+            }
             if p.texto == "ignorar cancelamento" {
                 tokio::time::sleep(p.limite).await;
                 return "fim".to_owned();
@@ -133,7 +144,7 @@ mod tests {
             (Progresso::Jev, "decidindo o próximo passo"),
             (Progresso::Captura, "capturando a tela"),
             (Progresso::Llm, "pedindo ajuda visual"),
-            (Progresso::Acao("digitar *** em Nome".into()), "digitar *** em Nome"),
+            (Progresso::Acao("digitar *** em Nome".into(), None), "digitar *** em Nome"),
         ];
         for (p, esperado) in casos {
             assert_eq!(rotulo(&p), esperado);

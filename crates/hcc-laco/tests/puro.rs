@@ -1128,3 +1128,16 @@ fn a_click_on_a_window_print_lands_by_the_window_position() {
     let literal = para_janela(&mouse(10, 20, MouseMode::Click), Rect(200, 300, 1200, 900), 500, "clicar em 10,20");
     assert_eq!((literal.x, literal.y), (Some(10), Some(20)), "par escrito no objetivo já é da tela");
 }
+
+#[test]
+fn the_action_print_marks_the_target_box_and_the_click_point() {
+    let mut tela = Vec::new();
+    image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255])).write_to(&mut std::io::Cursor::new(&mut tela), image::ImageFormat::Png).unwrap();
+    // A 20x20 screen printed at 10x10: the box (4,4)-(12,12) lands on (2,2)-(6,6), the point (8,8) on (4,4).
+    let marcado = hcc_laco::print::anotar(&tela, Some(Rect(4, 4, 12, 12)), Some((8, 8)), (0, 0), 0.5).unwrap();
+    let img = image::load_from_memory(&marcado).unwrap().to_rgba8();
+    let vermelho = |x, y| { let p = img.get_pixel(x, y).0; p[0] > 200 && p[1] < 80 && p[2] < 80 };
+    assert!(vermelho(2, 2) && vermelho(6, 4), "borda da caixa");
+    assert!(vermelho(4, 4), "ponto do clique");
+    assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255, 255], "fora da caixa intacto");
+}

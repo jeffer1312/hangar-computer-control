@@ -247,6 +247,19 @@ fn progress_written_for_valid_tool_use_id_only() {
     assert_eq!(progresso[0]["params"]["message"], "lendo a tela");
     assert_eq!(progresso[0]["params"]["progress"], json!(1.0));
 
+    let r = s.chamar(
+        7,
+        "objetivo",
+        json!({"texto": "clicar com imagem", "alvo": "vm-a"}),
+        Some(json!({"claudecode/toolUseId": "toolu_img"})),
+    );
+    assert!(texto(&r).starts_with("concluído: "), "{r}");
+    let linhas = std::fs::read_to_string(pasta.join("toolu_img.jsonl")).unwrap();
+    let acao: Value = serde_json::from_str(linhas.lines().nth(1).unwrap()).unwrap();
+    assert_eq!((acao["message"].as_str(), acao["imagem"].as_str()), (Some("clicar em Salvar"), Some("/tmp/hcc/acao-0.png")));
+    let sem: Value = serde_json::from_str(linhas.lines().next().unwrap()).unwrap();
+    assert!(sem.get("imagem").is_none(), "{sem}");
+
     for (id, invalido) in [(4, "../x"), (5, "toolu_"), (6, "toolu_a/b")] {
         s.chamar(
             id,
@@ -255,11 +268,11 @@ fn progress_written_for_valid_tool_use_id_only() {
             Some(json!({"claudecode/toolUseId": invalido})),
         );
     }
-    let nomes: Vec<_> = std::fs::read_dir(&pasta)
+    let nomes = std::fs::read_dir(&pasta)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(nomes, ["toolu_abc.jsonl"]);
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(nomes, ["toolu_abc.jsonl".to_owned(), "toolu_img.jsonl".to_owned()].into());
     assert!(!amb.casa.path().join(".hangar/x.jsonl").exists());
 }
 

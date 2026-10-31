@@ -248,7 +248,13 @@ pub fn help(actions: Value) -> Answer {
 
 pub fn seconds(n: u64) -> Duration { Duration::from_secs(n) }
 
-/// Signature and IHDR of a 1280x720 PNG: all the loop reads from a screenshot.
+/// A white 1280x720 PNG, encoded once.
 pub fn png_1280x720() -> Vec<u8> {
-    b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\x05\0\0\0\x02\xd0\x08\x06\0\0\0".to_vec()
+    static PNG: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(1280, 720, image::Rgba([255, 255, 255, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        png
+    });
+    PNG.clone()
 }

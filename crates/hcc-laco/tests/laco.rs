@@ -994,7 +994,7 @@ async fn settle_waits_45s_after_launch() {
     let clock = paused.clone();
     let progress = move |p| {
         let mut paused = clock.lock().unwrap();
-        if matches!(p, Progresso::Acao(_)) {
+        if matches!(p, Progresso::Acao(..)) {
             tokio::time::pause(); *paused = true;
         } else if *paused {
             tokio::time::resume(); *paused = false;
@@ -2932,4 +2932,20 @@ async fn the_window_a_launch_opens_becomes_the_app_window_read_by_id() {
     run(op, &con).await;
     let scopes = con.state.lock().unwrap().scopes.clone();
     assert!(scopes.iter().any(|s| s.window.as_deref() == Some("w7")), "{scopes:?}");
+}
+
+#[tokio::test]
+async fn each_action_leaves_its_marked_print_and_progress_points_to_it() {
+    let mut com_caixa = tree("o1", "");
+    com_caixa.elements[0].rect = Some(Rect(100, 100, 300, 140));
+    let con = FakeConnector::new(vec![com_caixa, tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let imagens = Arc::new(Mutex::new(Vec::new()));
+    let guardar = imagens.clone();
+    let progress = move |p| if let Progresso::Acao(_, Some(img)) = p { guardar.lock().unwrap().push(img); };
+    let r = executar(op, &con, CancellationToken::new(), &progress).await;
+    assert!(r.ok, "{}", r.resumo());
+    let imagens = imagens.lock().unwrap();
+    assert_eq!(imagens.len(), 1, "{imagens:?}");
+    assert!(imagens[0].ends_with("acao-0.png") && imagens[0].exists(), "{imagens:?}");
 }

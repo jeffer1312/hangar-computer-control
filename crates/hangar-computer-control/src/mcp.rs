@@ -215,9 +215,9 @@ impl Servidor {
                 }
             })
         });
-        let ao_progredir = Box::new(move |m: String| {
+        let ao_progredir = Box::new(move |m: String, imagem: Option<std::path::PathBuf>| {
             if let Some(a) = &arquivo {
-                progresso::anotar(a, &m);
+                progresso::anotar(a, &m, imagem.as_deref());
             }
             let _ = tx.send(m);
         });

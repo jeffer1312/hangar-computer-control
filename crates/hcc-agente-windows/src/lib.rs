@@ -10,6 +10,8 @@ mod captura;
 #[cfg(windows)]
 mod entrada;
 #[cfg(windows)]
+mod overlay;
+#[cfg(windows)]
 mod sessao_win;
 
 #[cfg(windows)]
@@ -414,6 +416,8 @@ mod desktop {
         entrada_propria: Option<u32>,
         /// The last observation read a window by id: it may stay behind others.
         por_id: bool,
+        /// The drawn cursor of `ver`, made on the first action that asks for it.
+        cursor: Option<crate::overlay::Cursor>,
     }
 
     /// UIA objects live in the multithreaded apartment: usable from the thread that waits on a blocking Invoke.
@@ -440,7 +444,7 @@ mod desktop {
             sessao_win::dpi_por_monitor();
             let sessao = sessao_win::Sessao::abrir().map_err(|e| e.to_string())?;
             let ua = UIAutomation::new().map_err(|e| arvore::com(e).to_string())?;
-            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false })
+            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false, cursor: None })
         }
 
         /// Today's path: real clicks and keys where the app needs them.
@@ -618,6 +622,23 @@ mod desktop {
         }
 
         /// The user's window goes back in front unless the app opened a menu the next action needs.
+        /// The drawn arrow glides to where the action lands: the control's center or the mouse point.
+        fn mostrar_cursor(&mut self, action: &Action) {
+            let ponto = match (action.x, action.y) {
+                (Some(x), Some(y)) => Some((x, y)),
+                _ => action.target.as_deref().and_then(|t| self.controles.get(t)).and_then(|c| arvore::retangulo(&c.el).ok())
+                    .map(|r| ((r.0 + r.2) / 2, (r.1 + r.3) / 2)),
+            };
+            if let Some((x, y)) = ponto {
+                if self.cursor.is_none() {
+                    self.cursor = crate::overlay::Cursor::novo();
+                }
+                if let Some(c) = self.cursor.as_mut() {
+                    c.mover(x, y);
+                }
+            }
+        }
+
         /// Whether it moved the focus (an Alt tap may have been sent).
         fn devolver_janela(&mut self) -> bool {
             let frente = sessao_win::primeiro_plano();
@@ -694,6 +715,9 @@ mod desktop {
         }
 
         fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
+            if action.cursor {
+                self.mostrar_cursor(action);
+            }
             let alvo = self.janelas.get(&observed.foreground).map_or(0, |j| j.hwnd);
             let frente = sessao_win::primeiro_plano();
             if action.input.is_none_or(|m| m == InputMode::Real) {

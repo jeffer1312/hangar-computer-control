@@ -11,7 +11,7 @@ use hcc_laco::tipos::Progresso;
 use hcc_protocolo::{Connector, Session};
 use tokio_util::sync::CancellationToken;
 
-use crate::motor::{Futuro, Motor, PedidoObjetivo, rotulo};
+use crate::motor::{Futuro, Motor, PedidoObjetivo, imagem, rotulo};
 
 pub struct MotorReal;
 
@@ -98,7 +98,7 @@ impl Motor for MotorReal {
         &self,
         p: PedidoObjetivo,
         cancel: CancellationToken,
-        progresso: Box<dyn Fn(String) + Send + Sync>,
+        progresso: Box<dyn Fn(String, Option<PathBuf>) + Send + Sync>,
     ) -> Futuro<String> {
         Box::pin(async move {
             let conector = conector(p.config.clone());
@@ -116,7 +116,7 @@ impl Motor for MotorReal {
                 refazer: p.refazer,
                 ver: p.ver,
             };
-            let etapa = move |e: Progresso| progresso(rotulo(&e));
+            let etapa = move |e: Progresso| progresso(rotulo(&e), imagem(&e));
             executar(op, &conector, cancel, &etapa).await.resumo()
         })
     }

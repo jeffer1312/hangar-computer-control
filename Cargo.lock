@@ -940,6 +940,7 @@ version = "0.6.0"
 dependencies = [
  "base64 0.23.1",
  "hcc-protocolo",
+ "image",
  "regex",
  "reqwest",
  "serde",

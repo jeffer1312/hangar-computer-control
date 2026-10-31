@@ -19,10 +19,12 @@ pub fn arquivo(tool_use_id: Option<&str>) -> Option<PathBuf> {
     Some(pasta.join(format!("{id}.jsonl")))
 }
 
-pub fn anotar(path: &Path, message: &str) {
+/// `imagem`: the action's marked print, for Hangar to show next to the step.
+pub fn anotar(path: &Path, message: &str, imagem: Option<&Path>) {
     let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let imagem = imagem.map(|i| format!(", \"imagem\": {}", serde_json::Value::from(i.display().to_string()))).unwrap_or_default();
     let linha = format!(
-        "{{\"t\": {}, \"message\": {}}}\n",
+        "{{\"t\": {}, \"message\": {}{imagem}}}\n",
         serde_json::Value::from(t),
         serde_json::Value::from(message)
     );

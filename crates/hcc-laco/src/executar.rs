@@ -304,6 +304,23 @@ fn escolha(e: Escolha) -> String {
 }
 fn percentual(p: f64) -> String { format!("{:.0}%", p * 100.0) }
 
+/// `acao-<ciclo>.png`: the cycle's print with the action's target box and click point; `None` without a print
+/// or a place to mark. `janela`: the print is of that window only.
+fn print_da_acao(pasta: &Path, ciclo: u32, acao: &Action, vista: &Observation, janela: Option<&str>) -> Option<PathBuf> {
+    let caixa = acao.target.as_ref().and_then(|id| vista.elements.iter().find(|e| &e.id == id)).and_then(|e| e.rect);
+    let ponto = match (acao.x, acao.y) { (Some(x), Some(y)) => Some((x, y)), _ => caixa.map(crate::candidatos::centro) };
+    ponto?;
+    let tela = std::fs::read(pasta.join(format!("tela-{ciclo}.png"))).ok()?;
+    let largura = f64::from(u32::from_be_bytes(tela.get(16..20)?.try_into().ok()?));
+    let (origem, base) = match janela.and_then(|j| vista.windows.iter().find(|w| w.id == j)) {
+        Some(w) => ((w.rect.0, w.rect.1), f64::from(w.rect.2 - w.rect.0)),
+        None => ((0, 0), f64::from(vista.screen.width)),
+    };
+    let marcado = crate::print::anotar(&tela, caixa, ponto, origem, largura / base.max(1.0)).ok()?;
+    let destino = pasta.join(format!("acao-{ciclo}.png"));
+    std::fs::write(&destino, marcado).ok().map(|()| destino)
+}
+
 /// The window itself, not its title: Explorer and browsers retitle it on every navigation.
 fn chave_janela(obs: &Observation) -> String {
     obs.foreground.clone()
@@ -629,7 +646,7 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
         }
         let nome = secretos.descricao(&acao, &vista, true);
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false)),
+        let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false), None),
             async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
         rodou = true;
         let ok = matches!(&retorno, Ok(ret) if ret.ok);
@@ -740,7 +757,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 }
                 let nome = secretos.descricao(&acao, &vista, true);
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false)),
+                let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false), None),
                     async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
                 let resultado = match &retorno {
                     Ok(ret) if ret.ok => "ok".to_owned(),
@@ -1166,7 +1183,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if ciclo == op.max_passos { break; }
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let rotulo = secretos.descricao(acao, &vista, false);
-            let mut retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone()),
+            let marcado = print_da_acao(&pasta, ciclo, acao, &vista, lido_como.window.as_deref());
+            let mut retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone(), marcado),
                 async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
             // Refused before it touched the app, on a fresh look of the same screen: with real input when only that
             // reaches it, after the user stops (up to a minute), or once more for any other refusal.
@@ -1193,7 +1211,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 anterior = Some(atual.clone());
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let (acao, id) = (&candidato.acao, &vista.observation_id);
-                retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone()),
+                retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone(), None),
                     async { Ok(s.act(id, acao).await) }).await?;
             }
             let acao = &candidato.acao;
@@ -1260,7 +1278,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     anterior = Some(atual.clone());
                     let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                     let id = vista.observation_id.clone();
-                    let feito = controle.medir(&format!("acao:{}", real.kind), Progresso::Acao(secretos.descricao(&real, &vista, false)),
+                    let feito = controle.medir(&format!("acao:{}", real.kind), Progresso::Acao(secretos.descricao(&real, &vista, false), None),
                         async { Ok(s.act(&id, &real).await) }).await?;
                     if feito.as_ref().is_ok_and(|r| r.ok) {
                         if let Some(u) = recentes.last_mut() { u.result = "ok (refeito com entrada real)".into(); }

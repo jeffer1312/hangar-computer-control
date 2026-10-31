@@ -76,5 +76,6 @@ pub enum Progresso {
     Jev,
     Captura,
     Llm,
-    Acao(String),
+    /// What is about to be done, and the print with its target marked.
+    Acao(String, Option<std::path::PathBuf>),
 }
