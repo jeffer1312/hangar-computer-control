@@ -5,7 +5,7 @@ use hcc_agente_linux::arvore::{Arvore, NoInfo, TreeError, choose_frame, element_
 use hcc_agente_linux::comandos::Comandos;
 use hcc_agente_linux::entrada::{evdev, keys, lua_string};
 use hcc_agente_linux::hypr::{dispatch, monitor_logico, reference_monitor, windows_from};
-use hcc_protocolo::{Action, ActionType, Desktop, ElementAction, ErrorKind, Rect, Scope};
+use hcc_protocolo::{Action, ActionType, Delivery, Desktop, ElementAction, ErrorKind, Rect, Scope};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -447,7 +447,7 @@ fn set_value_confirms_readback_and_text_uses_stdin() {
     let (mut desktop, commands, tree) = desktop(vec![field]); *tree.readback.borrow_mut() = Some(" ação\r\n".into());
     let observed = desktop.observe(&Scope::default()).unwrap();
     let set = Action { value:Some("ação\n".into()), ..action(ActionType::SetValue,Some("e0")) };
-    desktop.act(&observed,&set).unwrap();
+    assert_eq!(desktop.act(&observed,&set).unwrap(), Delivery::DeliveredVerified);
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wtype","-"] && c.1.as_deref() == Some("ação\n".as_bytes())));
     let observed = desktop.observe(&Scope::default()).unwrap(); *tree.readback.borrow_mut() = Some("errado".into());
     assert!(desktop.act(&observed,&set).unwrap_err().msg.contains("valor digitado não confirmado"));
@@ -468,7 +468,8 @@ fn password_values_are_never_returned_or_read_back() {
     let (mut desktop, _, tree) = desktop(vec![field]); let observed = desktop.observe(&Scope::default()).unwrap();
     assert!(observed.elements[0].password); assert_eq!(observed.elements[0].value,None);
     let set = Action { value:Some("secret".into()), ..action(ActionType::SetValue,Some("e0")) };
-    desktop.act(&observed,&set).unwrap(); assert!(!tree.events.borrow().iter().any(|e| e.starts_with("text:")));
+    assert_eq!(desktop.act(&observed,&set).unwrap(), Delivery::DeliveredUnverified, "senha não é relida");
+    assert!(!tree.events.borrow().iter().any(|e| e.starts_with("text:")));
 }
 
 #[test]
@@ -504,7 +505,8 @@ fn changed_control_is_not_clicked() {
     let (mut desktop, commands, tree) = desktop(vec![node("push button","Salvar")]);
     let observed = desktop.observe(&Scope::default()).unwrap(); tree.nodes.borrow_mut()[2].info.name = b"Apagar".to_vec();
     commands.calls.borrow_mut().clear();
-    assert_eq!(desktop.act(&observed,&action(ActionType::Invoke,Some("e0"))).unwrap_err().msg,"controle mudou; observe novamente");
+    let erro = desktop.act(&observed,&action(ActionType::Invoke,Some("e0"))).unwrap_err();
+    assert_eq!((erro.msg.as_str(), erro.delivery), ("controle mudou; observe novamente", Delivery::NotDelivered));
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool"));
 }
 

@@ -347,7 +347,7 @@ mod desktop {
         }
 
         fn controle(&self, alvo: Option<&str>) -> Result<&arvore::Controle, DesktopError> {
-            alvo.and_then(|a| self.controles.get(a)).ok_or_else(|| valor_err("controle não pertence à observação"))
+            alvo.and_then(|a| self.controles.get(a)).ok_or_else(|| valor_err("controle não pertence à observação").nao_entregue())
         }
     }
 
@@ -412,10 +412,11 @@ mod desktop {
 
         fn act(&mut self, _observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
             let target = action.target.as_deref();
+            let mut entrega = Delivery::DeliveredUnverified;
             match action.kind {
                 ActionType::Check | ActionType::Uncheck => return Err(valor_err(format!("{} ainda não suportado", action.kind))),
                 ActionType::Activate => {
-                    let janela = target.and_then(|t| self.janelas.get(t)).ok_or_else(|| valor_err("janela não pertence à observação"))?;
+                    let janela = target.and_then(|t| self.janelas.get(t)).ok_or_else(|| valor_err("janela não pertence à observação").nao_entregue())?;
                     arvore::focar_janela(janela);
                 }
                 ActionType::Launch => {
@@ -457,10 +458,11 @@ mod desktop {
                 | ActionType::Scroll => {
                     let c = self.controle(target)?;
                     let el = &c.el;
-                    let nome = padrao(el.get_name())?;
-                    let role = arvore::papel(el)?;
-                    if nome != c.name || role != c.role || !padrao(el.is_enabled())? {
-                        return Err(runtime_err("controle mudou; observe novamente"));
+                    // Refusals before any input: a fresh look may find the control again.
+                    let nome = padrao(el.get_name()).map_err(DesktopError::nao_entregue)?;
+                    let role = arvore::papel(el).map_err(DesktopError::nao_entregue)?;
+                    if nome != c.name || role != c.role || !padrao(el.is_enabled()).map_err(DesktopError::nao_entregue)? {
+                        return Err(runtime_err("controle mudou; observe novamente").nao_entregue());
                     }
                     let senha = padrao(el.is_password())?;
                     let rect = arvore::retangulo(el)?;
@@ -486,6 +488,7 @@ mod desktop {
                                 if !regras::valor_confirmado(&lido, valor) {
                                     return Err(regras::valor_nao_confirmado(&lido));
                                 }
+                                entrega = Delivery::DeliveredVerified;
                             }
                         }
                         // UIA Select/Toggle marks without firing Delphi's OnClick; a real click fires it.
@@ -503,7 +506,7 @@ mod desktop {
                     }
                 }
             }
-            Ok(Delivery::DeliveredUnverified)
+            Ok(entrega)
         }
 
         fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {

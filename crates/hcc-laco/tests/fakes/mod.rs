@@ -22,6 +22,10 @@ pub struct State {
     pub connect_pending: bool,
     pub observe_pending: bool,
     pub advance_on_act: bool,
+    /// A failed act also moves to the next view (the screen changed or the ids were renumbered).
+    pub advance_on_error: bool,
+    /// One per successful act, in order; `delivered_unverified` once used up.
+    pub act_deliveries: VecDeque<Delivery>,
     pub connects: usize,
     pub closes: usize,
     pub captures: usize,
@@ -61,7 +65,8 @@ impl FakeConnector {
             state: Arc::new(Mutex::new(State {
                 views: views.into(), acts: vec![], observe_errors: VecDeque::new(), act_errors: VecDeque::new(),
                 screenshot_error: None, close_error: None, close_pending: false, slow_drop: None, connect_error: None,
-                connect_pending: false, observe_pending: false, advance_on_act: true,
+                connect_pending: false, observe_pending: false, advance_on_act: true, advance_on_error: false,
+                act_deliveries: VecDeque::new(),
                 connects: 0, closes: 0, captures: 0, observed: vec![], cancel_after_act: None,
             })),
             entered: Arc::new(Notify::new()),
@@ -105,9 +110,12 @@ impl Session for FakeSession {
         assert_eq!(id, s.views.front().unwrap().observation_id);
         s.acts.push((action.clone(), id.into(), Instant::now()));
         if let Some(c) = &s.cancel_after_act { c.cancel(); }
-        if let Some(e) = s.act_errors.pop_front() { return Err(e); }
+        if let Some(e) = s.act_errors.pop_front() {
+            if s.advance_on_error && s.views.len() > 1 { s.views.pop_front(); }
+            return Err(e);
+        }
         if s.advance_on_act && s.views.len() > 1 { s.views.pop_front(); }
-        Ok(ActResult { ok: true, delivery: Delivery::DeliveredUnverified })
+        Ok(ActResult { ok: true, delivery: s.act_deliveries.pop_front().unwrap_or(Delivery::DeliveredUnverified) })
     }
 
     async fn screenshot(&mut self, _: Option<&str>) -> Result<Vec<u8>, SessionError> {

@@ -83,6 +83,21 @@ fn tipo(a: ElementAction) -> ActionType {
 }
 
 /// Python `(a + b) // 2`, without i32 overflow on a hostile rect.
+/// `acao` aimed at the same control on a fresh observation, which numbers ids anew. Only when the control is the
+/// single one with its role and name on both screens: anything else could land on a different control.
+pub fn mesmo_alvo(acao: &Action, antes: &Observation, depois: &Observation) -> Option<Action> {
+    let Some(id) = &acao.target else { return Some(acao.clone()) };
+    if antes.windows.iter().any(|w| &w.id == id) {
+        return depois.windows.iter().any(|w| &w.id == id).then(|| acao.clone());
+    }
+    let alvo = antes.elements.iter().find(|e| &e.id == id)?;
+    let iguais = |o: &Observation| o.elements.iter().filter(|e| e.role == alvo.role && e.name == alvo.name).cloned().collect::<Vec<_>>();
+    match (iguais(antes).len(), iguais(depois).as_slice()) {
+        (1, [novo]) => Some(Action { target: Some(novo.id.clone()), ..acao.clone() }),
+        _ => None,
+    }
+}
+
 pub fn centro(r: Rect) -> (i32, i32) {
     let meio = |a: i32, b: i32| ((i64::from(a) + i64::from(b)).div_euclid(2)) as i32;
     (meio(r.0, r.2), meio(r.1, r.3))

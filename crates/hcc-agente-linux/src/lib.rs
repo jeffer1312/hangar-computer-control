@@ -302,7 +302,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         Ok(())
     }
 
-    fn set_value(&self, element: &ObservedElement<T::Node>, info: &NoInfo, value: Option<&str>) -> Result<(), DesktopError> {
+    fn set_value(&self, element: &ObservedElement<T::Node>, info: &NoInfo, value: Option<&str>) -> Result<Delivery, DesktopError> {
         let value = value.filter(|v| v.chars().count() <= 20000).ok_or_else(|| invalid("valor inválido"))?;
         self.focus_field(element)?;
         std::thread::sleep(Duration::from_millis(150));
@@ -325,9 +325,9 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                 Some(ms) => { self.commands.run(&["wtype", "-d", ms, "-"], Some(value.as_bytes())).map_err(runtime)?; }
             }
             std::thread::sleep(Duration::from_millis(150));
-            if senha || info.text.is_none() { return Ok(()); }
+            if senha || info.text.is_none() { return Ok(Delivery::DeliveredUnverified); }
             readback = self.tree.text(&element.node).map_err(tree_error)?;
-            if readback.replace("\r\n", "\n").trim() == value.replace("\r\n", "\n").trim() { return Ok(()); }
+            if readback.replace("\r\n", "\n").trim() == value.replace("\r\n", "\n").trim() { return Ok(Delivery::DeliveredVerified); }
         }
         Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&readback.chars().take(80).collect::<String>()))))
     }
@@ -352,25 +352,27 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         dialogos.last().map(|(_, r)| *r)
     }
 
-    fn element_action(&self, action: &Action) -> Result<(), DesktopError> {
-        let element = action.target.as_ref().and_then(|t| self.elements.get(t)).ok_or_else(|| invalid("controle não pertence à observação"))?;
-        let info = self.tree.read(&element.node).map_err(tree_error)?;
+    fn element_action(&self, action: &Action) -> Result<Delivery, DesktopError> {
+        // Refusals before any input: a fresh look may find the control again.
+        let element = action.target.as_ref().and_then(|t| self.elements.get(t)).ok_or_else(|| invalid("controle não pertence à observação").nao_entregue())?;
+        let info = self.tree.read(&element.node).map_err(|e| tree_error(e).nao_entregue())?;
         if info.name() != element.name || role_name(&info.role, &info.states) != element.role || (!info.has("enabled") && !info.has("sensitive")) {
-            return Err(runtime("controle mudou; observe novamente"));
+            return Err(runtime("controle mudou; observe novamente").nao_entregue());
         }
+        let feito = |r: Result<(), DesktopError>| r.map(|()| Delivery::DeliveredUnverified);
         let active = hypr::query(&self.commands, "activewindow").map_err(runtime)?;
         let window = hypr::client_rect(&active, (self.area.0, self.area.1)).map_err(runtime)?;
         let rect = info.extents.and_then(|extents| element_rect(escalar(extents, element.fator), window));
         let on_screen = rect.map(center).filter(|(x, y)| window.0 <= *x && *x < window.2 && window.1 <= *y && *y < window.3);
         if let Some((x, y)) = on_screen.filter(|_| (action.kind == ActionType::Invoke && !ITEMS.contains(&element.role.as_str())) || matches!(action.kind, ActionType::Select | ActionType::Toggle)) {
-            return self.mouse(&Action { kind: ActionType::Mouse, x: Some(x), y: Some(y), ..Default::default() });
+            return feito(self.mouse(&Action { kind: ActionType::Mouse, x: Some(x), y: Some(y), ..Default::default() }));
         }
         match action.kind {
-            ActionType::Invoke => self.do_action(&element.node, &info, INVOKE),
-            ActionType::Select | ActionType::Toggle => self.do_action(&element.node, &info, &[&["toggle"], INVOKE].concat()),
-            ActionType::Expand | ActionType::Collapse => self.do_action(&element.node, &info, &[&["expand or contract", action.kind.as_str(), "expand or collapse"], INVOKE].concat()),
+            ActionType::Invoke => feito(self.do_action(&element.node, &info, INVOKE)),
+            ActionType::Select | ActionType::Toggle => feito(self.do_action(&element.node, &info, &[&["toggle"], INVOKE].concat())),
+            ActionType::Expand | ActionType::Collapse => feito(self.do_action(&element.node, &info, &[&["expand or contract", action.kind.as_str(), "expand or collapse"], INVOKE].concat())),
             ActionType::Focus => {
-                if self.tree.focus(&element.node).map_err(tree_error)? { Ok(()) } else { Err(runtime("aplicativo recusou o foco")) }
+                if self.tree.focus(&element.node).map_err(tree_error)? { Ok(Delivery::DeliveredUnverified) } else { Err(runtime("aplicativo recusou o foco")) }
             }
             ActionType::SetValue => self.set_value(element, &info, action.value.as_deref()),
             ActionType::Scroll => {
@@ -386,7 +388,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                     _ => return Err(invalid("rolagem só para cima ou para baixo")),
                 };
                 let (x, y) = center(visivel);
-                self.mouse(&Action { kind: ActionType::Mouse, x: Some(x), y: Some(y), mode: Some(MouseMode::Scroll), delta: Some(delta), ..Default::default() })
+                feito(self.mouse(&Action { kind: ActionType::Mouse, x: Some(x), y: Some(y), mode: Some(MouseMode::Scroll), delta: Some(delta), ..Default::default() }))
             }
             ActionType::Activate | ActionType::Launch | ActionType::Keys | ActionType::Text | ActionType::Mouse | ActionType::Check | ActionType::Uncheck => {
                 Err(invalid(format!("tipo de ação desconhecido: {}", action.kind)))
@@ -468,7 +470,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
     fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
         self.validate_observation(observed).map_err(DesktopError::nao_entregue)?;
         self.observed_at = None;
-        self.agir(action).map(|()| Delivery::DeliveredUnverified)
+        self.agir(action)
     }
 
     fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
@@ -483,10 +485,10 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 }
 
 impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
-    fn agir(&mut self, action: &Action) -> Result<(), DesktopError> {
-        match action.kind {
+    fn agir(&mut self, action: &Action) -> Result<Delivery, DesktopError> {
+        let feito = match action.kind {
             ActionType::Activate => {
-                let window = action.target.as_ref().and_then(|t| self.windows.get(t)).ok_or_else(|| invalid("janela não pertence à observação"))?;
+                let window = action.target.as_ref().and_then(|t| self.windows.get(t)).ok_or_else(|| invalid("janela não pertence à observação").nao_entregue())?;
                 let endereco = format!("address:{}", hypr::string(window, "address").map_err(runtime)?);
                 hypr::dispatch(&self.commands, &format!("hl.dsp.focus({{ window = {} }})", entrada::lua_string(&endereco)), &format!("focuswindow {endereco}")).map_err(runtime)
             }
@@ -501,7 +503,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                 let names = action.keys.as_deref().ok_or_else(|| invalid("keys precisa conter de 1 a 8 teclas"))?;
                 entrada::evdev(names).map_err(invalid)?;
                 if let Some(target) = &action.target {
-                    let element = self.elements.get(target).ok_or_else(|| invalid("controle não pertence à observação"))?;
+                    let element = self.elements.get(target).ok_or_else(|| invalid("controle não pertence à observação").nao_entregue())?;
                     self.focus_field(element)?; std::thread::sleep(Duration::from_millis(150));
                 }
                 entrada::keys(&self.commands, names).map_err(runtime)
@@ -509,7 +511,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
             ActionType::Text => {
                 let mut colar = false;
                 if let Some(target) = &action.target {
-                    let element = self.elements.get(target).ok_or_else(|| invalid("controle não pertence à observação"))?;
+                    let element = self.elements.get(target).ok_or_else(|| invalid("controle não pertence à observação").nao_entregue())?;
                     self.focus_field(element)?; std::thread::sleep(Duration::from_millis(150));
                     // Only a field known not to be a password: clipboard history would keep it.
                     colar = self.tree.read(&element.node).is_ok_and(|i| i.role != "password text");
@@ -521,7 +523,8 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
             }
             ActionType::Mouse => self.mouse(action),
             ActionType::Check | ActionType::Uncheck => Err(invalid(format!("{} ainda não suportado", action.kind))),
-            ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle | ActionType::Expand | ActionType::Collapse | ActionType::Focus | ActionType::Scroll => self.element_action(action),
-        }
+            ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle | ActionType::Expand | ActionType::Collapse | ActionType::Focus | ActionType::Scroll => return self.element_action(action),
+        };
+        feito.map(|()| Delivery::DeliveredUnverified)
     }
 }

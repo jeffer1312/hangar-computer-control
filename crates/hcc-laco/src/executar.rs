@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hcc_protocolo::{Action, ActionType, Connector, Observation, Scope, Session, SessionError};
+use hcc_protocolo::{Action, ActionType, Connector, Delivery, Observation, Scope, Session, SessionError};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -13,7 +13,7 @@ use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use crate::barreiras::{Barreiras, aviso, escolhe_foco, literais_atendidos, sem_acao_pedida, sem_localizadores, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendencia, segurar_segredos, texto_sem_alvo_barrado};
-use crate::candidatos::{apps_do_objetivo, candidatos, descrever_acao, py_str, segredos, sem_app_aberto, texto_no_editavel};
+use crate::candidatos::{apps_do_objetivo, candidatos, descrever_acao, mesmo_alvo, py_str, segredos, sem_app_aberto, texto_no_editavel};
 use crate::descrever::{intencao, py_repr};
 use crate::estado::{AssinaturaTela, assinatura_tela, estado_compacto, padrao_segredos, sem_controles};
 use crate::geometria::{dentro, para_tela};
@@ -1069,8 +1069,24 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if ciclo == op.max_passos { break; }
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let rotulo = secretos.descricao(acao, &vista, false);
-            let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),
+            let mut retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone()),
                 async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
+            // Refused before it touched the app: the same control on a fresh look, once.
+            if matches!(retorno, Err(SessionError::NotDelivered(_))) {
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                let nova = controle.medir("observacao", Progresso::Observacao,
+                    async { observar(s).await.map_err(erro_sessao) }).await?;
+                if let Some(de_novo) = mesmo_alvo(acao, &vista, &nova) {
+                    candidato.acao = de_novo;
+                    vista = nova;
+                    atual = assinatura_tela(&vista);
+                    let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                    let (acao, id) = (&candidato.acao, &vista.observation_id);
+                    retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),
+                        async { Ok(s.act(id, acao).await) }).await?;
+                }
+            }
+            let acao = &candidato.acao;
             let falhou = match retorno {
                 Ok(ret) => {
                     if ret.ok {
@@ -1081,9 +1097,21 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     let clique = match (acao.kind, acao.mode, acao.x, acao.y) {
                         (ActionType::Mouse, Some(m), Some(x), Some(y)) => Some((m, x, y)), _ => None,
                     };
-                    recentes.push(Registro { action: nome.clone(), result: if ret.ok { "ok".into() } else { "{'ok': False}".into() },
+                    let result = match (ret.ok, ret.delivery) {
+                        (false, _) => "{'ok': False}",
+                        (true, Delivery::DeliveredVerified) => "ok (confirmado)",
+                        (true, _) => "ok",
+                    };
+                    recentes.push(Registro { action: nome.clone(), result: result.into(),
                         screen_changed: None, target_rect: alvo.and_then(|e| e.rect), clique, executada: true });
                     !ret.ok
+                }
+                // It may have run: the next look measures whether the screen changed, and nothing resends it.
+                Err(e @ SessionError::Timeout(_)) => {
+                    recentes.push(Registro { action: nome.clone(), result: secretos.texto(&format!("delivery unknown, check the screen: {e}")),
+                        screen_changed: None, target_rect: None, clique: None, executada: false });
+                    if !controle.cancel.is_cancelled() { reconectar(conector, sessao, controle).await?; }
+                    true
                 }
                 Err(e) => {
                     recentes.push(Registro { action: nome.clone(), result: secretos.texto(&format!("NOT executed: {e}")),

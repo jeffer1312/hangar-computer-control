@@ -15,7 +15,7 @@ use hcc_laco::jev::{JEV_MODEL, Jev, LOTE};
 use hcc_laco::llm::Llm;
 use hcc_laco::resultado::Resultado;
 use hcc_laco::tipos::{Escolha, Progresso};
-use hcc_protocolo::{Action, Observation, Rect, SessionError};
+use hcc_protocolo::{Action, Delivery, Observation, Rect, SessionError};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -1015,9 +1015,77 @@ async fn agent_timeout_reconnects_and_continues() {
     assert!(r.ok, "{}", r.resumo());
     assert_eq!(con.state.lock().unwrap().connects, 2);
     assert_eq!(con.state.lock().unwrap().closes, 2);
-    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["result"], "NOT executed: agente não respondeu");
+    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["result"], "delivery unknown, check the screen: agente não respondeu");
     assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["screenChanged"], false);
     assert!(r.tempos.iter().any(|t| t.starts_with("reconexao=")));
+}
+
+#[tokio::test]
+async fn timeout_measures_the_screen_change_and_never_resends() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    {
+        let mut s = con.state.lock().unwrap();
+        s.act_errors.push_back(SessionError::Timeout("agente não respondeu".into()));
+        s.advance_on_error = true;
+    }
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["screenChanged"], true);
+}
+
+/// The Nome field under a new id, as a fresh observation numbers it.
+fn renumbered(id: &str) -> Observation {
+    let mut obs = tree(id, "");
+    obs.elements[0].id = "e5".into();
+    obs.elements[1].id = "e6".into();
+    obs
+}
+
+#[tokio::test]
+async fn not_delivered_action_is_resent_once_on_the_same_control_under_its_new_id() {
+    let con = FakeConnector::new(vec![tree("o1", ""), renumbered("o2"), tree("o3", "Ana")]);
+    {
+        let mut s = con.state.lock().unwrap();
+        s.act_errors.push_back(SessionError::NotDelivered("RuntimeError: usuário ativo".into()));
+        s.advance_on_error = true;
+    }
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let acts = con.state.lock().unwrap().acts.clone();
+    assert_eq!(acts.len(), 2);
+    assert_eq!((acts[0].0.target.as_deref(), acts[0].1.as_str()), (Some("e0"), "o1"));
+    assert_eq!((acts[1].0.target.as_deref(), acts[1].1.as_str()), (Some("e5"), "o2"));
+    assert_eq!(acts[1].0.value, acts[0].0.value);
+    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["result"], "ok");
+}
+
+#[tokio::test]
+async fn not_delivered_is_not_resent_when_the_control_is_ambiguous() {
+    let mut dois = renumbered("o2");
+    dois.elements.push(dois.elements[0].clone());
+    dois.elements[2].id = "e7".into();
+    let con = FakeConnector::new(vec![tree("o1", ""), dois]);
+    {
+        let mut s = con.state.lock().unwrap();
+        s.act_errors.push_back(SessionError::NotDelivered("RuntimeError: usuário ativo".into()));
+        s.advance_on_error = true;
+    }
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    run(op, &con).await;
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["result"], "NOT executed: RuntimeError: usuário ativo");
+}
+
+#[tokio::test]
+async fn verified_delivery_reaches_jev_as_confirmed() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    con.state.lock().unwrap().act_deliveries.push_back(Delivery::DeliveredVerified);
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
+    run(op, &con).await;
+    assert_eq!(bodies(&server).await[1]["state"]["recentActions"][0]["result"], "ok (confirmado)");
 }
 
 #[tokio::test]
