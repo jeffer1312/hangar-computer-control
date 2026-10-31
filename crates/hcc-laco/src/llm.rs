@@ -55,7 +55,7 @@ fn be(b: &[u8]) -> u64 {
 }
 
 /// Width and height from IHDR (bytes 16-23), without decoding; None without the PNG signature.
-fn dimensoes(png: &[u8]) -> Option<(u64, u64)> {
+pub(crate) fn dimensoes(png: &[u8]) -> Option<(u64, u64)> {
     let parte = |a: usize, b: usize| be(png.get(a..b.min(png.len())).unwrap_or_default());
     png.starts_with(PNG).then(|| (parte(16, 20), parte(20, 24)))
 }

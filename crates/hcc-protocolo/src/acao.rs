@@ -36,6 +36,12 @@ pub enum InputMode {
 }
 
 impl ActionType {
+    /// Acts on one control: what accessibility can do without real input.
+    pub fn sobre_controle(self) -> bool {
+        matches!(self, Self::Invoke | Self::SetValue | Self::Select | Self::Toggle | Self::Check | Self::Uncheck
+            | Self::Expand | Self::Collapse | Self::Scroll)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Invoke => "invoke",

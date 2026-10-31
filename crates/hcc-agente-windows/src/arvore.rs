@@ -2,7 +2,7 @@
 
 use crate::regras::{self, runtime_err};
 use crate::{entrada, sessao_win};
-use hcc_protocolo::{DesktopError, Element, ElementAction, ErrorKind, Rect, RootSpec, Scope, Window};
+use hcc_protocolo::{DesktopError, Element, ElementAction, ErrorKind, Rect, RootSpec, Scope, Window, recusa};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use uiautomation::patterns::{UIExpandCollapsePattern, UIInvokePattern, UIPatternType, UIScrollPattern, UISelectionItemPattern, UITextPattern, UITogglePattern, UIValuePattern};
@@ -232,7 +232,7 @@ fn popups(foreground: HWND, pid: u32) -> Vec<isize> {
 pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError> {
     // A window read by id stays where it is: in front or behind others.
     let fg = match &scope.window {
-        Some(id) => sessao_win::hwnd_de(id).filter(|_| sessao_win::janela_existe(id)).ok_or_else(|| runtime_err("a janela fechou; observe novamente"))?,
+        Some(id) => sessao_win::hwnd_de(id).filter(|_| sessao_win::janela_existe(id)).ok_or_else(|| runtime_err(format!("{}; observe novamente", recusa::JANELA_FECHOU)))?,
         None => sessao_win::primeiro_plano(),
     };
     let raiz = ua.get_root_element().map_err(com)?;
@@ -247,6 +247,8 @@ pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError
     }
     let mut windows = Vec::new();
     let mut janelas = HashMap::new();
+    // Many windows share a process: its name is asked once.
+    let mut processos: HashMap<u32, String> = HashMap::new();
     for el in enumeradas {
         let hwnd = handle(&el)?;
         // A minimized window is offscreen; the one read by id stays, so its read comes back empty instead of failing.
@@ -260,14 +262,14 @@ pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError
             name: el.get_name().map_err(com)?,
             process_id,
             class_name: el.get_classname().map_err(com)?,
-            process: crate::sessao_win::nome_processo(process_id),
+            process: processos.entry(process_id).or_insert_with(|| crate::sessao_win::nome_processo(process_id)).clone(),
             rect: rect(&el)?,
         });
         janelas.insert(wid, Janela { hwnd, el });
     }
     let foreground = id_janela(fg);
     let ativa = janelas.get(&foreground).ok_or_else(|| {
-        runtime_err(if scope.window.is_some() { "a janela fechou; observe novamente" } else { "a janela ativa mudou durante a observação" })
+        runtime_err(if scope.window.is_some() { format!("{}; observe novamente", recusa::JANELA_FECHOU) } else { "a janela ativa mudou durante a observação".into() })
     })?;
     // Read limit, not an application limit: `truncated` says when it cut.
     // Each pending node with the index of its nearest ancestor that became an element, and its depth.
@@ -290,7 +292,7 @@ pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError
     }
     if let Some(spec) = &scope.root {
         let regiao = achar_regiao(ua, pendentes.drain(..).map(|(e, _, _)| e).collect(), &pedido, spec)?
-            .ok_or_else(|| regras::valor_err("região sumiu; observe a janela inteira"))?;
+            .ok_or_else(|| regras::valor_err(format!("{}; observe a janela inteira", recusa::REGIAO_SUMIU)))?;
         pendentes.push_back((regiao, None, 0));
     }
     let niveis = scope.skeleton.then_some(hcc_protocolo::ESQUELETO_NIVEIS);

@@ -176,12 +176,10 @@ pub mod regras {
     }
 
     pub fn caminho(tipo: hcc_protocolo::ActionType, modo: Option<hcc_protocolo::InputMode>) -> Caminho {
-        use hcc_protocolo::{ActionType as T, InputMode};
+        use hcc_protocolo::InputMode;
         match modo {
-            Some(InputMode::Background) => match tipo {
-                T::Invoke | T::SetValue | T::Select | T::Toggle | T::Check | T::Uncheck | T::Expand | T::Collapse | T::Scroll => Caminho::Padrao,
-                _ => Caminho::Recusa,
-            },
+            Some(InputMode::Background) if tipo.sobre_controle() => Caminho::Padrao,
+            Some(InputMode::Background) => Caminho::Recusa,
             _ => Caminho::Real,
         }
     }
@@ -398,7 +396,7 @@ pub mod regras {
 mod desktop {
     use crate::regras::{self, runtime_err, valor_err};
     use crate::{arvore, captura, entrada, sessao_win};
-    use hcc_protocolo::{Action, ActionType, Amount, Delivery, Desktop, DesktopError, Direction, InputMode, Observation, Scope, Screen};
+    use hcc_protocolo::{Action, ActionType, Amount, Delivery, Desktop, DesktopError, Direction, InputMode, Observation, Scope, Screen, recusa};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use uiautomation::UIAutomation;
@@ -620,11 +618,10 @@ mod desktop {
                     let (hz, vt) = regras::quantidade_scroll(action.direction.unwrap_or(Direction::Down), action.amount.unwrap_or(Amount::Small));
                     padrao(padrao(el.get_pattern::<UIScrollPattern>()).map_err(DesktopError::nao_entregue)?.scroll(quantidade(hz), quantidade(vt))).map(|()| pronto)
                 }
-                _ => Err(valor_err("precisa de entrada real").nao_entregue()),
+                _ => Err(valor_err(recusa::ENTRADA_REAL).nao_entregue()),
             }
         }
 
-        /// The user's window goes back in front unless the app opened a menu the next action needs.
         /// The drawn arrow glides to where the action lands: the control's center or the mouse point.
         fn mostrar_cursor(&mut self, action: &Action) {
             let ponto = match (action.x, action.y) {
@@ -642,6 +639,7 @@ mod desktop {
             }
         }
 
+        /// The user's window goes back in front unless the action opened a menu the next one needs.
         /// Whether it moved the focus (an Alt tap may have been sent).
         fn devolver_janela(&mut self, popups_antes: &[isize]) -> bool {
             let frente = sessao_win::primeiro_plano();
@@ -729,7 +727,7 @@ mod desktop {
             if action.input.is_none_or(|m| m == InputMode::Real) {
                 // Real input lands on whatever is in front: never on a window read behind others.
                 if self.por_id && frente != alvo {
-                    return Err(valor_err("a janela está atrás; use entrada polite").nao_entregue());
+                    return Err(valor_err(recusa::JANELA_ATRAS).nao_entregue());
                 }
                 let r = self.agir_real(action);
                 self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
@@ -737,18 +735,19 @@ mod desktop {
             }
             let caminho = regras::caminho(action.kind, action.input);
             if caminho == regras::Caminho::Recusa {
-                return Err(valor_err("precisa de entrada real").nao_entregue());
+                return Err(valor_err(recusa::ENTRADA_REAL).nao_entregue());
             }
             let (agora, ultima) = sessao_win::relogio_de_entrada();
             if !regras::ocioso(agora, ultima, self.entrada_propria) {
-                return Err(runtime_err("usuário ativo").nao_entregue());
+                return Err(runtime_err(recusa::USUARIO_ATIVO).nao_entregue());
             }
             // The window in front now is the user's unless it belongs to the app (its dialog or menu).
             if frente != alvo && !arvore::mesmo_processo(frente, alvo) {
                 self.janela_do_usuario = Some(frente);
             }
-            let mut popups_antes = arvore::popups_de(alvo);
-            if let Some(j) = action.target.as_deref().and_then(|t| self.janelas.get(t)).filter(|_| action.kind == ActionType::Activate) {
+            // Only with a window to give back are the app's menus worth listing.
+            let mut popups_antes = if self.janela_do_usuario.is_some() { arvore::popups_de(alvo) } else { vec![] };
+            if let Some(j) = action.target.as_deref().and_then(|t| self.janelas.get(t)).filter(|_| action.kind == ActionType::Activate && self.janela_do_usuario.is_some()) {
                 popups_antes.extend(arvore::popups_de(j.hwnd));
             }
             let feito = if caminho == regras::Caminho::Padrao {
@@ -760,8 +759,11 @@ mod desktop {
                 self.agir_real(action)
             };
             // Chromium brings its window up a moment after the accessibility call returns: look twice.
-            pausa(0.25);
-            let mut tocou = self.devolver_janela(&popups_antes);
+            let mut tocou = false;
+            if self.janela_do_usuario.is_some() {
+                pausa(0.25);
+                tocou = self.devolver_janela(&popups_antes);
+            }
             if tocou {
                 pausa(0.25);
                 if self.janela_do_usuario.is_none() && sessao_win::primeiro_plano() == alvo {
@@ -778,7 +780,7 @@ mod desktop {
 
         fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
             if let Some(id) = window {
-                let hwnd = sessao_win::hwnd_de(id).filter(|_| sessao_win::janela_existe(id)).ok_or_else(|| runtime_err("a janela fechou"))?;
+                let hwnd = sessao_win::hwnd_de(id).filter(|_| sessao_win::janela_existe(id)).ok_or_else(|| runtime_err(recusa::JANELA_FECHOU))?;
                 return captura::png_janela(hwnd);
             }
             let (w, h) = sessao_win::tela();

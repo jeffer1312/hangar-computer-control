@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hcc_protocolo::{Action, ActionType, Connector, Delivery, InputMode, Observation, RootSpec, Scope, Session, SessionError};
+use hcc_protocolo::{Action, ActionType, Connector, Delivery, InputMode, Observation, RootSpec, Scope, Session, SessionError, recusa};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -307,28 +307,24 @@ fn escolha(e: Escolha) -> String {
 fn percentual(p: f64) -> String { format!("{:.0}%", p * 100.0) }
 
 /// The window read by id closed (a dialog the action dismissed).
-fn fechou(e: &SessionError) -> bool { e.to_string().contains("a janela fechou") }
+fn fechou(e: &SessionError) -> bool { e.to_string().contains(recusa::JANELA_FECHOU) }
 
 /// `acao-<ciclo>.png`: the cycle's print with the action's target box and click point; `None` without a print
 /// or a place to mark. `janela`: the print is of that window only.
-fn print_da_acao(pasta: &Path, ciclo: u32, acao: &Action, vista: &Observation, janela: Option<&str>) -> Option<PathBuf> {
+fn print_da_acao(pasta: &Path, ciclo: u32, acao: &Action, vista: &Observation, janela: Option<&str>, print: Option<&[u8]>) -> Option<PathBuf> {
     let caixa = acao.target.as_ref().and_then(|id| vista.elements.iter().find(|e| &e.id == id)).and_then(|e| e.rect);
     let ponto = match (acao.x, acao.y) { (Some(x), Some(y)) => Some((x, y)), _ => caixa.map(crate::candidatos::centro) };
     ponto?;
-    let tela = std::fs::read(pasta.join(format!("tela-{ciclo}.png"))).ok()?;
-    let largura = f64::from(u32::from_be_bytes(tela.get(16..20)?.try_into().ok()?));
+    let lida;
+    let tela = match print { Some(p) => p, None => { lida = std::fs::read(pasta.join(format!("tela-{ciclo}.png"))).ok()?; &lida[..] } };
+    let largura = crate::llm::dimensoes(tela)?.0 as f64;
     let (origem, base) = match janela.and_then(|j| vista.windows.iter().find(|w| w.id == j)) {
         Some(w) => ((w.rect.0, w.rect.1), f64::from(w.rect.2 - w.rect.0)),
         None => ((0, 0), f64::from(vista.screen.width)),
     };
-    let marcado = crate::print::anotar(&tela, caixa, ponto, origem, largura / base.max(1.0)).ok()?;
+    let marcado = crate::print::anotar(tela, caixa, ponto, origem, largura / base.max(1.0)).ok()?;
     let destino = pasta.join(format!("acao-{ciclo}.png"));
     std::fs::write(&destino, marcado).ok().map(|()| destino)
-}
-
-/// The window itself, not its title: Explorer and browsers retitle it on every navigation.
-fn chave_janela(obs: &Observation) -> String {
-    obs.foreground.clone()
 }
 
 /// On a skeleton, a DRILL per named container with unread children; inside a region, WIDEN back to the skeleton.
@@ -428,7 +424,7 @@ async fn ver<S: Session>(op: &Opcoes, sessao: &mut S, controle: &mut Controle<'_
     let total = ajuda.acoes.len();
     // A print of one window: its pixels map to that window's place on the screen.
     let retangulo = janela.and_then(|j| obs.windows.iter().find(|w| w.id == j)).map(|w| w.rect);
-    let largura = png.get(16..20).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let largura = crate::llm::dimensoes(png).map_or(0, |(l, _)| u32::try_from(l).unwrap_or(0));
     let convertidas: Vec<Option<Action>> = ajuda.acoes.iter().map(|a| secretos.desmascarar(match retangulo {
         Some(j) => para_janela(a, j, largura, &op.texto),
         None => para_tela(a, &obs.screen, &op.texto),
@@ -848,7 +844,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 }
             }
             // The drilled region closed or re-rendered: back to the skeleton.
-            Err(e) if lido_como.root.is_some() && e.to_string().contains("região sumiu") => {
+            Err(e) if lido_como.root.is_some() && e.to_string().contains(recusa::REGIAO_SUMIU) => {
                 regiao = None;
                 lido_como = Scope { skeleton: true, ..base.clone() };
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
@@ -873,7 +869,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         abriu = abriu.saturating_sub(1);
         // Another window or a dialog: the partial read no longer fits, read it whole.
         let completa = lido_como == base
-            || Some(chave_janela(&obs)) != esqueleto || crate::estado::dialogo_aberto(&obs).is_some();
+            // Keyed by the window itself, not its title: Explorer and browsers retitle it on every navigation.
+            || Some(&obs.foreground) != esqueleto.as_ref() || crate::estado::dialogo_aberto(&obs).is_some();
         if completa {
             if lido_como != base {
                 (esqueleto, regiao) = (None, None);
@@ -881,7 +878,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 obs = controle.medir("observacao", Progresso::Observacao,
                     async { observar(s, &base).await.map_err(erro_sessao) }).await?;
             }
-            if obs.truncated && crate::estado::dialogo_aberto(&obs).is_none() { esqueleto = Some(chave_janela(&obs)); }
+            if obs.truncated && crate::estado::dialogo_aberto(&obs).is_none() { esqueleto = Some(obs.foreground.clone()); }
         }
         let lido_como = if completa { base.clone() } else { lido_como };
         let atual = assinatura_tela(&obs);
@@ -1227,18 +1224,15 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if op.so_decidir { r.motivo = "decidido, sem agir".into(); return Ok(()); }
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let rotulo = secretos.descricao(acao, &vista, false);
-            let marcado = print_da_acao(&pasta, ciclo, acao, &vista, lido_como.window.as_deref());
+            let marcado = print_da_acao(&pasta, ciclo, acao, &vista, lido_como.window.as_deref(), print.as_deref());
             let mut retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone(), marcado),
                 async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
             // Refused before it touched the app, on a fresh look of the same screen: with real input when only that
             // reaches it, after the user stops (up to a minute), or once more for any other refusal.
             let (mut reenviou, mut subiu, desde) = (false, false, Instant::now());
             while let Err(SessionError::NotDelivered(motivo)) = &retorno {
-                let ativo = motivo.contains("usuário ativo");
-                if (motivo.contains("precisa de entrada real") || motivo.contains("use entrada polite")) && !subiu {
-                    subiu = true;
-                    candidato.acao.input = Some(InputMode::Polite);
-                } else if motivo.contains("valor digitado não confirmado") && !subiu {
+                let ativo = motivo.contains(recusa::USUARIO_ATIVO);
+                if [recusa::ENTRADA_REAL, recusa::JANELA_ATRAS, recusa::VALOR_NAO_CONFIRMADO].iter().any(|r| motivo.contains(r)) && !subiu {
                     subiu = true;
                     candidato.acao.input = Some(InputMode::Polite);
                 } else if ativo && desde.elapsed() < USUARIO_ATIVO {
@@ -1267,9 +1261,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let acao = &candidato.acao;
             if let Some(u) = r.ultima.as_mut().filter(|u| u.entrega.is_none()) {
                 u.entrega = Some(match &retorno {
-                    Ok(ret) => serde_json::to_value(ret.delivery).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default(),
-                    Err(SessionError::NotDelivered(_)) => "not_delivered".into(),
-                    Err(_) => "unknown".into(),
+                    Ok(ret) => ret.delivery,
+                    Err(SessionError::NotDelivered(_)) => Delivery::NotDelivered,
+                    Err(_) => Delivery::Unknown,
                 });
             }
             let registrados = recentes.len();

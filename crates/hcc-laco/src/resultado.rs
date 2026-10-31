@@ -31,7 +31,7 @@ pub struct UmPasso {
     pub confianca: f64,
     pub segundo: Option<(String, f64)>,
     pub risco: f64,
-    pub entrega: Option<String>,
+    pub entrega: Option<hcc_protocolo::Delivery>,
     /// What happened to the action, as recentActions shows it ("NOT executed: … usuário ativo").
     pub resultado: Option<String>,
     pub tela_mudou: Option<bool>,

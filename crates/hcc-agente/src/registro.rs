@@ -45,7 +45,7 @@ impl Registro {
         }
         match &atual.janela {
             Some(janela) if !d.has_window(janela)? => {
-                return Err(DesktopError::new(ErrorKind::RuntimeError, "a janela fechou; observe novamente antes de agir"));
+                return Err(DesktopError::new(ErrorKind::RuntimeError, format!("{}; observe novamente antes de agir", hcc_protocolo::recusa::JANELA_FECHOU)));
             }
             None if d.foreground()? != atual.observacao.foreground => {
                 return Err(DesktopError::new(ErrorKind::RuntimeError, "o foco mudou; observe novamente antes de agir"));

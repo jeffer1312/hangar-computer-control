@@ -8,7 +8,7 @@ pub mod wayland;
 
 use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, escalar, role_name};
 use comandos::{Comandos, ComandosSistema};
-use hcc_protocolo::{Action, ActionType, Button, Delivery, Desktop, DesktopError, ErrorKind, InputMode, MouseMode, Observation, Rect, Scope, Screen, Window, dividir_comando};
+use hcc_protocolo::{Action, ActionType, Button, Delivery, Desktop, DesktopError, ErrorKind, InputMode, MouseMode, Observation, Rect, Scope, Screen, Window, dividir_comando, recusa};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
@@ -258,18 +258,24 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         if self.observed_at.is_none_or(|at| at.elapsed() > Duration::from_secs(120)) || observed.foreground != self.foreground {
             return Err(runtime("observação expirada; observe novamente"));
         }
-        if self.por_id {
-            if !self.has_window(&self.foreground.clone())? { return Err(runtime("a janela fechou; observe novamente antes de agir")); }
-        } else if self.foreground()? != self.foreground { return Err(runtime("o foco mudou; observe novamente antes de agir")); }
+        // A window read by id may stay behind; the runtime's Registro already checked it still exists.
+        if !self.por_id && self.foreground()? != self.foreground { return Err(runtime("o foco mudou; observe novamente antes de agir")); }
         Ok(())
     }
 
     /// The Hyprland client of a `Window.id`.
     fn cliente(&self, id: &str) -> Result<Value, DesktopError> {
-        let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
-        clients.as_array().and_then(|cs| cs.iter().find(|c| c["address"].as_str().is_some_and(|a| format!("w{a}") == id)).cloned())
-            .ok_or_else(|| runtime("a janela fechou; observe novamente"))
+        cliente_em(&hypr::query(&self.commands, "clients").map_err(runtime)?, id)
     }
+}
+
+/// The client of a `Window.id` in a `hyprctl clients` answer.
+fn cliente_em(clients: &Value, id: &str) -> Result<Value, DesktopError> {
+    clients.as_array().and_then(|cs| cs.iter().find(|c| c["address"].as_str().is_some_and(|a| format!("w{a}") == id)).cloned())
+        .ok_or_else(|| runtime(format!("{}; observe novamente", recusa::JANELA_FECHOU)))
+}
+
+impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
 
     /// The menus, popups and tooltips of the client's app that are showing, as `role:name`.
     fn popups_de(&self, client: &Value) -> Vec<String> {
@@ -556,14 +562,14 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         self.available()?;
         self.observed_at = None; self.elements.clear(); self.windows.clear();
         // A window read by id stays where it is: in front or behind others.
-        let (active, area, monitor) = match &scope.window { Some(id) => self.current_de(self.cliente(id)?)?, None => self.current()? };
+        let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
+        let (active, area, monitor) = match &scope.window { Some(id) => self.current_de(cliente_em(&clients, id)?)?, None => self.current()? };
         self.por_id = scope.window.is_some();
         let escala = monitor["scale"].as_f64().filter(|s| *s > 0.0).unwrap_or_else(|| {
             // Without it, web content on a scaled monitor keeps physical pixels and clicks land off.
             ignorado("observe.escala", &format!("monitor sem escala válida: {}", monitor["scale"]));
             1.0
         });
-        let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
         let mut windows = hypr::windows_from(&clients, (area.0, area.1)).map_err(runtime)?;
         for client in clients.as_array().ok_or_else(|| runtime("hyprctl retornou clients inválido"))? {
             if client["mapped"].as_bool().unwrap_or(false) && !client["hidden"].as_bool().unwrap_or(false) {
@@ -577,7 +583,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
             let window = windows.iter().find(|w| w.id == self.foreground).ok_or_else(|| runtime("a janela ativa mudou durante a observação"))?;
             let roots = self.roots(&active)?;
             let roots = match &scope.root {
-                Some(spec) => vec![arvore::achar_regiao(&self.tree, roots, window.rect, escala, spec).ok_or_else(|| invalid("região sumiu; observe a janela inteira"))?],
+                Some(spec) => vec![arvore::achar_regiao(&self.tree, roots, window.rect, escala, spec).ok_or_else(|| invalid(format!("{}; observe a janela inteira", recusa::REGIAO_SUMIU)))?],
                 None => roots.into_iter().map(|n| (n, 1.0)).collect(),
             };
             let niveis = scope.skeleton.then_some(hcc_protocolo::ESQUELETO_NIVEIS);
@@ -603,24 +609,25 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         let frente = foreground_id(&ativa);
         let Some(modo) = action.input.filter(|m| *m != InputMode::Real) else {
             // Real input lands on whatever is in front: never on a window read behind others.
-            if self.por_id && frente != observed.foreground { return Err(invalid("a janela está atrás; use entrada polite").nao_entregue()); }
+            if self.por_id && frente != observed.foreground { return Err(invalid(recusa::JANELA_ATRAS).nao_entregue()); }
             self.observed_at = None;
             return self.agir(action);
         };
         let padrao = modo == InputMode::Background;
-        if padrao && !matches!(action.kind, ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle
-            | ActionType::Check | ActionType::Uncheck | ActionType::Expand | ActionType::Collapse) {
-            return Err(invalid("precisa de entrada real").nao_entregue());
+        // Scrolling here is the wheel: real input.
+        if padrao && (!action.kind.sobre_controle() || action.kind == ActionType::Scroll) {
+            return Err(invalid(recusa::ENTRADA_REAL).nao_entregue());
         }
-        if !self.parado.load(Ordering::Relaxed) { return Err(runtime("usuário ativo").nao_entregue()); }
+        if !self.parado.load(Ordering::Relaxed) { return Err(runtime(recusa::USUARIO_ATIVO).nao_entregue()); }
         self.observed_at = None;
         // The window the action is aimed at: the one activated, else the one read. The window in front now is the
         // user's unless it is that one or belongs to the same app (its dialog or menu).
         let mirada = if action.kind == ActionType::Activate { action.target.clone().unwrap_or_default() } else { observed.foreground.clone() };
         let do_app = self.windows.get(&mirada).is_some_and(|c| c["pid"] == ativa["pid"]);
         if frente != mirada && !do_app { self.janela_do_usuario = Some(frente.clone()); }
-        let mut popups_antes = self.windows.get(&observed.foreground).map(|c| self.popups_de(c)).unwrap_or_default();
-        if action.kind == ActionType::Activate && let Some(c) = action.target.as_ref().and_then(|t| self.windows.get(t)) {
+        // Only with a window to give back are the app's menus worth listing (each costs AT-SPI calls).
+        let mut popups_antes = self.windows.get(&observed.foreground).filter(|_| self.janela_do_usuario.is_some()).map(|c| self.popups_de(c)).unwrap_or_default();
+        if action.kind == ActionType::Activate && self.janela_do_usuario.is_some() && let Some(c) = action.target.as_ref().and_then(|t| self.windows.get(t)) {
             popups_antes.extend(self.popups_de(c));
         }
         let feito = if padrao { self.agir_padrao(action) } else {
@@ -680,11 +687,11 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                 let lido = self.tree.text(&element.node).map_err(tree_error)?;
                 if lido.replace("\r\n", "\n").trim() != valor.replace("\r\n", "\n").trim() {
                     // The field holds something else: typing it for real replaces it, so a redo is safe.
-                    return Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&lido.chars().take(80).collect::<String>()))).nao_entregue());
+                    return Err(runtime(format!("{}; campo ficou com {}", recusa::VALOR_NAO_CONFIRMADO, python_repr(&lido.chars().take(80).collect::<String>()))).nao_entregue());
                 }
                 Ok(Delivery::DeliveredVerified)
             }
-            _ => Err(invalid("precisa de entrada real").nao_entregue()),
+            _ => Err(invalid(recusa::ENTRADA_REAL).nao_entregue()),
         }
     }
 

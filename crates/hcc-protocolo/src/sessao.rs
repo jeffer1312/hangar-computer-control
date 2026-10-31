@@ -7,6 +7,17 @@ use std::fmt;
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
+/// Refusal texts the agents write and the loop reads to decide a retry: kept in one place, so rewording one
+/// cannot silently break the retry.
+pub mod recusa {
+    pub const USUARIO_ATIVO: &str = "usuário ativo";
+    pub const ENTRADA_REAL: &str = "precisa de entrada real";
+    pub const JANELA_ATRAS: &str = "a janela está atrás; use entrada polite";
+    pub const JANELA_FECHOU: &str = "a janela fechou";
+    pub const VALOR_NAO_CONFIRMADO: &str = "valor digitado não confirmado";
+    pub const REGIAO_SUMIU: &str = "região sumiu";
+}
+
 /// Python exception class an error travels as (`"<Kind>: <msg>"` on the wire).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {

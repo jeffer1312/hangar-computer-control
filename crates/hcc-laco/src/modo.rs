@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use hcc_protocolo::{Action, ActionType, InputMode, Observation};
+use hcc_protocolo::{Action, InputMode, Observation};
 use serde::{Deserialize, Serialize};
 
 /// In the scripts folder; one line per app: `{"app.exe": ["check:CheckBox"]}`.
@@ -36,7 +36,7 @@ impl Aprendido {
     }
 
     pub fn gravar(&self, pasta: &Path) -> Result<(), String> {
-        let texto = serde_json::to_string_pretty(&Aprendido { versao: 1, apps: self.apps.clone() }).map_err(|e| e.to_string())?;
+        let texto = serde_json::to_string_pretty(&serde_json::json!({"versao": 1, "apps": &self.apps})).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(pasta).and_then(|()| std::fs::write(pasta.join(ARQUIVO), texto)).map_err(|e| format!("{}: {e}", pasta.display()))
     }
 
@@ -55,7 +55,5 @@ impl Aprendido {
 /// app showed it does not work there; everything else needs real input and waits for the user to be idle.
 pub fn modo_entrada(acao: &Action, obs: &Observation, aprendido: &Aprendido, ver: bool) -> Option<InputMode> {
     if ver { return None; }
-    let de_controle = matches!(acao.kind, ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle
-        | ActionType::Check | ActionType::Uncheck | ActionType::Expand | ActionType::Collapse | ActionType::Scroll);
-    Some(if de_controle && acao.target.is_some() && !aprendido.precisa(obs, acao) { InputMode::Background } else { InputMode::Polite })
+    Some(if acao.kind.sobre_controle() && acao.target.is_some() && !aprendido.precisa(obs, acao) { InputMode::Background } else { InputMode::Polite })
 }

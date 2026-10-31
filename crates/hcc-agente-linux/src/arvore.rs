@@ -337,8 +337,8 @@ pub fn walk_ate<T: Arvore>(tree: &T, roots: Vec<(T::Node, f64)>, window: Rect, e
     let mut pending: VecDeque<Pendente<T::Node>> = roots.into_iter().map(|(n, f)| (n, f, None, None, 0)).collect();
     let mut esqueleto_cortou = false;
     let (mut controls, mut nodes, mut visited): (Vec<Element>, _, _) = (vec![], vec![], 0);
-    let nao_lido = |controls: &mut Vec<Element>, ancestral: Option<usize>| {
-        if let Some(c) = ancestral.and_then(|i| controls.get_mut(i)) { *c.unread.get_or_insert(0) += 1; }
+    let nao_lido = |controls: &mut Vec<Element>, ancestral: Option<usize>, n: usize| {
+        if let Some(c) = ancestral.and_then(|i| controls.get_mut(i)).filter(|_| n > 0) { *c.unread.get_or_insert(0) += u32::try_from(n).unwrap_or(u32::MAX); }
     };
     let start = Instant::now();
     while !pending.is_empty() && visited < limit && start.elapsed() < budget {
@@ -349,7 +349,7 @@ pub fn walk_ate<T: Arvore>(tree: &T, roots: Vec<(T::Node, f64)>, window: Rect, e
             Err(error) => {
                 crate::ignorado("walk.read", &error);
                 // A node that closed is gone; one that failed to answer is content the loop did not see.
-                if !matches!(error, TreeError::Vanished(_)) { nao_lido(&mut controls, ancestral); }
+                if !matches!(error, TreeError::Vanished(_)) { nao_lido(&mut controls, ancestral, 1); }
                 continue;
             }
         };
@@ -375,13 +375,13 @@ pub fn walk_ate<T: Arvore>(tree: &T, roots: Vec<(T::Node, f64)>, window: Rect, e
         }
         if niveis.is_some_and(|n| nivel >= n) {
             esqueleto_cortou |= !filhos.is_empty();
-            for _ in &filhos { nao_lido(&mut controls, ancestral_dos_filhos); }
+            nao_lido(&mut controls, ancestral_dos_filhos, filhos.len());
             continue;
         }
         pending.extend(filhos.into_iter().map(|c| (c, fator, bruto.or(pai), ancestral_dos_filhos, nivel + 1)));
     }
     let cortado = !pending.is_empty() || esqueleto_cortou;
-    for (_, _, _, ancestral, _) in pending { nao_lido(&mut controls, ancestral); }
+    for (_, _, _, ancestral, _) in pending { nao_lido(&mut controls, ancestral, 1); }
     Ok((controls, nodes, cortado))
 }
 

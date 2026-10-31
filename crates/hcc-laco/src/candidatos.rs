@@ -97,11 +97,9 @@ pub fn mesmo_alvo(acao: &Action, antes: &Observation, depois: &Observation) -> O
         return depois.windows.iter().any(|w| &w.id == id).then(|| acao.clone());
     }
     let alvo = antes.elements.iter().find(|e| &e.id == id).filter(|e| !e.name.trim().is_empty())?;
-    let iguais = |o: &Observation| o.elements.iter().filter(|e| e.role == alvo.role && e.name == alvo.name).cloned().collect::<Vec<_>>();
-    match (iguais(antes).len(), iguais(depois).as_slice()) {
-        (1, [novo]) => Some(Action { target: Some(novo.id.clone()), ..acao.clone() }),
-        _ => None,
-    }
+    let iguais = |o: &Observation| o.elements.iter().filter(|e| e.role == alvo.role && e.name == alvo.name).count();
+    let novo = depois.elements.iter().find(|e| e.role == alvo.role && e.name == alvo.name)?;
+    (iguais(antes) == 1 && iguais(depois) == 1).then(|| Action { target: Some(novo.id.clone()), ..acao.clone() })
 }
 
 pub fn centro(r: Rect) -> (i32, i32) {

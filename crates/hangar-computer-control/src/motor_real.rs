@@ -12,6 +12,7 @@ use hcc_protocolo::{Connector, Session};
 use tokio_util::sync::CancellationToken;
 
 use crate::motor::{Futuro, Motor, PedidoObjetivo, imagem, rotulo};
+use hcc_protocolo::Delivery;
 
 pub struct MotorReal;
 
@@ -97,9 +98,9 @@ async fn consultar(config: Option<PathBuf>, cancel: CancellationToken) -> String
 fn um_passo_json(r: &hcc_laco::resultado::Resultado) -> String {
     let u = r.ultima.clone().unwrap_or_default();
     // A timeout may have acted: "incerto" tells the caller not to simply try again.
-    let decisao = match u.entrega.as_deref() {
-        Some(e) if e.starts_with("delivered") => "agiu",
-        Some("unknown") => "incerto",
+    let decisao = match u.entrega {
+        Some(Delivery::DeliveredVerified | Delivery::DeliveredUnverified) => "agiu",
+        Some(Delivery::Unknown) => "incerto",
         _ => "parou",
     };
     // Why it stopped: the action's own result when it was tried, the run's reason otherwise.

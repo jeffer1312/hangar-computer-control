@@ -2959,7 +2959,7 @@ async fn one_step_reports_the_pick_its_runner_up_and_what_happened() {
     let u = r.ultima.clone().expect("decisão");
     assert_eq!(u.acao, "set_value Edit 'Nome' = 'Ana'");
     assert!((u.confianca - 0.9).abs() < 1e-6, "{}", u.confianca);
-    assert_eq!((u.entrega.as_deref(), u.tela_mudou), (Some("delivered_unverified"), Some(true)));
+    assert_eq!((u.entrega, u.tela_mudou), (Some(Delivery::DeliveredUnverified), Some(true)));
     assert_eq!(con.state.lock().unwrap().acts.len(), 1);
 }
 
