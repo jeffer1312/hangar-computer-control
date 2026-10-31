@@ -334,10 +334,37 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
 
     fn paste(&self, value: &str) -> Result<(), DesktopError> {
         if !self.commands.exists("wl-copy") { return Err(runtime("wl-copy não instalado (pacote wl-clipboard); texto com símbolos não pode ser colado")); }
+        let anterior = self.area_de_transferencia();
         // wl-copy forks a server that keeps stderr open: through a pipe, the call would wait for the next copy.
         self.commands.run(&["sh", "-c", "exec wl-copy --sensitive 2>/dev/null"], Some(value.as_bytes())).map_err(runtime)?;
-        self.commands.run(&["wtype", "-M", "ctrl", "v", "-m", "ctrl"], None).map_err(runtime)?;
-        Ok(())
+        let colado = self.commands.run(&["wtype", "-M", "ctrl", "v", "-m", "ctrl"], None).map_err(runtime);
+        // The app fetches the pasted text after Ctrl+V: replacing it at once could paste the old content.
+        std::thread::sleep(Duration::from_millis(300));
+        match anterior {
+            Some(Some((tipo, bytes))) => {
+                if let Err(e) = self.commands.run(&["sh", "-c", "exec wl-copy --sensitive -t \"$0\" 2>/dev/null", &tipo], Some(&bytes)) { ignorado("paste.devolver", &e); }
+            }
+            Some(None) => { if let Err(e) = self.commands.run(&["wl-copy", "--clear"], None) { ignorado("paste.limpar", &e); } }
+            None => {}
+        }
+        colado.map(|_| ())
+    }
+
+    /// What the user had copied: `Some(None)` when it was empty, `None` when it cannot be read back (left as pasted).
+    /// Plain text first: it is what most copies are and what every app reads back.
+    fn area_de_transferencia(&self) -> Option<Option<(String, Vec<u8>)>> {
+        if !self.commands.exists("wl-paste") { return None; }
+        let tipos = match self.commands.run(&["wl-paste", "--list-types"], None) {
+            Ok(t) => String::from_utf8_lossy(&t).lines().map(str::to_owned).collect::<Vec<_>>(),
+            Err(e) if e.starts_with("wl-paste falhou (1)") => return Some(None),
+            Err(e) => { ignorado("paste.guardar", &e); return None; }
+        };
+        let tipo = tipos.iter().find(|t| *t == "text/plain;charset=utf-8").or_else(|| tipos.iter().find(|t| t.starts_with("text/"))).or(tipos.first())?.clone();
+        match self.commands.run(&["wl-paste", "-n", "-t", &tipo], None) {
+            Ok(bytes) if bytes.len() <= 10 * 1024 * 1024 => Some(Some((tipo, bytes))),
+            Ok(_) => { ignorado("paste.guardar", &"conteúdo maior que 10 MB"); None }
+            Err(e) => { ignorado("paste.guardar", &e); None }
+        }
     }
 
     /// The visible part of the last observed dialog over `area` (the walk goes outside in, so the last is the topmost).
