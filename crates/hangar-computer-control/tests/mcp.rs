@@ -299,6 +299,11 @@ fn objective_inputs_and_defaults_reach_motor() {
     );
     assert!(texto(&r).contains("max_passos=3; dados={\"nome\":\"Zé\"}; limite=1.5s;"), "{r}");
     assert!(texto(&r).ends_with("; refazer=true; ver=true"), "{r}");
+    let r = s.chamar(8, "act", json!({"intencao": "clicar em Salvar", "executar": false}), None);
+    assert!(texto(&r).contains("texto=clicar em Salvar; max_passos=1;"), "{r}");
+    assert!(texto(&r).ends_with("; passo_unico=decidir"), "{r}");
+    let r = s.chamar(9, "act", json!({"intencao": "clicar em Salvar"}), None);
+    assert!(texto(&r).ends_with("; passo_unico=agir"), "{r}");
     let r = s.chamar(5, "ver_tela", json!({}), None);
     assert_eq!(texto(&r), format!("{}; 0.00s", amb.alvo("vm-a-agent.json").display()));
 }

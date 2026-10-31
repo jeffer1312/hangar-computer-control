@@ -33,7 +33,7 @@ async fn setup(answers: Vec<Answer>) -> (Opcoes, MockServer) {
         dados: json!({"nome":"Ana"}).as_object().unwrap().clone(), limite: seconds(240), config: Some(config),
         jev: Some(Jev::new(format!("{}/jev", server.uri()), "fake-key".into(), JEV_MODEL.into())),
         llm: Llm::new(format!("{}/llm", server.uri()), "fake-model".into(), None, Some("fake-key".into())),
-        roteiros: None, refazer: false, ver: false,
+        roteiros: None, refazer: false, ver: false, so_decidir: false,
     };
     (op, server)
 }
@@ -1516,7 +1516,7 @@ async fn oversized_secret_mask_fails_closed() {
 fn summary_keeps_python_line_order() {
     let r = Resultado { ok: true, motivo: "pronto".into(), passos: vec!["1. ação [90%]".into()],
         tempos: vec!["conexao=0.01s".into(), "total=1.00s".into()],
-        captura: Some(PathBuf::from("/registro/tela.png")), registro: Some(PathBuf::from("/registro")), roteiro: None };
+        captura: Some(PathBuf::from("/registro/tela.png")), registro: Some(PathBuf::from("/registro")), roteiro: None, ultima: None };
     assert_eq!(r.resumo(), "concluído: pronto\n1. ação [90%]\ntempos: conexao=0.01s; total=1.00s\ncaptura: /registro/tela.png\nregistro: /registro");
 }
 
@@ -2948,4 +2948,28 @@ async fn each_action_leaves_its_marked_print_and_progress_points_to_it() {
     let imagens = imagens.lock().unwrap();
     assert_eq!(imagens.len(), 1, "{imagens:?}");
     assert!(imagens[0].ends_with("acao-0.png") && imagens[0].exists(), "{imagens:?}");
+}
+
+#[tokio::test]
+async fn one_step_reports_the_pick_its_runner_up_and_what_happened() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op, _server) = setup(vec![select("set_value"), done()]).await;
+    op.max_passos = 1;
+    let r = run(op, &con).await;
+    let u = r.ultima.clone().expect("decisão");
+    assert_eq!(u.acao, "set_value Edit 'Nome' = 'Ana'");
+    assert!((u.confianca - 0.9).abs() < 1e-6, "{}", u.confianca);
+    assert_eq!((u.entrega.as_deref(), u.tela_mudou), (Some("delivered_unverified"), Some(true)));
+    assert_eq!(con.state.lock().unwrap().acts.len(), 1);
+}
+
+#[tokio::test]
+async fn one_step_without_executing_decides_and_touches_nothing() {
+    let con = FakeConnector::new(vec![tree("o1", "")]);
+    let (mut op, _server) = setup(vec![select("set_value")]).await;
+    op.so_decidir = true;
+    let r = run(op, &con).await;
+    let u = r.ultima.clone().unwrap_or_else(|| panic!("decisão: {}", r.resumo()));
+    assert_eq!((u.acao.as_str(), u.entrega), ("set_value Edit 'Nome' = 'Ana'", None));
+    assert!(con.state.lock().unwrap().acts.is_empty());
 }

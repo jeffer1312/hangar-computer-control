@@ -24,6 +24,8 @@ use crate::alvos;
 use crate::motor::{Motor, PedidoObjetivo};
 use crate::progresso;
 
+const DESC_ACT: &str = "Faz um passo só no desktop e diz o que escolheu.\n\n    `intencao` descreve o passo (\"clicar em Salvar\"). O Jev escolhe o controle e o\n    agente age, como um passo do `objetivo`, em segundo plano. A resposta é um JSON com\n    a ação, a confiança, o segundo colocado, o risco, a entrega e se a tela mudou.\n    executar=false só decide, sem agir. Ação arriscada não autorizada não é feita.";
+
 const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    Segue até concluir, até um impedimento real ou até ficar sem progresso (ciclos\n    sem tela nova). limite_segundos e max_passos são tetos opcionais: só passe se\n    quiser cortar antes.\n\n    Objetivo concluído vira roteiro: a mesma frase, com as mesmas chaves em `dados`,\n    no mesmo alvo repete os passos sem consultar o Jev a cada um e volta ao Jev se a\n    tela divergir. refazer=true ignora o roteiro gravado.\n\n    Por padrão age em segundo plano: lê a janela do app mesmo atrás de outras, espera\n    você parar de mexer e devolve a sua janela. ver=true traz a janela para a frente e\n    mostra o cursor indo até cada controle.";
 const DESC_VER_TELA: &str = "Captura a tela do desktop e devolve o caminho do arquivo PNG.\n\n    Para quando o `objetivo` parou e você precisa olhar o que há na tela.\n    Cite o caminho devolvido na sua resposta para que o usuário veja a imagem.";
 const DESC_ESTADO: &str = "Diz se o desktop está acessível e em qual resolução.";
@@ -78,6 +80,21 @@ fn ferramentas() -> Vec<Tool> {
                 "required": ["texto"], "type": "object", "title": "objetivoArguments"
             }),
         ),
+        ferramenta(
+            "act",
+            format!("{DESC_ACT}{sufixo}"),
+            json!({
+                "properties": {
+                    "intencao": {"title": "Intencao", "type": "string"},
+                    "dados": {"anyOf": [{"additionalProperties": true, "type": "object"},
+                        {"type": "null"}], "default": null, "title": "Dados"},
+                    "executar": {"default": true, "title": "Executar", "type": "boolean"},
+                    "ver": {"default": false, "title": "Ver", "type": "boolean"},
+                    "alvo": alvo_schema()
+                },
+                "required": ["intencao"], "type": "object", "title": "actArguments"
+            }),
+        ),
         ferramenta("ver_tela", format!("{DESC_VER_TELA}{sufixo}"), so_alvo("ver_tela")),
         ferramenta("estado", format!("{DESC_ESTADO}{sufixo}"), so_alvo("estado")),
     ]
@@ -107,6 +124,23 @@ struct ArgsObjetivo {
     ver: bool,
     #[serde(default)]
     alvo: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ArgsAct {
+    intencao: String,
+    #[serde(default)]
+    dados: Option<Map<String, Value>>,
+    #[serde(default = "sim")]
+    executar: bool,
+    #[serde(default)]
+    ver: bool,
+    #[serde(default)]
+    alvo: Option<String>,
+}
+
+fn sim() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -177,7 +211,8 @@ impl Servidor {
         }
     }
 
-    async fn objetivo(&self, a: ArgsObjetivo, ctx: RequestContext<RoleServer>) -> CallToolResult {
+    /// `passo_unico`: the `act` tool, `Some(executar)`.
+    async fn objetivo(&self, a: ArgsObjetivo, passo_unico: Option<bool>, ctx: RequestContext<RoleServer>) -> CallToolResult {
         let config = match alvos::config_do(a.alvo.as_deref()) {
             Ok(c) => c,
             Err(e) => return erro(e),
@@ -196,6 +231,7 @@ impl Servidor {
             config,
             refazer: a.refazer,
             ver: a.ver,
+            passo_unico,
         };
 
         let cancel = self.cancelamento(ctx.ct.clone());
@@ -272,7 +308,16 @@ impl ServerHandler for Servidor {
         let invalido = |e: serde_json::Error| erro(format!("argumentos inválidos para {}: {e}", request.name));
         let r = match request.name.as_ref() {
             "objetivo" => match serde_json::from_value::<ArgsObjetivo>(args) {
-                Ok(a) => self.objetivo(a, context).await,
+                Ok(a) => self.objetivo(a, None, context).await,
+                Err(e) => invalido(e),
+            },
+            "act" => match serde_json::from_value::<ArgsAct>(args) {
+                // One step of an objective: no script replay, a short ceiling.
+                Ok(a) => {
+                    let como_objetivo = ArgsObjetivo { texto: a.intencao, max_passos: 1, dados: a.dados, limite_segundos: 600.0,
+                        refazer: true, ver: a.ver, alvo: a.alvo };
+                    self.objetivo(como_objetivo, Some(a.executar), context).await
+                }
                 Err(e) => invalido(e),
             },
             nome @ ("ver_tela" | "estado") => match serde_json::from_value::<ArgsAlvo>(args) {

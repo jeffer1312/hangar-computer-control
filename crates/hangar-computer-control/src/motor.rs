@@ -20,6 +20,8 @@ pub struct PedidoObjetivo {
     pub refazer: bool,
     /// The app window stays in front and the cursor is drawn: the user watches.
     pub ver: bool,
+    /// The `act` tool: one step, `Some(executar)`; the answer is the decision as JSON.
+    pub passo_unico: Option<bool>,
 }
 
 pub trait Motor: Send + Sync + 'static {
@@ -95,7 +97,7 @@ impl Motor for FakeMotor {
                 p.config.map(|c| c.display().to_string()).unwrap_or_default(),
                 p.refazer,
                 p.ver
-            )
+            ) + &p.passo_unico.map_or_else(String::new, |e| format!("; passo_unico={}", if e { "agir" } else { "decidir" }))
         })
     }
 

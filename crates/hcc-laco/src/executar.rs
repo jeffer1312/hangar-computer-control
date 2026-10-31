@@ -60,6 +60,8 @@ pub struct Opcoes {
     pub refazer: bool,
     /// The app window stays in front, actions use real input and the agent draws the cursor: the user watches.
     pub ver: bool,
+    /// Decide the first step and stop before acting (the `act` tool with executar=false).
+    pub so_decidir: bool,
 }
 
 struct Controle<'a> {
@@ -858,6 +860,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         if let Some(ultima) = recentes.last_mut().filter(|r| r.screen_changed.is_none()) {
             ultima.screen_changed = anterior.as_ref().map_or(Some(true), |a| mudou(a, &atual));
         }
+        if let Some(u) = r.ultima.as_mut().filter(|u| u.entrega.is_some() && u.tela_mudou.is_none()) {
+            u.tela_mudou = recentes.last().and_then(|x| x.screen_changed);
+        }
         anterior = Some(atual.clone());
         anotar_diario(op, r, secretos, gravados, recentes, &mut diario_ate);
         let divergencia = digitado.take().and_then(|(i, papel, nome, valor)| {
@@ -1168,6 +1173,13 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         let mut candidato = acoes.get(i).ok_or("IndexError: list index out of range")?.clone();
         candidato.acao.input = modo_entrada(&candidato.acao, &obs, &aprendido, op.ver);
         candidato.acao.cursor = op.ver;
+        // What the one-step tool reports: this pick, unless it is a look past the last step allowed.
+        if ciclo < op.max_passos {
+            let chave = i.to_string();
+            r.ultima = Some(crate::resultado::UmPasso { acao: candidato.descricao.clone(), confianca: decisao.p,
+                segundo: decisao.top.iter().find(|(k, ..)| *k != chave).map(|(_, p, d)| (d.clone(), *p)), risco: decisao.risco,
+                ..Default::default() });
+        }
         let mut fila = fila.into_iter();
         let primeiro_plano = obs.foreground.clone();
         let mut vista = obs;
@@ -1181,6 +1193,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 return Ok(());
             }
             if ciclo == op.max_passos { break; }
+            if op.so_decidir { r.motivo = "decidido, sem agir".into(); return Ok(()); }
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let rotulo = secretos.descricao(acao, &vista, false);
             let marcado = print_da_acao(&pasta, ciclo, acao, &vista, lido_como.window.as_deref());
@@ -1215,6 +1228,13 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     async { Ok(s.act(id, acao).await) }).await?;
             }
             let acao = &candidato.acao;
+            if let Some(u) = r.ultima.as_mut().filter(|u| u.entrega.is_none()) {
+                u.entrega = Some(match &retorno {
+                    Ok(ret) => serde_json::to_value(ret.delivery).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default(),
+                    Err(SessionError::NotDelivered(_)) => "not_delivered".into(),
+                    Err(_) => "unknown".into(),
+                });
+            }
             let falhou = match retorno {
                 Ok(ret) => {
                     if ret.ok {

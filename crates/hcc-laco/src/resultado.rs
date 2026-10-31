@@ -9,6 +9,7 @@ pub struct Resultado {
     pub captura: Option<PathBuf>,
     pub registro: Option<PathBuf>,
     pub roteiro: Option<String>,
+    pub ultima: Option<UmPasso>,
 }
 
 impl Resultado {
@@ -21,4 +22,15 @@ impl Resultado {
         if let Some(t) = &self.roteiro { linhas.push(format!("roteiro: {t}")); }
         linhas.join("\n")
     }
+}
+
+/// The last pick of a run, for the one-step `act` tool.
+#[derive(Default, Clone, Debug)]
+pub struct UmPasso {
+    pub acao: String,
+    pub confianca: f64,
+    pub segundo: Option<(String, f64)>,
+    pub risco: f64,
+    pub entrega: Option<String>,
+    pub tela_mudou: Option<bool>,
 }

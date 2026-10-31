@@ -93,6 +93,22 @@ async fn consultar(config: Option<PathBuf>, cancel: CancellationToken) -> String
     texto
 }
 
+/// The `act` answer: the pick, its runner-up, the risk, the delivery and whether the screen changed.
+fn um_passo_json(r: &hcc_laco::resultado::Resultado) -> String {
+    let u = r.ultima.clone().unwrap_or_default();
+    let agiu = u.entrega.as_deref().is_some_and(|e| e.starts_with("delivered"));
+    serde_json::json!({
+        "decisao": if agiu { "agiu" } else { "parou" },
+        "motivo": if agiu { None } else { Some(&r.motivo) },
+        "acao": r.ultima.as_ref().map(|u| &u.acao),
+        "confianca": r.ultima.as_ref().map(|u| u.confianca),
+        "segundo": u.segundo.as_ref().map(|(acao, p)| serde_json::json!({"acao": acao, "confianca": p})),
+        "risco": r.ultima.as_ref().map(|u| u.risco),
+        "entrega": u.entrega,
+        "tela_mudou": u.tela_mudou,
+    }).to_string()
+}
+
 impl Motor for MotorReal {
     fn objetivo(
         &self,
@@ -115,9 +131,11 @@ impl Motor for MotorReal {
                     .or_else(|| std::env::home_dir().map(|h| h.join(".cache/hangar-computer-control/roteiros"))),
                 refazer: p.refazer,
                 ver: p.ver,
+                so_decidir: p.passo_unico == Some(false),
             };
             let etapa = move |e: Progresso| progresso(rotulo(&e), imagem(&e));
-            executar(op, &conector, cancel, &etapa).await.resumo()
+            let r = executar(op, &conector, cancel, &etapa).await;
+            if p.passo_unico.is_some() { um_passo_json(&r) } else { r.resumo() }
         })
     }
 

@@ -95,6 +95,71 @@
         }
       },
       {
+        "name": "act",
+        "description": "Faz um passo só no desktop e diz o que escolheu.\n\n    `intencao` descreve o passo (\"clicar em Salvar\"). O Jev escolhe o controle e o\n    agente age, como um passo do `objetivo`, em segundo plano. A resposta é um JSON com\n    a ação, a confiança, o segundo colocado, o risco, a entrega e se a tela mudou.\n    executar=false só decide, sem agir. Ação arriscada não autorizada não é feita.\n\n`alvo` escolhe o desktop controlado. Disponíveis: vm-a, vm-b; sem `alvo`, usa o padrão (vm-a).",
+        "inputSchema": {
+          "properties": {
+            "intencao": {
+              "title": "Intencao",
+              "type": "string"
+            },
+            "dados": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Dados"
+            },
+            "executar": {
+              "default": true,
+              "title": "Executar",
+              "type": "boolean"
+            },
+            "ver": {
+              "default": false,
+              "title": "Ver",
+              "type": "boolean"
+            },
+            "alvo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Alvo"
+            }
+          },
+          "required": [
+            "intencao"
+          ],
+          "type": "object",
+          "title": "actArguments"
+        },
+        "outputSchema": {
+          "properties": {
+            "result": {
+              "title": "Result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result"
+          ],
+          "type": "object",
+          "title": "actOutput"
+        }
+      },
+      {
         "description": "Captura a tela do desktop e devolve o caminho do arquivo PNG.\n\n    Para quando o `objetivo` parou e você precisa olhar o que há na tela.\n    Cite o caminho devolvido na sua resposta para que o usuário veja a imagem.\n\n`alvo` escolhe o desktop controlado. Disponíveis: vm-a, vm-b; sem `alvo`, usa o padrão (vm-a).",
         "inputSchema": {
           "properties": {
