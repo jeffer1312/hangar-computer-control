@@ -1080,6 +1080,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     candidato.acao = de_novo;
                     vista = nova;
                     atual = assinatura_tela(&vista);
+                    anterior = Some(atual.clone());
                     let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                     let (acao, id) = (&candidato.acao, &vista.observation_id);
                     retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo),

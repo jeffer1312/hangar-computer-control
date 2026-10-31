@@ -83,14 +83,20 @@ fn tipo(a: ElementAction) -> ActionType {
 }
 
 /// Python `(a + b) // 2`, without i32 overflow on a hostile rect.
-/// `acao` aimed at the same control on a fresh observation, which numbers ids anew. Only when the control is the
-/// single one with its role and name on both screens: anything else could land on a different control.
+/// `acao` aimed at the same control on a fresh observation, which numbers ids anew. Only on the screen Jev judged
+/// (same window in front, no message box that was not there) and when the control is the single named one with
+/// its role and name on both screens; an action without a control only on an unchanged screen.
 pub fn mesmo_alvo(acao: &Action, antes: &Observation, depois: &Observation) -> Option<Action> {
-    let Some(id) = &acao.target else { return Some(acao.clone()) };
+    if depois.foreground != antes.foreground || crate::barreiras::aviso(depois).is_some() != crate::barreiras::aviso(antes).is_some() {
+        return None;
+    }
+    let Some(id) = &acao.target else {
+        return (crate::estado::assinatura_tela(antes) == crate::estado::assinatura_tela(depois)).then(|| acao.clone());
+    };
     if antes.windows.iter().any(|w| &w.id == id) {
         return depois.windows.iter().any(|w| &w.id == id).then(|| acao.clone());
     }
-    let alvo = antes.elements.iter().find(|e| &e.id == id)?;
+    let alvo = antes.elements.iter().find(|e| &e.id == id).filter(|e| !e.name.trim().is_empty())?;
     let iguais = |o: &Observation| o.elements.iter().filter(|e| e.role == alvo.role && e.name == alvo.name).cloned().collect::<Vec<_>>();
     match (iguais(antes).len(), iguais(depois).as_slice()) {
         (1, [novo]) => Some(Action { target: Some(novo.id.clone()), ..acao.clone() }),
@@ -160,6 +166,15 @@ pub fn candidatos(obs: &Observation, dados: &Map<String, Value>, segredos: &Hash
                 })),
                 // Focusing is never the intended step; invoke/set_value already focus.
                 ElementAction::Focus => {}
+                // A known state asks for the end state: a toggle on a box already checked would undo it.
+                ElementAction::Toggle => acoes.push(Action {
+                    kind: match e.value.as_deref() {
+                        Some("off") => ActionType::Check,
+                        Some("on") => ActionType::Uncheck,
+                        _ => ActionType::Toggle,
+                    },
+                    ..base
+                }),
                 _ => acoes.push(base),
             }
         }

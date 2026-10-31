@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use hcc_laco::barreiras::{Barreiras, aviso, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
-use hcc_laco::candidatos::{apps_do_objetivo, candidatos, descrever_acao, segredos, sem_app_aberto, texto_no_editavel};
+use hcc_laco::candidatos::{apps_do_objetivo, candidatos, descrever_acao, mesmo_alvo, segredos, sem_app_aberto, texto_no_editavel};
 use hcc_laco::descrever::intencao;
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
 use hcc_laco::geometria::para_tela;
@@ -292,6 +292,42 @@ fn installed_apps_are_offered_to_jev_and_omitted_when_empty() {
     let old_agent: Observation = serde_json::from_value(old_wire).unwrap();
     assert_eq!(estado_compacto("abrir editor", &Map::new(), &old_agent, &[], None), without);
     assert!(serde_json::to_value(old_agent).unwrap().get("apps").is_none());
+}
+
+#[test]
+fn a_refused_action_is_retargeted_only_on_the_screen_jev_saw() {
+    let nome = el("e0", "Nome", "Edit", &[ElementAction::SetValue], None, None);
+    let antes = obs(vec![nome.clone()]);
+    let preencher = Action { kind: ActionType::SetValue, target: Some("e0".into()), value: Some("Ana".into()), ..Default::default() };
+    let mut renumerada = obs(vec![Element { id: "e4".into(), ..nome.clone() }]);
+    assert_eq!(mesmo_alvo(&preencher, &antes, &renumerada).unwrap().target.as_deref(), Some("e4"));
+
+    renumerada.foreground = "w2".into();
+    assert!(mesmo_alvo(&preencher, &antes, &renumerada).is_none(), "outra janela na frente");
+
+    let enter = Action { kind: ActionType::Keys, keys: Some(vec!["Enter".into()]), ..Default::default() };
+    assert!(mesmo_alvo(&enter, &antes, &antes.clone()).is_some());
+    let mudou = obs(vec![el("e0", "Nome", "Edit", &[ElementAction::SetValue], Some("x"), None)]);
+    assert!(mesmo_alvo(&enter, &antes, &mudou).is_none(), "tecla sem alvo só na mesma tela");
+
+    let sem_nome = obs(vec![el("e0", "", "Edit", &[ElementAction::SetValue], None, None)]);
+    assert!(mesmo_alvo(&preencher, &sem_nome, &sem_nome.clone()).is_none(), "campo sem nome não se distingue");
+}
+
+#[test]
+fn checkbox_with_known_state_offers_check_or_uncheck_instead_of_toggle() {
+    let caixas = obs(vec![
+        el("e0", "Lembrar", "CheckBox", &[ElementAction::Toggle], Some("off"), None),
+        el("e1", "Avisar", "CheckBox", &[ElementAction::Toggle], Some("on"), None),
+        el("e2", "Talvez", "CheckBox", &[ElementAction::Toggle], Some("indeterminate"), None),
+    ]);
+    let todos = candidatos(&caixas, &Map::new(), &HashSet::new());
+    let de = |id: &str| todos.iter().filter(|c| c.acao.target.as_deref() == Some(id)).map(|c| c.acao.kind).collect::<Vec<_>>();
+    assert_eq!(de("e0"), [ActionType::Check]);
+    assert_eq!(de("e1"), [ActionType::Uncheck]);
+    assert_eq!(de("e2"), [ActionType::Toggle]);
+    let marcar = todos.iter().find(|c| c.acao.target.as_deref() == Some("e0")).unwrap();
+    assert_eq!(marcar.descricao, "check CheckBox 'Lembrar'");
 }
 
 #[test]
