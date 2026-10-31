@@ -1086,6 +1086,10 @@ fn background_acts_by_accessibility_on_a_window_behind_without_touching_input() 
 fn background_refuses_keys_and_waits_for_an_idle_user() {
     let (mut desktop, commands, _) = desktop(vec![node("push button", "Salvar")]);
     let observed = com_terminal_na_frente(&mut desktop, &commands);
+    let real = Action { keys: Some(vec!["Enter".into()]), ..action(ActionType::Keys, None) };
+    let erro = desktop.act(&observed, &real).unwrap_err();
+    assert_eq!(erro.delivery, Delivery::NotDelivered, "entrada real numa janela atrás cairia no terminal: {erro:?}");
+    let observed = desktop.observe(&Scope { window: Some("w0xa".into()), ..Default::default() }).unwrap();
     let teclas = Action { keys: Some(vec!["Enter".into()]), input: Some(hcc_protocolo::InputMode::Background), ..action(ActionType::Keys, None) };
     let erro = desktop.act(&observed, &teclas).unwrap_err();
     assert_eq!((erro.msg.as_str(), erro.delivery), ("precisa de entrada real", Delivery::NotDelivered));

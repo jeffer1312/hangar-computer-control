@@ -277,7 +277,9 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         let Ok(apps) = self.tree.apps() else { return false };
         apps.iter().filter(|a| self.tree.pid(a).is_ok_and(|p| p == Some(pid)))
             .flat_map(|a| self.tree.children(a).unwrap_or_default())
-            .any(|top| self.tree.read(&top).is_ok_and(|i| ["window", "popup menu", "menu", "tool tip"].contains(&i.role.as_str()) && i.has("showing")))
+            // GTK4 gives the main window the role "window" too: only one not named as the client counts.
+            .any(|top| self.tree.read(&top).is_ok_and(|i| i.has("showing") && (["popup menu", "menu", "tool tip"].contains(&i.role.as_str())
+                || (i.role == "window" && client["title"].as_str() != Some(i.name().as_str())))))
     }
 
     /// The user's window goes back in front unless the app opened a menu the next action needs.
@@ -593,20 +595,33 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 
     fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
         self.validate_observation(observed).map_err(DesktopError::nao_entregue)?;
-        self.observed_at = None;
-        let Some(modo) = action.input.filter(|m| *m != InputMode::Real) else { return self.agir(action) };
+        let ativa = hypr::query(&self.commands, "activewindow").map_err(|e| runtime(e).nao_entregue())?;
+        let frente = foreground_id(&ativa);
+        let Some(modo) = action.input.filter(|m| *m != InputMode::Real) else {
+            // Real input lands on whatever is in front: never on a window read behind others.
+            if self.por_id && frente != observed.foreground { return Err(invalid("a janela está atrás; use entrada polite").nao_entregue()); }
+            self.observed_at = None;
+            return self.agir(action);
+        };
         let padrao = modo == InputMode::Background;
         if padrao && !matches!(action.kind, ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle
             | ActionType::Check | ActionType::Uncheck | ActionType::Expand | ActionType::Collapse) {
             return Err(invalid("precisa de entrada real").nao_entregue());
         }
         if !self.parado.load(Ordering::Relaxed) { return Err(runtime("usuário ativo").nao_entregue()); }
-        let frente = foreground_id(&hypr::query(&self.commands, "activewindow").map_err(|e| runtime(e).nao_entregue())?);
-        if self.janela_do_usuario.is_none() && frente != observed.foreground { self.janela_do_usuario = Some(frente.clone()); }
+        self.observed_at = None;
+        // The window in front now is the user's unless it belongs to the app (its dialog or menu).
+        let do_app = self.windows.get(&observed.foreground).is_some_and(|c| c["pid"] == ativa["pid"]);
+        if frente != observed.foreground && !do_app { self.janela_do_usuario = Some(frente.clone()); }
         let feito = if padrao { self.agir_padrao(action) } else {
             if frente != observed.foreground {
                 self.focar(&observed.foreground).map_err(DesktopError::nao_entregue)?;
                 std::thread::sleep(Duration::from_millis(150));
+                let agora = hypr::query(&self.commands, "activewindow").map_err(|e| runtime(e).nao_entregue())?;
+                if foreground_id(&agora) != observed.foreground {
+                    self.devolver_janela();
+                    return Err(runtime("o Hyprland não trouxe a janela do app").nao_entregue());
+                }
             }
             self.agir(action)
         };

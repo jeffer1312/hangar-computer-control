@@ -41,8 +41,10 @@ pub fn vigiar_ocioso(parado: Arc<AtomicBool>) -> Result<(), String> {
     let (globais, mut fila) = registry_queue_init::<Ocioso>(&conexao).map_err(|e| format!("wayland: {e}"))?;
     let qh = fila.handle();
     let seat: wl_seat::WlSeat = globais.bind(&qh, 1..=1, ()).map_err(|e| format!("wayland wl_seat: {e}"))?;
-    let notificador: ExtIdleNotifierV1 = globais.bind(&qh, 1..=1, ()).map_err(|e| format!("wayland ext_idle_notifier_v1: {e}"))?;
-    let aviso = notificador.get_idle_notification(OCIOSO_MS, &seat, &qh, ());
+    let notificador: ExtIdleNotifierV1 = globais.bind(&qh, 1..=2, ()).map_err(|e| format!("wayland ext_idle_notifier_v1: {e}"))?;
+    // Version 2 counts only input: a video playing (an idle inhibitor) must not keep the user "active" forever.
+    let aviso = if notificador.version() >= 2 { notificador.get_input_idle_notification(OCIOSO_MS, &seat, &qh, ()) }
+        else { notificador.get_idle_notification(OCIOSO_MS, &seat, &qh, ()) };
     let mut estado = Ocioso(parado);
     std::thread::spawn(move || {
         let _manter = (aviso, seat, notificador);

@@ -160,10 +160,17 @@ pub(crate) fn focar_hwnd(h: isize) {
     }
 }
 
-/// A menu, dropdown or dialog of the window's process is open over it.
+/// A menu, dropdown or dialog of the window's process is open over it, or the window itself is one (a modal
+/// dialog in front has an owner).
 pub(crate) fn menu_aberto(h: isize) -> bool {
     let hwnd = HWND(h as *mut _);
-    !popups(hwnd, pid(hwnd)).is_empty()
+    // SAFETY: a stale handle only makes the query fail.
+    let tem_dono = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|d| !d.is_invalid());
+    tem_dono || !popups(hwnd, pid(hwnd)).is_empty()
+}
+
+pub(crate) fn mesmo_processo(a: isize, b: isize) -> bool {
+    a != 0 && b != 0 && pid(HWND(a as *mut _)) == pid(HWND(b as *mut _))
 }
 
 fn primeiro_plano(h: isize) {

@@ -412,6 +412,8 @@ mod desktop {
         janela_do_usuario: Option<isize>,
         /// `GetLastInputInfo` time of the agent's own last input.
         entrada_propria: Option<u32>,
+        /// The last observation read a window by id: it may stay behind others.
+        por_id: bool,
     }
 
     /// UIA objects live in the multithreaded apartment: usable from the thread that waits on a blocking Invoke.
@@ -438,7 +440,7 @@ mod desktop {
             sessao_win::dpi_por_monitor();
             let sessao = sessao_win::Sessao::abrir().map_err(|e| e.to_string())?;
             let ua = UIAutomation::new().map_err(|e| arvore::com(e).to_string())?;
-            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None })
+            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false })
         }
 
         /// Today's path: real clicks and keys where the app needs them.
@@ -592,8 +594,8 @@ mod desktop {
                     }
                     Ok(Delivery::DeliveredVerified)
                 }
-                ActionType::Select => padrao(padrao(el.get_pattern::<UISelectionItemPattern>())?.select()).map(|()| pronto),
-                ActionType::Toggle => padrao(padrao(el.get_pattern::<UITogglePattern>())?.toggle()).map(|()| pronto),
+                ActionType::Select => padrao(padrao(el.get_pattern::<UISelectionItemPattern>()).map_err(DesktopError::nao_entregue)?.select()).map(|()| pronto),
+                ActionType::Toggle => padrao(padrao(el.get_pattern::<UITogglePattern>()).map_err(DesktopError::nao_entregue)?.toggle()).map(|()| pronto),
                 ActionType::Check | ActionType::Uncheck => {
                     let caixa = padrao(el.get_pattern::<UITogglePattern>()).map_err(DesktopError::nao_entregue)?;
                     let ler = || {
@@ -605,24 +607,28 @@ mod desktop {
                     };
                     regras::marcar(action.kind == ActionType::Check, ler, || padrao(caixa.toggle()), Duration::from_millis(500))
                 }
-                ActionType::Expand => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>())?.expand()).map(|()| pronto),
-                ActionType::Collapse => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>())?.collapse()).map(|()| pronto),
+                ActionType::Expand => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>()).map_err(DesktopError::nao_entregue)?.expand()).map(|()| pronto),
+                ActionType::Collapse => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>()).map_err(DesktopError::nao_entregue)?.collapse()).map(|()| pronto),
                 ActionType::Scroll => {
                     let (hz, vt) = regras::quantidade_scroll(action.direction.unwrap_or(Direction::Down), action.amount.unwrap_or(Amount::Small));
-                    padrao(padrao(el.get_pattern::<UIScrollPattern>())?.scroll(quantidade(hz), quantidade(vt))).map(|()| pronto)
+                    padrao(padrao(el.get_pattern::<UIScrollPattern>()).map_err(DesktopError::nao_entregue)?.scroll(quantidade(hz), quantidade(vt))).map(|()| pronto)
                 }
                 _ => Err(valor_err("precisa de entrada real").nao_entregue()),
             }
         }
 
         /// The user's window goes back in front unless the app opened a menu the next action needs.
-        fn devolver_janela(&mut self) {
+        /// Whether it moved the focus (an Alt tap may have been sent).
+        fn devolver_janela(&mut self) -> bool {
             let frente = sessao_win::primeiro_plano();
             if regras::devolver(self.janela_do_usuario, frente, arvore::menu_aberto(frente)) {
                 arvore::focar_hwnd(self.janela_do_usuario.take().unwrap_or_default());
-            } else if self.janela_do_usuario == Some(frente) {
+                return true;
+            }
+            if self.janela_do_usuario == Some(frente) {
                 self.janela_do_usuario = None;
             }
+            false
         }
 
         fn controle(&self, alvo: Option<&str>) -> Result<&arvore::Controle, DesktopError> {
@@ -668,6 +674,7 @@ mod desktop {
         fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
             self.janelas.clear();
             self.controles.clear();
+            self.por_id = scope.window.is_some();
             let lido = arvore::ler(&self.ua, scope)?;
             self.janelas = lido.janelas;
             self.controles = lido.controles;
@@ -687,8 +694,16 @@ mod desktop {
         }
 
         fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
+            let alvo = self.janelas.get(&observed.foreground).map_or(0, |j| j.hwnd);
+            let frente = sessao_win::primeiro_plano();
             if action.input.is_none_or(|m| m == InputMode::Real) {
-                return self.agir_real(action);
+                // Real input lands on whatever is in front: never on a window read behind others.
+                if self.por_id && frente != alvo {
+                    return Err(valor_err("a janela está atrás; use entrada polite").nao_entregue());
+                }
+                let r = self.agir_real(action);
+                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
+                return r;
             }
             let caminho = regras::caminho(action.kind, action.input);
             if caminho == regras::Caminho::Recusa {
@@ -698,9 +713,8 @@ mod desktop {
             if !regras::ocioso(agora, ultima, self.entrada_propria) {
                 return Err(runtime_err("usuário ativo").nao_entregue());
             }
-            let alvo = self.janelas.get(&observed.foreground).map_or(0, |j| j.hwnd);
-            let frente = sessao_win::primeiro_plano();
-            if self.janela_do_usuario.is_none() && frente != alvo {
+            // The window in front now is the user's unless it belongs to the app (its dialog or menu).
+            if frente != alvo && !arvore::mesmo_processo(frente, alvo) {
                 self.janela_do_usuario = Some(frente);
             }
             let feito = if caminho == regras::Caminho::Padrao {
@@ -709,12 +723,13 @@ mod desktop {
                 if let Some(j) = self.janelas.get(&observed.foreground) {
                     arvore::focar_janela(j);
                 }
-                let r = self.agir_real(action);
-                // The input just sent is ours: it must not count as the user being active.
-                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
-                r
+                self.agir_real(action)
             };
-            self.devolver_janela();
+            let tocou = self.devolver_janela();
+            // The input just sent is ours (keys, clicks, the Alt that unlocks the focus): not the user being active.
+            if caminho == regras::Caminho::Real || tocou {
+                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
+            }
             feito
         }
 
