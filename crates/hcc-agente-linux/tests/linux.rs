@@ -99,6 +99,8 @@ impl Arvore for FakeTree {
 }
 
 type RecordedCall = (Vec<String>, Option<Vec<u8>>);
+/// One type offered on the clipboard and its bytes.
+type Copiado = (String, Vec<u8>);
 
 #[derive(Clone)]
 struct FakeCommands {
@@ -116,7 +118,7 @@ struct FakeCommands {
     cursor: Rc<RefCell<(i64, i64)>>,
     cursor_stuck: Rc<RefCell<bool>>,
     /// The user's clipboard: offered types and the bytes of each; `None` is empty.
-    clipboard: Rc<RefCell<Option<Vec<(String, Vec<u8>)>>>>,
+    clipboard: Rc<RefCell<Option<Vec<Copiado>>>>,
 }
 
 impl Default for FakeCommands {
@@ -152,7 +154,7 @@ impl Comandos for FakeCommands {
             ["hyprctl", "dispatch", comando] => {
                 // A focus dispatch brings that window to the front, as Hyprland does.
                 let comando = comando.replace("\\058", ":");
-                if let Some(endereco) = comando.split("address:").nth(1).map(|e| e.trim_end_matches(|c: char| matches!(c, '"' | ' ' | '}' | ')'))) {
+                if let Some(endereco) = comando.split("address:").nth(1).map(|e| e.trim_end_matches(['"', ' ', '}', ')'])) {
                     let novo = self.clients.borrow().as_array().and_then(|cs| cs.iter().find(|c| c["address"] == endereco).cloned());
                     if let Some(c) = novo { *self.active.borrow_mut() = c; }
                 }
@@ -964,7 +966,7 @@ fn paste_gives_the_user_clipboard_back_as_plain_text() {
     let observed = desktop.observe(&Scope::default()).unwrap();
     desktop.act(&observed, &Action { value:Some(valor.into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap();
     let calls = commands.calls.borrow();
-    let pos = |f: &dyn Fn(&RecordedCall) -> bool| calls.iter().position(|c| f(c)).expect("chamada");
+    let pos = |f: &dyn Fn(&RecordedCall) -> bool| calls.iter().position(f).expect("chamada");
     let guarda = pos(&|c| c.0 == vec!["wl-paste","-n","-t","text/plain;charset=utf-8"]);
     let copia = pos(&|c| c.0[0] == "sh" && c.1.as_deref() == Some(valor.as_bytes()));
     let cola = pos(&|c| c.0 == vec!["wtype","-M","ctrl","v","-m","ctrl"]);

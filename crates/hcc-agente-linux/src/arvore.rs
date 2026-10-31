@@ -307,7 +307,9 @@ pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64,
 /// The node (and its scale factor) of the `spec.index`-th control with that role and name, in the order `walk`
 /// lists controls.
 pub fn achar_regiao<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64, spec: &hcc_protocolo::RootSpec) -> Option<(T::Node, f64)> {
-    let mut pending: VecDeque<(T::Node, f64, Option<(i32, i32, i32, i32)>)> = roots.into_iter().map(|n| (n, 1.0, None)).collect();
+    // Each pending node with its scale factor and its parent's raw extents.
+    type Pendente<N> = (N, f64, Option<(i32, i32, i32, i32)>);
+    let mut pending: VecDeque<Pendente<T::Node>> = roots.into_iter().map(|n| (n, 1.0, None)).collect();
     let mut iguais = 0;
     let start = Instant::now();
     while let Some((node, mut fator, pai)) = pending.pop_front() {

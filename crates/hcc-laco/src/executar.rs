@@ -447,6 +447,7 @@ async fn reconectar<C: Connector>(conector: &C, sessao: &mut Option<C::S>, contr
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
     acao: &Action, vista: &Observation, atual: &AssinaturaTela, secretos: &Segredos, escopo: &Scope) -> Result<bool, String> {
     // Blind (empty tree): only the title could change; no polling, the next observation looks.

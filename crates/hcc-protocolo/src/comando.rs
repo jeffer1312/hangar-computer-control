@@ -8,7 +8,6 @@ pub const PROTOCOL: u32 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
-#[expect(clippy::large_enum_variant, reason = "one command per RPC; boxing `action` would change the interface every crate matches on")]
 pub enum Command {
     Heartbeat,
     Stop,
