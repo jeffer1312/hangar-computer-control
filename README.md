@@ -132,13 +132,47 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   um objetivo parou.
   Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print
   (`Leitura: …`) e/ou o texto visível da janela pela árvore (`Texto na janela: …`, até 2000 caracteres).
-  `refazer=true` ignora o roteiro gravado (abaixo).
+  `refazer=true` ignora o roteiro gravado (abaixo). `ver=true` deixa você assistir (abaixo).
+  Cada ação também deixa `acao-N.png`: o print do ciclo com a caixa do controle e o ponto do clique marcados.
+- `act(intencao, dados={}, executar=true, ver=false)`: um passo só. O Jev escolhe o controle para a intenção
+  ("clicar em Salvar") e o agente age, com as mesmas barreiras e a mesma trava do `objetivo`, sem roteiro.
+  Responde JSON: `decisao` (`agiu`/`parou`), `motivo`, `acao`, `confianca`, `segundo` (o segundo colocado do
+  Jev, quando ele mandou), `risco`, `entrega` e `tela_mudou`. `executar=false` decide e para antes de agir.
 - `ver_tela()`: print do desktop, devolve o caminho do PNG. Pra quando `objetivo` parou e você quer olhar.
 - `estado()`: diz se o desktop está acessível e a resolução.
 
 Exemplos de `texto` que funcionaram: "abrir o Bloco de Notas, digitar o texto informado e salvar o arquivo
 no caminho informado" (com `dados={"texto": …, "caminho": …}`); "no Chrome, no GitLab da empresa, abrir
 a lista de merge requests do projeto X"; "abrir Configurações do Windows e ir em Sistema > Sobre".
+
+### Segundo plano e `ver`
+
+Por padrão o objetivo não disputa o computador com você:
+
+- Ação num controle (clicar, preencher, marcar, escolher, expandir, rolar) vai pela acessibilidade, sem mouse,
+  sem teclado e sem trazer a janela: padrões da UIA no Windows, ações e `EditableText` do AT-SPI no Linux.
+- O que precisa de entrada real (teclas, texto solto, clique por coordenada, ativar janela, abrir app) traz a
+  janela do app e usa mouse e teclado.
+- As duas esperam você ficar 2 s sem mexer (`GetLastInputInfo` no Windows, `ext-idle-notify` no Linux): com você
+  mexendo, o agente recusa na hora e o laço tenta de novo a cada segundo, por até 1 minuto. Depois da ação a sua
+  janela volta para a frente, a menos que a própria ação tenha aberto um menu ou diálogo do app.
+- O laço lê a janela do app pelo id, mesmo atrás da sua, e o print vai só dela (`PrintWindow` no Windows,
+  `grim -T` no Linux): o resto da sua tela não vai para o modelo de visão.
+- Ação em segundo plano aceita sem mudar a tela é refeita uma vez com entrada real; se aí funciona, o app fica
+  anotado em `entrada-real.json`, na pasta dos roteiros (`{"versao": 1, "apps": {"app.exe": ["check:CheckBox"]}}`),
+  e a ação vai direto com entrada real nesse app. Nunca para `invoke` (um salvar ou enviar sem efeito visível
+  rodaria duas vezes) nem para valor que o agente já conferiu.
+- No Chromium (Edge, Chrome, apps Electron) a ação pela acessibilidade traz a janela por um instante; o agente
+  devolve a sua em seguida.
+
+`ver=true` é para assistir: a janela do app fica na frente, a entrada é a de sempre (mouse e teclado na hora) e,
+no Windows, uma seta vermelha desenhada desliza até cada controle antes da ação.
+
+Caixa de seleção com estado conhecido vira `check`/`uncheck` (não `toggle`): o agente lê a caixa, não faz nada se
+ela já está como pedido e confere depois. Leitura cortada pelo prazo ou pelo limite de nós vai para o Jev e para o
+modelo de visão marcada `incomplete`, com `unreadChildren` no controle que ficou com filhos sem ler; a janela cuja
+leitura veio cortada passa a ser lida em esqueleto (dois níveis), e o Jev ganha `DRILL <papel> '<nome>'` para ler só
+aquela região e `WIDEN` para voltar.
 
 ### Roteiros (gravar e repetir)
 
@@ -227,7 +261,8 @@ preencher um diálogo (campo, upload, caixa, salvar). Ficam em
 Enquanto roda, cada etapa sai como `notifications/progress` (só se a chamada trouxer `_meta.progressToken`;
 `progress` conta as etapas, sem `total`) e, se a chamada trouxer `_meta["claudecode/toolUseId"]`, também em
 `~/.hangar/tool-progress/<toolUseId>.jsonl` (`{"t": <unix s>, "message": …}` por linha). `message` é um destes
-rótulos fixos ou a descrição da ação executada (`invoke Button 'Enviar'`, `keys Enter`, `set_value Edit 'X' = ***`):
+rótulos fixos ou a descrição da ação executada (`invoke Button 'Enviar'`, `keys Enter`, `set_value Edit 'X' = ***`).
+A linha de uma ação traz também `imagem`, o caminho do `acao-N.png` com o alvo marcado, quando há print:
 
 | `message` | fase |
 |---|---|
@@ -266,10 +301,15 @@ visão); quem chama decide quando avisar o usuário. A última notificação sem
 - Linux: o Chrome perde teclas digitadas em velocidade máxima (popup de preenchimento automático abrindo no meio
   da palavra), e o `wtype` perde `, { } > ' ( )` com teclado de teclas mortas (br ABNT2). `set_value` cola pela
   área de transferência (`wl-copy` + Ctrl+V) texto com mais de 40 caracteres ou com símbolos; texto curto é
-  digitado, redigitado a 30 ms e só então colado. Sempre confere o campo depois. Colar substitui o conteúdo da
-  área de transferência do usuário; senha nunca é colada. Antes de clicar, o agente confere que o cursor chegou
+  digitado, redigitado a 30 ms e só então colado. Sempre confere o campo depois. O que você tinha copiado
+  volta para a área de transferência depois de colar (texto simples primeiro, sem entrar no histórico); senha
+  nunca é colada. Antes de clicar, o agente confere que o cursor chegou
   ao ponto (`hyprctl cursorpos`) e falha em vez de clicar em outro lugar.
-- Leitura da árvore em IDE Delphi leva 10 a 13 s por ciclo (VCL via MSAA); no resto, 1 s.
+- Leitura da árvore em IDE Delphi leva 10 a 13 s por ciclo (VCL via MSAA); no resto, 1 s. No Windows a leitura
+  usa o cache da UIA (uma ida ao app por nó): o Explorer em System32 caiu de 1,2–7,7 s para 0,65 s.
+- Linux: janela numa área de trabalho escondida não aparece como visível no AT-SPI; lida pelo id, vem sem
+  controles (o print dela sai). O cursor desenhado de `ver` é só no Windows.
+- Repetição de roteiro e de trecho usa a entrada de sempre, na janela da frente.
 - Um objetivo por vez por Windows alvo (trava na pasta temporária, por usuário e por alvo).
 - Linux, apps Chromium/Electron abertos sem leitor de tela (Slack, Discord): o agente pede os atributos do
   frame (`GetAttributes`), o mesmo sinal que o Orca dá, e o app liga a própria árvore sem reiniciar. Fica
