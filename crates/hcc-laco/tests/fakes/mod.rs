@@ -26,6 +26,10 @@ pub struct State {
     pub advance_on_error: bool,
     /// One per successful act, in order; `delivered_unverified` once used up.
     pub act_deliveries: VecDeque<Delivery>,
+    /// The scope of every observe, in order.
+    pub scopes: Vec<Scope>,
+    /// Every observe after the first moves to the next view.
+    pub advance_on_observe: bool,
     pub connects: usize,
     pub closes: usize,
     pub captures: usize,
@@ -66,7 +70,7 @@ impl FakeConnector {
                 views: views.into(), acts: vec![], observe_errors: VecDeque::new(), act_errors: VecDeque::new(),
                 screenshot_error: None, close_error: None, close_pending: false, slow_drop: None, connect_error: None,
                 connect_pending: false, observe_pending: false, advance_on_act: true, advance_on_error: false,
-                act_deliveries: VecDeque::new(),
+                act_deliveries: VecDeque::new(), scopes: vec![], advance_on_observe: false,
                 connects: 0, closes: 0, captures: 0, observed: vec![], cancel_after_act: None,
             })),
             entered: Arc::new(Notify::new()),
@@ -93,8 +97,13 @@ impl Connector for FakeConnector {
 }
 
 impl Session for FakeSession {
-    async fn observe(&mut self, _: &Scope) -> Result<Observation, SessionError> {
-        let pending = self.0.state.lock().unwrap().observe_pending;
+    async fn observe(&mut self, scope: &Scope) -> Result<Observation, SessionError> {
+        let pending = {
+            let mut s = self.0.state.lock().unwrap();
+            s.scopes.push(scope.clone());
+            if s.advance_on_observe && s.scopes.len() > 1 && s.views.len() > 1 { s.views.pop_front(); }
+            s.observe_pending
+        };
         self.0.entered.notify_one();
         if pending { std::future::pending::<()>().await; }
         let mut s = self.0.state.lock().unwrap();

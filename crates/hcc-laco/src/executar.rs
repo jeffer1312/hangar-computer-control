@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hcc_protocolo::{Action, ActionType, Connector, Delivery, Observation, Scope, Session, SessionError};
+use hcc_protocolo::{Action, ActionType, Connector, Delivery, Observation, RootSpec, Scope, Session, SessionError};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -299,9 +299,26 @@ fn escolha(e: Escolha) -> String {
 }
 fn percentual(p: f64) -> String { format!("{:.0}%", p * 100.0) }
 
-async fn observar<S: Session>(sessao: &mut S) -> Result<Observation, SessionError> {
+fn chave_janela(obs: &Observation) -> (String, String) {
+    obs.windows.iter().find(|w| w.id == obs.foreground).map(|w| (w.class_name.clone(), w.name.clone())).unwrap_or_default()
+}
+
+/// On a skeleton, a DRILL per named container with unread children; inside a region, WIDEN back to the skeleton.
+fn regioes(obs: &Observation, leitura: &Scope) -> Vec<(String, Option<RootSpec>)> {
+    if leitura.root.is_some() { return vec![("WIDEN back to the whole window".into(), None)]; }
+    if !leitura.skeleton { return vec![]; }
+    obs.elements.iter().enumerate()
+        .filter(|(_, e)| e.unread.is_some_and(|n| n > 0) && !e.name.trim().is_empty())
+        .map(|(i, e)| {
+            let index = obs.elements[..i].iter().filter(|o| o.role == e.role && o.name == e.name).count() as u32;
+            (format!("DRILL {} {} (read what is inside)", e.role, py_repr(&e.name)), Some(RootSpec { role: e.role.clone(), name: e.name.clone(), index }))
+        })
+        .collect()
+}
+
+async fn observar<S: Session>(sessao: &mut S, escopo: &Scope) -> Result<Observation, SessionError> {
     for tentativa in 0..3 {
-        match sessao.observe(&Scope::default()).await {
+        match sessao.observe(escopo).await {
             Ok(obs) => {
                 return if obs.connected && !obs.observation_id.is_empty() { Ok(obs) }
                 else { Err(SessionError::Agent("desktop desconectado ou observação sem referência".into())) };
@@ -407,7 +424,7 @@ async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, c
     controle.esperar(Duration::from_millis(800)).await?;
     while Instant::now() < prazo {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        match controle.rodar(async { Ok(observar(s).await) }).await? {
+        match controle.rodar(async { Ok(observar(s, &Scope::default()).await) }).await? {
             Ok(nova) if assinatura_tela(&nova) != *atual => break,
             Ok(_) => {}
             Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
@@ -582,7 +599,7 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
     for (n, passo) in passos.iter().enumerate() {
         if n > 0 {
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-            vista = controle.medir("observacao", Progresso::Observacao, async { observar(s).await.map_err(erro_sessao) }).await?;
+            vista = controle.medir("observacao", Progresso::Observacao, async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
             let agora = assinatura_tela(&vista);
             if let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &agora); }
             *anterior = Some(agora);
@@ -683,7 +700,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if n > 0 && n == passos.len() { break; }
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let vista = controle.medir("observacao", Progresso::Observacao,
-                    async { observar(s).await.map_err(erro_sessao) }).await?;
+                    async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
                 let atual = assinatura_tela(&vista);
                 iniciais.get_or_insert_with(|| vista.windows.iter().map(|w| w.id.clone()).collect());
                 if !pulou && let (Some(ultima), Some(a)) = (recentes.last_mut(), anterior.as_ref()) { ultima.screen_changed = mudou(a, &atual); }
@@ -748,10 +765,27 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         Some(d) if !op.refazer && !so_leitura(&op.texto) => trecho::todos(&d.join("trechos")), _ => vec![] };
     let mut feitas: Vec<(usize, BTreeMap<String, String>)> = Vec::new();
     let mut escopo: Option<(String, Option<String>)> = None;
+    // A window whose whole read was cut (class and title) is read as a skeleton; `regiao` is where Jev drilled into.
+    let mut esqueleto: Option<(String, String)> = None;
+    let mut regiao: Option<RootSpec> = None;
     for ciclo in 0..=op.max_passos {
+        let lido_como = Scope { root: regiao.clone(), skeleton: esqueleto.is_some() && regiao.is_none(), window: None };
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let obs = controle.medir("observacao", Progresso::Observacao,
-            async { observar(s).await.map_err(erro_sessao) }).await?;
+        let mut obs = controle.medir("observacao", Progresso::Observacao,
+            async { observar(s, &lido_como).await.map_err(erro_sessao) }).await?;
+        // Another window or a dialog: the partial read no longer fits, read it whole.
+        let completa = lido_como.is_default()
+            || Some(chave_janela(&obs)) != esqueleto || crate::estado::dialogo_aberto(&obs).is_some();
+        if completa {
+            if !lido_como.is_default() {
+                (esqueleto, regiao) = (None, None);
+                let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+                obs = controle.medir("observacao", Progresso::Observacao,
+                    async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
+            }
+            if obs.truncated && crate::estado::dialogo_aberto(&obs).is_none() { esqueleto = Some(chave_janela(&obs)); }
+        }
+        let lido_como = if completa { Scope::default() } else { lido_como };
         let atual = assinatura_tela(&obs);
         sem_tela_nova = if vistas.insert(atual.clone()) { 0 } else { sem_tela_nova + 1 };
         iniciais.get_or_insert_with(|| obs.windows.iter().map(|w| w.id.clone()).collect());
@@ -891,6 +925,13 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 direta = Some(Decisao { escolha: Escolha::Indice(i), p, risco, top: vec![], com_imagem: false,
                     envio: Envio::default(), blocked: None });
             }
+        }
+        // Reading choices, not actions: never sent to the app, never recorded in a script.
+        let mut drill = HashMap::new();
+        for (descricao, spec) in regioes(&obs, &lido_como) {
+            drill.insert(acoes.len(), spec);
+            acoes.push(Candidato { acao: Action { kind: ActionType::Focus, ..Default::default() }, intencao: intencao(&Action::default(), &obs),
+                descricao: secretos.texto(&descricao) });
         }
         let mut decisao = loop {
             if let Some(d) = direta.take() { break d; }
@@ -1053,6 +1094,11 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             continue;
         }
         let Escolha::Indice(i) = decisao.escolha else { return Err("ValueError: opção inválida".into()); };
+        if let Some(spec) = drill.remove(&i) {
+            regiao = spec;
+            r.passos.push(format!("{}. {} [{}]", r.passos.len() + 1, acoes[i].descricao, percentual(decisao.p)));
+            continue;
+        }
         let mut candidato = acoes.get(i).ok_or("IndexError: list index out of range")?.clone();
         let mut fila = fila.into_iter();
         let primeiro_plano = obs.foreground.clone();
@@ -1075,7 +1121,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             if matches!(retorno, Err(SessionError::NotDelivered(_))) {
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let nova = controle.medir("observacao", Progresso::Observacao,
-                    async { observar(s).await.map_err(erro_sessao) }).await?;
+                    async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
                 if let Some(de_novo) = mesmo_alvo(acao, &vista, &nova) {
                     candidato.acao = de_novo;
                     vista = nova;
@@ -1133,7 +1179,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             // The agent consumes each observation id: the next key/text needs a fresh one.
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             vista = controle.medir("observacao", Progresso::Observacao,
-                async { observar(s).await.map_err(erro_sessao) }).await?;
+                async { observar(s, &Scope::default()).await.map_err(erro_sessao) }).await?;
             let nova = assinatura_tela(&vista);
             if let Some(ultima) = recentes.last_mut() { ultima.screen_changed = mudou(&atual, &nova); }
             atual = nova;

@@ -5,7 +5,7 @@ pub mod comandos;
 pub mod entrada;
 pub mod hypr;
 
-use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, escalar, role_name, walk};
+use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, escalar, role_name};
 use comandos::{Comandos, ComandosSistema};
 use hcc_protocolo::{Action, ActionType, Button, Delivery, Desktop, DesktopError, ErrorKind, MouseMode, Observation, Rect, Scope, Screen, Window, dividir_comando};
 use serde_json::Value;
@@ -456,7 +456,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
     }
 
     fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
-        if !scope.is_default() { return Err(invalid("escopo de leitura ainda não suportado")); }
+        if scope.window.is_some() { return Err(invalid("leitura de uma janela por id ainda não suportada")); }
         self.available()?;
         self.observed_at = None; self.elements.clear(); self.windows.clear();
         let (active, area, monitor) = self.current()?;
@@ -477,7 +477,13 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         let screen = Screen { width: (area.2 - area.0) as u32, height: (area.3 - area.1) as u32 };
         let (elements, truncated) = if self.foreground != "desktop" {
             let window = windows.iter().find(|w| w.id == self.foreground).ok_or_else(|| runtime("a janela ativa mudou durante a observação"))?;
-            let (elements, nodes, cut) = walk(&self.tree, self.roots(&active)?, window.rect, escala, Duration::from_secs(4), 800).map_err(runtime)?;
+            let roots = self.roots(&active)?;
+            let roots = match &scope.root {
+                Some(spec) => vec![arvore::achar_regiao(&self.tree, roots, window.rect, escala, spec).ok_or_else(|| invalid("região sumiu; observe a janela inteira"))?],
+                None => roots.into_iter().map(|n| (n, 1.0)).collect(),
+            };
+            let niveis = scope.skeleton.then_some(hcc_protocolo::ESQUELETO_NIVEIS);
+            let (elements, nodes, cut) = arvore::walk_ate(&self.tree, roots, window.rect, escala, Duration::from_secs(4), 800, niveis).map_err(runtime)?;
             for (element, (node, fator)) in elements.iter().zip(nodes) {
                 self.elements.insert(element.id.clone(), ObservedElement { node, name: element.name.clone(), role: element.role.clone(), fator });
             }

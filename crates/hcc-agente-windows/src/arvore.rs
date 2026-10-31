@@ -2,11 +2,12 @@
 
 use crate::regras::{self, runtime_err};
 use crate::{entrada, sessao_win};
-use hcc_protocolo::{DesktopError, Element, ElementAction, ErrorKind, Rect, Window};
+use hcc_protocolo::{DesktopError, Element, ElementAction, ErrorKind, Rect, RootSpec, Scope, Window};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
-use uiautomation::patterns::{UIExpandCollapsePattern, UIInvokePattern, UIScrollPattern, UISelectionItemPattern, UITextPattern, UITogglePattern, UIValuePattern};
-use uiautomation::types::{ExpandCollapseState, Handle, ToggleState, TreeScope};
+use uiautomation::patterns::{UIExpandCollapsePattern, UIInvokePattern, UIPatternType, UIScrollPattern, UISelectionItemPattern, UITextPattern, UITogglePattern, UIValuePattern};
+use uiautomation::types::{ExpandCollapseState, Handle, ToggleState, TreeScope, UIProperty};
+use uiautomation::core::UICacheRequest;
 use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
@@ -86,6 +87,44 @@ fn filhos(ua: &UIAutomation, el: &UIElement) -> Result<Vec<UIElement>, DesktopEr
     el.find_all(TreeScope::Children, &todos).map_err(com)
 }
 
+/// Everything `elemento` reads, fetched with the children in one call per parent instead of one per property.
+fn pedido_cache(ua: &UIAutomation) -> Result<UICacheRequest, DesktopError> {
+    let pedido = ua.create_cache_request().map_err(com)?;
+    for p in [
+        UIProperty::Name,
+        UIProperty::ControlType,
+        UIProperty::BoundingRectangle,
+        UIProperty::IsOffscreen,
+        UIProperty::IsPassword,
+        UIProperty::IsEnabled,
+        UIProperty::HasKeyboardFocus,
+        UIProperty::IsKeyboardFocusable,
+        UIProperty::ToggleToggleState,
+        UIProperty::SelectionItemIsSelected,
+        UIProperty::ExpandCollapseExpandCollapseState,
+        UIProperty::ValueValue,
+        UIProperty::ValueIsReadOnly,
+    ] {
+        pedido.add_property(p).map_err(com)?;
+    }
+    for p in [
+        UIPatternType::Invoke,
+        UIPatternType::SelectionItem,
+        UIPatternType::Toggle,
+        UIPatternType::Scroll,
+        UIPatternType::ExpandCollapse,
+        UIPatternType::Value,
+    ] {
+        pedido.add_pattern(p).map_err(com)?;
+    }
+    Ok(pedido)
+}
+
+fn filhos_cache(ua: &UIAutomation, el: &UIElement, pedido: &UICacheRequest) -> Result<Vec<UIElement>, DesktopError> {
+    let todos = ua.create_true_condition().map_err(com)?;
+    el.find_all_build_cache(TreeScope::Children, &todos, pedido).map_err(com)
+}
+
 /// pywinauto's set_focus: UIA SetFocus, falling back to the window handle; failures only warn there.
 pub(crate) fn focar(el: &UIElement) {
     if el.set_focus().is_err()
@@ -159,7 +198,7 @@ fn popups(foreground: HWND, pid: u32) -> Vec<isize> {
     busca.achados
 }
 
-pub(crate) fn ler(ua: &UIAutomation) -> Result<Lido, DesktopError> {
+pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError> {
     let fg = sessao_win::primeiro_plano();
     let raiz = ua.get_root_element().map_err(com)?;
     let mut enumeradas = filhos(ua, &raiz)?;
@@ -193,12 +232,13 @@ pub(crate) fn ler(ua: &UIAutomation) -> Result<Lido, DesktopError> {
     let foreground = id_janela(fg);
     let ativa = janelas.get(&foreground).ok_or_else(|| runtime_err("a janela ativa mudou durante a observação"))?;
     // Read limit, not an application limit: `truncated` says when it cut.
-    // Each pending node with the index of its nearest ancestor that became an element.
-    let mut pendentes: VecDeque<(UIElement, Option<usize>)> = filhos(ua, &ativa.el)?.into_iter().map(|e| (e, None)).collect();
+    // Each pending node with the index of its nearest ancestor that became an element, and its depth.
+    let pedido = pedido_cache(ua)?;
+    let mut pendentes: VecDeque<(UIElement, Option<usize>, usize)> = filhos_cache(ua, &ativa.el, &pedido)?.into_iter().map(|e| (e, None, 0)).collect();
     let pid_ativa = ativa.el.get_process_id().map_err(com)?;
     for h in popups(HWND(fg as *mut _), pid_ativa) {
-        if let Ok(f) = ua.element_from_handle(Handle::from(h)).and_then(|p| p.find_all(TreeScope::Children, &ua.create_true_condition()?)) {
-            pendentes.extend(f.into_iter().map(|e| (e, None)));
+        if let Ok(f) = ua.element_from_handle(Handle::from(h)).map_err(com).and_then(|p| filhos_cache(ua, &p, &pedido)) {
+            pendentes.extend(f.into_iter().map(|e| (e, None, 0)));
         }
     }
     // Taskbar buttons always: a minimised VCL app (hidden window) only comes back through them.
@@ -206,10 +246,16 @@ pub(crate) fn ler(ua: &UIAutomation) -> Result<Lido, DesktopError> {
     if let Ok(barra) = unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }
         && !barra.is_invalid()
         && barra.0 as isize != fg
-        && let Ok(f) = ua.element_from_handle(Handle::from(barra.0 as isize)).and_then(|p| p.find_all(TreeScope::Children, &ua.create_true_condition()?))
+        && let Ok(f) = ua.element_from_handle(Handle::from(barra.0 as isize)).map_err(com).and_then(|p| filhos_cache(ua, &p, &pedido))
     {
-        pendentes.extend(f.into_iter().map(|e| (e, None)));
+        pendentes.extend(f.into_iter().map(|e| (e, None, 0)));
     }
+    if let Some(spec) = &scope.root {
+        let regiao = achar_regiao(ua, pendentes.drain(..).map(|(e, _, _)| e).collect(), &pedido, spec)?
+            .ok_or_else(|| regras::valor_err("região sumiu; observe a janela inteira"))?;
+        pendentes.push_back((regiao, None, 0));
+    }
+    let niveis = scope.skeleton.then_some(hcc_protocolo::ESQUELETO_NIVEIS);
     let mut elements = Vec::new();
     let mut controles = HashMap::new();
     let mut visitados = 0;
@@ -217,42 +263,71 @@ pub(crate) fn ler(ua: &UIAutomation) -> Result<Lido, DesktopError> {
     // Time budget, not just nodes: Chrome gives 800 nodes in 2 s, the Delphi IDE ~150 in 4 s.
     let prazo = Instant::now() + PRAZO;
     while visitados < MAX_NOS && Instant::now() < prazo {
-        let Some((el, ancestral)) = pendentes.pop_front() else { break };
+        let Some((el, ancestral, nivel)) = pendentes.pop_front() else { break };
         visitados += 1;
-        let senha = el.is_password().map_err(com)?;
+        let senha = el.is_cached_password().map_err(com)?;
         // An "invisible" container (popup host, pane without a rect) still has visible children.
-        let mut seus = filhos(ua, &el)?;
+        let mut seus = filhos_cache(ua, &el, &pedido)?;
         let (lidos, cortados) = regras::cortar_filhos(seus.len());
         seus.truncate(lidos);
         let mut ancestral_dos_filhos = ancestral;
-        if !el.is_offscreen().map_err(com)?
+        if !el.is_cached_offscreen().map_err(com)?
             && let Some(e) = elemento(&el, senha, elements.len())?
         {
             ancestral_dos_filhos = Some(elements.len());
             controles.insert(e.id.clone(), Controle { el, name: e.name.clone(), role: e.role.clone() });
             elements.push(e);
         }
-        cortou_filhos |= cortados > 0;
-        regras::somar_nao_lidos(&mut elements, ancestral_dos_filhos, cortados);
-        pendentes.extend(seus.into_iter().map(|f| (f, ancestral_dos_filhos)));
+        // A skeleton stops here: the container only says how many children it has.
+        let alem = if niveis.is_some_and(|n| nivel >= n) { u32::try_from(seus.len()).unwrap_or(u32::MAX) } else { 0 };
+        cortou_filhos |= cortados > 0 || alem > 0;
+        regras::somar_nao_lidos(&mut elements, ancestral_dos_filhos, cortados + alem);
+        if alem == 0 {
+            pendentes.extend(seus.into_iter().map(|f| (f, ancestral_dos_filhos, nivel + 1)));
+        }
     }
     if sessao_win::primeiro_plano() != fg {
         return Err(runtime_err("a janela ativa mudou durante a observação; tente novamente"));
     }
     let truncated = cortou_filhos || !pendentes.is_empty();
-    for (_, ancestral) in pendentes {
+    for (_, ancestral, _) in pendentes {
         regras::somar_nao_lidos(&mut elements, ancestral, 1);
     }
     Ok(Lido { foreground, windows, elements, truncated, janelas, controles })
 }
 
+/// The `spec.index`-th node with that role and name, in the order `ler` lists elements (breadth first).
+fn achar_regiao(ua: &UIAutomation, raizes: Vec<UIElement>, pedido: &UICacheRequest, spec: &RootSpec) -> Result<Option<UIElement>, DesktopError> {
+    let mut fila: VecDeque<UIElement> = raizes.into();
+    let mut iguais = 0;
+    let prazo = Instant::now() + PRAZO;
+    while let Some(el) = fila.pop_front() {
+        if Instant::now() >= prazo {
+            return Ok(None);
+        }
+        if !el.is_cached_offscreen().map_err(com)?
+            && el.get_cached_name().map_err(com)? == spec.name
+            && format!("{:?}", el.get_cached_control_type().map_err(com)?) == spec.role
+        {
+            if iguais == spec.index {
+                return Ok(Some(el));
+            }
+            iguais += 1;
+        }
+        let mut seus = filhos_cache(ua, &el, pedido)?;
+        seus.truncate(regras::cortar_filhos(seus.len()).0);
+        fila.extend(seus);
+    }
+    Ok(None)
+}
+
 fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element>, DesktopError> {
-    let role = papel(el)?;
-    let name = el.get_name().map_err(com)?;
+    let role = format!("{:?}", el.get_cached_control_type().map_err(com)?);
+    let name = el.get_cached_name().map_err(com)?;
     let mut actions = Vec::new();
-    let toggle = padrao(el.get_pattern::<UITogglePattern>())?;
-    let selection = padrao(el.get_pattern::<UISelectionItemPattern>())?;
-    if padrao(el.get_pattern::<UIInvokePattern>())?.is_some() {
+    let toggle = padrao(el.get_cached_pattern::<UITogglePattern>())?;
+    let selection = padrao(el.get_cached_pattern::<UISelectionItemPattern>())?;
+    if padrao(el.get_cached_pattern::<UIInvokePattern>())?.is_some() {
         actions.push(ElementAction::Invoke);
     }
     if selection.is_some() {
@@ -261,16 +336,16 @@ fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element
     if toggle.is_some() {
         actions.push(ElementAction::Toggle);
     }
-    if padrao(el.get_pattern::<UIScrollPattern>())?.is_some() {
+    if padrao(el.get_cached_pattern::<UIScrollPattern>())?.is_some() {
         actions.push(ElementAction::Scroll);
     }
-    if let Some(e) = padrao(el.get_pattern::<UIExpandCollapsePattern>())? {
-        let recolhido = e.get_state().map_err(com)? == ExpandCollapseState::Collapsed;
+    if let Some(e) = padrao(el.get_cached_pattern::<UIExpandCollapsePattern>())? {
+        let recolhido = e.get_cached_state().map_err(com)? == ExpandCollapseState::Collapsed;
         actions.push(if recolhido { ElementAction::Expand } else { ElementAction::Collapse });
     }
     let mut value = if let Some(t) = &toggle {
         Some(
-            match t.get_toggle_state().map_err(com)? {
+            match t.get_cached_toggle_state().map_err(com)? {
                 ToggleState::Off => "off",
                 ToggleState::On => "on",
                 _ => "indeterminate",
@@ -280,14 +355,14 @@ fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element
     } else if let Some(s) = &selection
         && matches!(role.as_str(), "RadioButton" | "ListItem" | "TabItem" | "TreeItem" | "DataItem")
     {
-        Some(if s.is_selected().map_err(com)? { "selected" } else { "not selected" }.to_string())
+        Some(if s.is_cached_selected().map_err(com)? { "selected" } else { "not selected" }.to_string())
     } else {
         None
     };
-    if let Some(edit) = padrao(el.get_pattern::<UIValuePattern>())? {
+    if let Some(edit) = padrao(el.get_cached_pattern::<UIValuePattern>())? {
         // A password field enters the tree to be typed into, but its content never leaves Windows.
-        value = if senha { None } else { Some(edit.get_value().map_err(com)?) };
-        if !edit.is_readonly().map_err(com)? {
+        value = if senha { None } else { Some(edit.get_cached_value().map_err(com)?) };
+        if !edit.cached_is_readonly().map_err(com)? {
             actions.push(ElementAction::SetValue);
         }
     } else if !senha
@@ -297,7 +372,7 @@ fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element
         // Consoles and unnamed viewers expose their text only through TextPattern.
         value = Some(t.get_document_range().map_err(com)?.get_text(4000).map_err(com)?);
     }
-    if el.is_keyboard_focusable().map_err(com)? {
+    if el.is_cached_keyboard_focusable().map_err(com)? {
         actions.push(ElementAction::Focus);
     }
     if actions.is_empty() && name.is_empty() && value.is_none() {
@@ -306,9 +381,12 @@ fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element
     Ok(Some(Element {
         id: format!("e{indice}"),
         value: value.map(|v| regras::corta(&v, 4000)),
-        enabled: el.is_enabled().map_err(com)?,
-        rect: Some(rect(el)?),
-        focused: el.has_keyboard_focus().map_err(com)?,
+        enabled: el.is_cached_enabled().map_err(com)?,
+        rect: Some({
+            let r = el.get_cached_bounding_rectangle().map_err(com)?;
+            Rect(r.get_left(), r.get_top(), r.get_right(), r.get_bottom())
+        }),
+        focused: el.has_cached_keyboard_focus().map_err(com)?,
         actions,
         password: senha,
         unread: None,

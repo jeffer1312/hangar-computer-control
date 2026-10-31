@@ -427,12 +427,12 @@ mod desktop {
         }
 
         fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
-            if !scope.is_default() {
-                return Err(valor_err("escopo de leitura ainda não suportado"));
+            if scope.window.is_some() {
+                return Err(valor_err("leitura de uma janela por id ainda não suportada"));
             }
             self.janelas.clear();
             self.controles.clear();
-            let lido = arvore::ler(&self.ua)?;
+            let lido = arvore::ler(&self.ua, scope)?;
             self.janelas = lido.janelas;
             self.controles = lido.controles;
             let (w, h) = sessao_win::tela();

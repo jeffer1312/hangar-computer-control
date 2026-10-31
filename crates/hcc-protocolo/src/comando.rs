@@ -27,6 +27,9 @@ pub enum Command {
     },
 }
 
+/// Levels a skeleton read goes below its roots; deeper children only count as `unread` on their container.
+pub const ESQUELETO_NIVEIS: usize = 2;
+
 /// What an observation reads. The default is the whole foreground window.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]

@@ -289,16 +289,47 @@ pub type WalkResult<N> = (Vec<Element>, Vec<(N, f64)>, bool);
 /// `escala` is the monitor's: Chromium/Electron web content on a scaled Wayland output reports physical pixels
 /// while the frame reports logical ones; each node carries the factor that brings its extents to logical.
 pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64, budget: Duration, limit: usize) -> Result<WalkResult<T::Node>, String> {
+    walk_ate(tree, roots.into_iter().map(|n| (n, 1.0)).collect(), window, escala, budget, limit, None)
+}
+
+/// The node (and its scale factor) of the `spec.index`-th control with that role and name, in the order `walk`
+/// lists controls.
+pub fn achar_regiao<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64, spec: &hcc_protocolo::RootSpec) -> Option<(T::Node, f64)> {
+    let mut pending: VecDeque<(T::Node, f64)> = roots.into_iter().map(|n| (n, 1.0)).collect();
+    let mut iguais = 0;
+    let start = Instant::now();
+    while let Some((node, mut fator)) = pending.pop_front() {
+        if start.elapsed() > Duration::from_secs(4) { return None; }
+        let Ok(mut info) = tree.read(&node) else { continue };
+        if !info.has("showing") { continue; }
+        if fator == 1.0 && fisico(&info, None, escala) { fator = 1.0 / escala; }
+        info.extents = info.extents.map(|e| escalar(e, fator));
+        // Same skips as `walk`, so the order among equals is the one the observation showed.
+        let rect = info.extents.and_then(|e| element_rect(e, window));
+        if rect.is_some_and(|r| r.3 <= window.1 || r.1 >= window.3) { continue; }
+        let outside = rect.is_some_and(|r| !intersects(r, window));
+        if !outside && let Some(e) = element_from(&info, window) && e.role == spec.role && e.name == spec.name {
+            if iguais == spec.index { return Some((node, fator)); }
+            iguais += 1;
+        }
+        pending.extend(tree.children(&node).unwrap_or_default().into_iter().map(|c| (c, fator)));
+    }
+    None
+}
+
+/// `walk` reading only `niveis` levels below the roots: the children past them count as unread on their container.
+pub fn walk_ate<T: Arvore>(tree: &T, roots: Vec<(T::Node, f64)>, window: Rect, escala: f64, budget: Duration, limit: usize, niveis: Option<usize>) -> Result<WalkResult<T::Node>, String> {
     // Each pending node with its scale factor, its parent's raw extents and its nearest ancestor that became a control.
-    type Pendente<N> = (N, f64, Option<(i32, i32, i32, i32)>, Option<usize>);
-    let mut pending: VecDeque<Pendente<T::Node>> = roots.into_iter().map(|n| (n, 1.0, None, None)).collect();
+    type Pendente<N> = (N, f64, Option<(i32, i32, i32, i32)>, Option<usize>, usize);
+    let mut pending: VecDeque<Pendente<T::Node>> = roots.into_iter().map(|(n, f)| (n, f, None, None, 0)).collect();
+    let mut esqueleto_cortou = false;
     let (mut controls, mut nodes, mut visited): (Vec<Element>, _, _) = (vec![], vec![], 0);
     let nao_lido = |controls: &mut Vec<Element>, ancestral: Option<usize>| {
         if let Some(c) = ancestral.and_then(|i| controls.get_mut(i)) { *c.unread.get_or_insert(0) += 1; }
     };
     let start = Instant::now();
     while !pending.is_empty() && visited < limit && start.elapsed() < budget {
-        let Some((node, mut fator, pai, ancestral)) = pending.pop_front() else { break; };
+        let Some((node, mut fator, pai, ancestral, nivel)) = pending.pop_front() else { break; };
         visited += 1;
         let mut info = match tree.read(&node) {
             Ok(info) => info,
@@ -329,10 +360,15 @@ pub fn walk<T: Arvore>(tree: &T, roots: Vec<T::Node>, window: Rect, escala: f64,
             ancestral_dos_filhos = Some(controls.len());
             controls.push(element); nodes.push((node, fator));
         }
-        pending.extend(filhos.into_iter().map(|c| (c, fator, bruto.or(pai), ancestral_dos_filhos)));
+        if niveis.is_some_and(|n| nivel >= n) {
+            esqueleto_cortou |= !filhos.is_empty();
+            for _ in &filhos { nao_lido(&mut controls, ancestral_dos_filhos); }
+            continue;
+        }
+        pending.extend(filhos.into_iter().map(|c| (c, fator, bruto.or(pai), ancestral_dos_filhos, nivel + 1)));
     }
-    let cortado = !pending.is_empty();
-    for (_, _, _, ancestral) in pending { nao_lido(&mut controls, ancestral); }
+    let cortado = !pending.is_empty() || esqueleto_cortou;
+    for (_, _, _, ancestral, _) in pending { nao_lido(&mut controls, ancestral); }
     Ok((controls, nodes, cortado))
 }
 

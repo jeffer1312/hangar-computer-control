@@ -15,7 +15,7 @@ use hcc_laco::jev::{JEV_MODEL, Jev, LOTE};
 use hcc_laco::llm::Llm;
 use hcc_laco::resultado::Resultado;
 use hcc_laco::tipos::{Escolha, Progresso};
-use hcc_protocolo::{Action, Delivery, Observation, Rect, SessionError};
+use hcc_protocolo::{Action, Delivery, Observation, Rect, RootSpec, Scope, SessionError};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -2785,4 +2785,49 @@ async fn bloqueio_com_auxiliar_indisponivel() {
     let log = jev_log(&r);
     assert!(log.iter().any(|l| l["auxiliar_indisponivel"] == true), "{log:?}");
     assert!(!log.iter().any(|l| l.get("auxiliar_discorda").is_some()), "{log:?}");
+}
+
+/// A full read of the Editor that hit the budget, with a results list under it.
+fn cortada(id: &str) -> Observation {
+    let mut obs = tree(id, "");
+    obs.truncated = true;
+    obs
+}
+
+/// The skeleton of the same window: the results list stands for its unread children.
+fn esqueleto(id: &str) -> Observation {
+    let mut obs = tree(id, "");
+    obs.truncated = true;
+    obs.elements.push(serde_json::from_value(json!({"id":"e2", "name":"Resultados", "role":"List", "value":null, "enabled":true,
+        "rect":[0,100,400,500], "focused":false, "actions":["scroll"], "unread": 30})).unwrap());
+    obs
+}
+
+#[tokio::test]
+async fn a_cut_window_is_read_as_a_skeleton_and_jev_drills_into_a_region_then_widens() {
+    let con = FakeConnector::new(vec![cortada("o1"), esqueleto("o2"), tree("o3", ""), tree("o4", "Ana")]);
+    { let mut s = con.state.lock().unwrap(); s.advance_on_act = false; s.advance_on_observe = true; }
+    let (mut op, _server) = setup(vec![Answer::Choice("WAIT", 0.9, 0.05), select("DRILL List 'Resultados'"), select("WIDEN"), done()]).await;
+    op.max_passos = 6;
+    let r = run(op, &con).await;
+    let scopes = con.state.lock().unwrap().scopes.clone();
+    assert_eq!(scopes[0], Scope::default());
+    assert!(scopes[1].skeleton && scopes[1].root.is_none(), "{scopes:?}");
+    assert_eq!(scopes[2].root, Some(RootSpec { role: "List".into(), name: "Resultados".into(), index: 0 }), "{scopes:?}");
+    assert!(scopes[3].skeleton && scopes[3].root.is_none(), "WIDEN volta ao esqueleto: {scopes:?}");
+    assert!(con.state.lock().unwrap().acts.is_empty(), "DRILL e WIDEN não são ações: {}", r.resumo());
+    assert!(r.passos.iter().any(|p| p.contains("DRILL List 'Resultados'")), "{}", r.resumo());
+}
+
+#[tokio::test]
+async fn a_cut_read_with_a_dialog_open_stays_whole() {
+    let mut com_dialogo = cortada("o1");
+    com_dialogo.elements.push(serde_json::from_value(json!({"id":"d1", "name":"Confirmar", "role":"Window", "value":null,
+        "enabled":true, "rect":[100,100,300,200], "focused":false, "actions":[]})).unwrap());
+    let con = FakeConnector::new(vec![com_dialogo, tree("o2", "")]);
+    con.state.lock().unwrap().advance_on_observe = true;
+    let (op, _server) = setup(vec![Answer::Choice("WAIT", 0.9, 0.05), done()]).await;
+    run(op, &con).await;
+    let scopes = con.state.lock().unwrap().scopes.clone();
+    assert!(scopes.iter().all(|s| *s == Scope::default()), "{scopes:?}");
 }

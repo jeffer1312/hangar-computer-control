@@ -1,11 +1,11 @@
 #![cfg(target_os = "linux")]
 
 use hcc_agente_linux::LinuxDesktop;
-use hcc_agente_linux::arvore::{Arvore, NoInfo, TreeError, choose_frame, element_from, element_rect, nome_papel, walk};
+use hcc_agente_linux::arvore::{Arvore, NoInfo, TreeError, choose_frame, element_from, element_rect, nome_papel, walk, walk_ate, achar_regiao};
 use hcc_agente_linux::comandos::Comandos;
 use hcc_agente_linux::entrada::{evdev, keys, lua_string};
 use hcc_agente_linux::hypr::{dispatch, monitor_logico, reference_monitor, windows_from};
-use hcc_protocolo::{Action, ActionType, Delivery, Desktop, ElementAction, ErrorKind, Rect, Scope};
+use hcc_protocolo::{Action, ActionType, Delivery, Desktop, ElementAction, ErrorKind, Rect, RootSpec, Scope};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -285,6 +285,35 @@ fn corte_soma_filhos_nao_lidos_no_controle_ancestral() {
     let (controls,_,cut) = walk(&tree,vec![0],Rect(100,100,600,500), 1.0,Duration::from_secs(4),800).unwrap();
     assert!(!cut);
     assert_eq!(controls[0].unread, Some(1));
+}
+
+#[test]
+fn esqueleto_le_ate_dois_niveis_e_conta_o_resto_no_conteiner() {
+    // painel (0) > lista (1) > painel (2) > três itens: os itens ficam de fora e contam na lista.
+    let mut raiz = node("panel", ""); raiz.children = vec![1];
+    let mut lista = node("list", "Resultados"); lista.children = vec![2];
+    let mut grupo = node("panel", ""); grupo.children = vec![3, 4, 5];
+    let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![raiz, lista, grupo, node("label","a"), node("label","b"), node("label","c")])), ..Default::default() };
+    let (controls,_,cut) = walk_ate(&tree,vec![(0,1.0)],Rect(100,100,600,500), 1.0,Duration::from_secs(4),800, Some(2)).unwrap();
+    assert!(cut);
+    assert_eq!(controls.iter().map(|e| (e.name.as_str(), e.unread)).collect::<Vec<_>>(), vec![("Resultados", Some(3))]);
+    let (controls,_,cut) = walk_ate(&tree,vec![(0,1.0)],Rect(100,100,600,500), 1.0,Duration::from_secs(4),800, None).unwrap();
+    assert!(!cut); assert_eq!(controls.len(), 4);
+}
+
+#[test]
+fn regiao_e_achada_por_papel_nome_e_ordem_entre_iguais() {
+    let mut raiz = node("panel", ""); raiz.children = vec![1, 2];
+    let mut primeira = node("list", "Resultados"); primeira.children = vec![3];
+    let mut segunda = node("list", "Resultados"); segunda.children = vec![4];
+    let tree = FakeTree { nodes: Rc::new(RefCell::new(vec![raiz, primeira, segunda, node("label","um"), node("label","dois")])), ..Default::default() };
+    let janela = Rect(100,100,600,500);
+    let segunda = RootSpec { role: "List".into(), name: "Resultados".into(), index: 1 };
+    let achado = achar_regiao(&tree, vec![0], janela, 1.0, &segunda).unwrap();
+    let (controls,_,_) = walk_ate(&tree, vec![achado], janela, 1.0, Duration::from_secs(4), 800, None).unwrap();
+    assert_eq!(controls.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["Resultados", "dois"]);
+    let terceira = RootSpec { index: 2, ..segunda };
+    assert!(achar_regiao(&tree, vec![0], janela, 1.0, &terceira).is_none());
 }
 
 #[test]
