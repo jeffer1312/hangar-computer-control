@@ -162,6 +162,39 @@ pub mod regras {
         na_tela && !matches!(role, "ListItem" | "TreeItem" | "DataItem")
     }
 
+    /// How an action reaches the app.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Caminho {
+        /// Accessibility pattern only: no focus, pointer or key.
+        Padrao,
+        /// Today's path: a real click or keys where the app needs them.
+        Real,
+        /// Background asked, but only real input can do it.
+        Recusa,
+    }
+
+    pub fn caminho(tipo: hcc_protocolo::ActionType, modo: Option<hcc_protocolo::InputMode>) -> Caminho {
+        use hcc_protocolo::{ActionType as T, InputMode};
+        match modo {
+            Some(InputMode::Background) => match tipo {
+                T::Invoke | T::SetValue | T::Select | T::Toggle | T::Check | T::Uncheck | T::Expand | T::Collapse | T::Scroll => Caminho::Padrao,
+                _ => Caminho::Recusa,
+            },
+            _ => Caminho::Real,
+        }
+    }
+
+    /// The user counts as idle after 2 s without input, or when the last input was the agent's own.
+    /// `GetTickCount` milliseconds, which wrap around.
+    pub fn ocioso(agora: u32, ultima_entrada: u32, propria: Option<u32>) -> bool {
+        propria.is_some_and(|p| ultima_entrada.wrapping_sub(p) as i32 <= 0) || agora.wrapping_sub(ultima_entrada) >= 2000
+    }
+
+    /// The user's window goes back in front when another took its place and no menu of the app is open.
+    pub fn devolver(usuario: Option<isize>, frente: isize, menu_aberto: bool) -> bool {
+        usuario.is_some_and(|u| u != frente) && !menu_aberto
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Marca {
         On,
@@ -363,7 +396,7 @@ pub mod regras {
 mod desktop {
     use crate::regras::{self, runtime_err, valor_err};
     use crate::{arvore, captura, entrada, sessao_win};
-    use hcc_protocolo::{Action, ActionType, Amount, Delivery, Desktop, DesktopError, Direction, Observation, Scope, Screen};
+    use hcc_protocolo::{Action, ActionType, Amount, Delivery, Desktop, DesktopError, Direction, InputMode, Observation, Scope, Screen};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use uiautomation::UIAutomation;
@@ -375,6 +408,28 @@ mod desktop {
         ua: UIAutomation,
         janelas: HashMap<String, arvore::Janela>,
         controles: HashMap<String, arvore::Controle>,
+        /// The window that was in front before a background action moved the focus, to give it back.
+        janela_do_usuario: Option<isize>,
+        /// `GetLastInputInfo` time of the agent's own last input.
+        entrada_propria: Option<u32>,
+    }
+
+    /// UIA objects live in the multithreaded apartment: usable from the thread that waits on a blocking Invoke.
+    struct Enviar(UIInvokePattern);
+    // SAFETY: the agent initialises COM multithreaded, where these interface pointers may cross threads.
+    unsafe impl Send for Enviar {}
+    impl Enviar {
+        fn dentro(self) -> UIInvokePattern {
+            self.0
+        }
+    }
+
+    impl Drop for WindowsDesktop {
+        fn drop(&mut self) {
+            if let Some(h) = self.janela_do_usuario.take() {
+                arvore::focar_hwnd(h);
+            }
+        }
     }
 
     impl WindowsDesktop {
@@ -383,74 +438,11 @@ mod desktop {
             sessao_win::dpi_por_monitor();
             let sessao = sessao_win::Sessao::abrir().map_err(|e| e.to_string())?;
             let ua = UIAutomation::new().map_err(|e| arvore::com(e).to_string())?;
-            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new() })
+            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None })
         }
 
-        fn controle(&self, alvo: Option<&str>) -> Result<&arvore::Controle, DesktopError> {
-            alvo.and_then(|a| self.controles.get(a)).ok_or_else(|| valor_err("controle não pertence à observação").nao_entregue())
-        }
-    }
-
-    fn pausa(segundos: f64) {
-        std::thread::sleep(Duration::from_secs_f64(segundos));
-    }
-
-    fn padrao<T>(r: uiautomation::Result<T>) -> Result<T, DesktopError> {
-        r.map_err(arvore::com)
-    }
-
-    fn quantidade(n: i32) -> ScrollAmount {
-        match n {
-            0 => ScrollAmount::LargeDecrement,
-            1 => ScrollAmount::SmallDecrement,
-            3 => ScrollAmount::LargeIncrement,
-            4 => ScrollAmount::SmallIncrement,
-            _ => ScrollAmount::NoAmount,
-        }
-    }
-
-    impl Desktop for WindowsDesktop {
-        fn session_id(&self) -> u32 {
-            self.sessao.id
-        }
-
-        fn available(&mut self) -> Result<(), DesktopError> {
-            self.sessao.disponivel()
-        }
-
-        fn foreground(&mut self) -> Result<String, DesktopError> {
-            Ok(arvore::id_janela(sessao_win::primeiro_plano()))
-        }
-
-        fn has_window(&mut self, id: &str) -> Result<bool, DesktopError> {
-            Ok(sessao_win::janela_existe(id))
-        }
-
-        fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
-            if scope.window.is_some() {
-                return Err(valor_err("leitura de uma janela por id ainda não suportada"));
-            }
-            self.janelas.clear();
-            self.controles.clear();
-            let lido = arvore::ler(&self.ua, scope)?;
-            self.janelas = lido.janelas;
-            self.controles = lido.controles;
-            let (w, h) = sessao_win::tela();
-            Ok(Observation {
-                observation_id: String::new(),
-                connected: true,
-                session_id: self.sessao.id,
-                foreground: lido.foreground,
-                windows: lido.windows,
-                elements: lido.elements,
-                apps: vec![],
-                truncated: lido.truncated,
-                timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
-                screen: Screen { width: w.max(0) as u32, height: h.max(0) as u32 },
-            })
-        }
-
-        fn act(&mut self, _observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
+        /// Today's path: real clicks and keys where the app needs them.
+        fn agir_real(&mut self, action: &Action) -> Result<Delivery, DesktopError> {
             let target = action.target.as_deref();
             let mut entrega = Delivery::DeliveredUnverified;
             match action.kind {
@@ -563,9 +555,173 @@ mod desktop {
             Ok(entrega)
         }
 
+        /// Accessibility patterns only: no focus, pointer or key reaches the app.
+        fn agir_padrao(&mut self, action: &Action) -> Result<Delivery, DesktopError> {
+            let c = self.controle(action.target.as_deref())?;
+            let el = &c.el;
+            let nome = padrao(el.get_name()).map_err(DesktopError::nao_entregue)?;
+            let role = arvore::papel(el).map_err(DesktopError::nao_entregue)?;
+            if nome != c.name || role != c.role || !padrao(el.is_enabled()).map_err(DesktopError::nao_entregue)? {
+                return Err(runtime_err("controle mudou; observe novamente").nao_entregue());
+            }
+            let pronto = Delivery::DeliveredUnverified;
+            match action.kind {
+                ActionType::Invoke => {
+                    // A button that opens a modal dialog may not return until the dialog closes.
+                    let invocar = Enviar(padrao(el.get_pattern::<UIInvokePattern>()).map_err(DesktopError::nao_entregue)?);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(invocar.dentro().invoke());
+                    });
+                    match rx.recv_timeout(Duration::from_secs(2)) {
+                        Ok(r) => padrao(r).map(|()| pronto),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(pronto),
+                        Err(e) => Err(runtime_err(e.to_string())),
+                    }
+                }
+                ActionType::SetValue => {
+                    let valor = action.value.as_deref().filter(|v| v.chars().count() <= 20000).ok_or_else(|| valor_err("valor inválido").nao_entregue())?;
+                    let campo = padrao(el.get_pattern::<UIValuePattern>()).map_err(DesktopError::nao_entregue)?;
+                    padrao(campo.set_value(valor))?;
+                    if padrao(el.is_password())? {
+                        return Ok(pronto);
+                    }
+                    let lido = padrao(campo.get_value())?;
+                    if !regras::valor_confirmado(&lido, valor) {
+                        return Err(regras::valor_nao_confirmado(&lido));
+                    }
+                    Ok(Delivery::DeliveredVerified)
+                }
+                ActionType::Select => padrao(padrao(el.get_pattern::<UISelectionItemPattern>())?.select()).map(|()| pronto),
+                ActionType::Toggle => padrao(padrao(el.get_pattern::<UITogglePattern>())?.toggle()).map(|()| pronto),
+                ActionType::Check | ActionType::Uncheck => {
+                    let caixa = padrao(el.get_pattern::<UITogglePattern>()).map_err(DesktopError::nao_entregue)?;
+                    let ler = || {
+                        padrao(caixa.get_toggle_state()).map(|s| match s {
+                            ToggleState::On => regras::Marca::On,
+                            ToggleState::Off => regras::Marca::Off,
+                            _ => regras::Marca::Indeterminate,
+                        })
+                    };
+                    regras::marcar(action.kind == ActionType::Check, ler, || padrao(caixa.toggle()), Duration::from_millis(500))
+                }
+                ActionType::Expand => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>())?.expand()).map(|()| pronto),
+                ActionType::Collapse => padrao(padrao(el.get_pattern::<UIExpandCollapsePattern>())?.collapse()).map(|()| pronto),
+                ActionType::Scroll => {
+                    let (hz, vt) = regras::quantidade_scroll(action.direction.unwrap_or(Direction::Down), action.amount.unwrap_or(Amount::Small));
+                    padrao(padrao(el.get_pattern::<UIScrollPattern>())?.scroll(quantidade(hz), quantidade(vt))).map(|()| pronto)
+                }
+                _ => Err(valor_err("precisa de entrada real").nao_entregue()),
+            }
+        }
+
+        /// The user's window goes back in front unless the app opened a menu the next action needs.
+        fn devolver_janela(&mut self) {
+            let frente = sessao_win::primeiro_plano();
+            if regras::devolver(self.janela_do_usuario, frente, arvore::menu_aberto(frente)) {
+                arvore::focar_hwnd(self.janela_do_usuario.take().unwrap_or_default());
+            } else if self.janela_do_usuario == Some(frente) {
+                self.janela_do_usuario = None;
+            }
+        }
+
+        fn controle(&self, alvo: Option<&str>) -> Result<&arvore::Controle, DesktopError> {
+            alvo.and_then(|a| self.controles.get(a)).ok_or_else(|| valor_err("controle não pertence à observação").nao_entregue())
+        }
+    }
+
+    fn pausa(segundos: f64) {
+        std::thread::sleep(Duration::from_secs_f64(segundos));
+    }
+
+    fn padrao<T>(r: uiautomation::Result<T>) -> Result<T, DesktopError> {
+        r.map_err(arvore::com)
+    }
+
+    fn quantidade(n: i32) -> ScrollAmount {
+        match n {
+            0 => ScrollAmount::LargeDecrement,
+            1 => ScrollAmount::SmallDecrement,
+            3 => ScrollAmount::LargeIncrement,
+            4 => ScrollAmount::SmallIncrement,
+            _ => ScrollAmount::NoAmount,
+        }
+    }
+
+    impl Desktop for WindowsDesktop {
+        fn session_id(&self) -> u32 {
+            self.sessao.id
+        }
+
+        fn available(&mut self) -> Result<(), DesktopError> {
+            self.sessao.disponivel()
+        }
+
+        fn foreground(&mut self) -> Result<String, DesktopError> {
+            Ok(arvore::id_janela(sessao_win::primeiro_plano()))
+        }
+
+        fn has_window(&mut self, id: &str) -> Result<bool, DesktopError> {
+            Ok(sessao_win::janela_existe(id))
+        }
+
+        fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
+            self.janelas.clear();
+            self.controles.clear();
+            let lido = arvore::ler(&self.ua, scope)?;
+            self.janelas = lido.janelas;
+            self.controles = lido.controles;
+            let (w, h) = sessao_win::tela();
+            Ok(Observation {
+                observation_id: String::new(),
+                connected: true,
+                session_id: self.sessao.id,
+                foreground: lido.foreground,
+                windows: lido.windows,
+                elements: lido.elements,
+                apps: vec![],
+                truncated: lido.truncated,
+                timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
+                screen: Screen { width: w.max(0) as u32, height: h.max(0) as u32 },
+            })
+        }
+
+        fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
+            if action.input.is_none_or(|m| m == InputMode::Real) {
+                return self.agir_real(action);
+            }
+            let caminho = regras::caminho(action.kind, action.input);
+            if caminho == regras::Caminho::Recusa {
+                return Err(valor_err("precisa de entrada real").nao_entregue());
+            }
+            let (agora, ultima) = sessao_win::relogio_de_entrada();
+            if !regras::ocioso(agora, ultima, self.entrada_propria) {
+                return Err(runtime_err("usuário ativo").nao_entregue());
+            }
+            let alvo = self.janelas.get(&observed.foreground).map_or(0, |j| j.hwnd);
+            let frente = sessao_win::primeiro_plano();
+            if self.janela_do_usuario.is_none() && frente != alvo {
+                self.janela_do_usuario = Some(frente);
+            }
+            let feito = if caminho == regras::Caminho::Padrao {
+                self.agir_padrao(action)
+            } else {
+                if let Some(j) = self.janelas.get(&observed.foreground) {
+                    arvore::focar_janela(j);
+                }
+                let r = self.agir_real(action);
+                // The input just sent is ours: it must not count as the user being active.
+                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
+                r
+            };
+            self.devolver_janela();
+            feito
+        }
+
         fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
-            if window.is_some() {
-                return Err(valor_err("print de uma janela ainda não suportado"));
+            if let Some(id) = window {
+                let hwnd = sessao_win::hwnd_de(id).filter(|_| sessao_win::janela_existe(id)).ok_or_else(|| runtime_err("a janela fechou"))?;
+                return captura::png_janela(hwnd);
             }
             let (w, h) = sessao_win::tela();
             captura::png_tela(w, h)

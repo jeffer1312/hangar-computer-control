@@ -8,6 +8,8 @@ use windows::Win32::System::StationsAndDesktops::{CloseDesktop, DESKTOP_CONTROL_
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, WaitForSingleObject,
 };
+use windows::Win32::System::SystemInformation::GetTickCount;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetShellWindow, GetSystemMetrics, IsWindow, SM_CXSCREEN, SM_CYSCREEN};
 use windows::core::{HSTRING, PWSTR};
@@ -76,9 +78,13 @@ impl Sessao {
 }
 
 /// Foreground window, or the shell window on an empty desktop (Program Manager plays the part).
+pub(crate) fn hwnd_de(id: &str) -> Option<isize> {
+    id.strip_prefix('w').and_then(|h| h.parse::<isize>().ok())
+}
+
 /// `id` is a `Window.id` (`w<hwnd>`).
 pub(crate) fn janela_existe(id: &str) -> bool {
-    let Some(hwnd) = id.strip_prefix('w').and_then(|h| h.parse::<isize>().ok()) else { return false };
+    let Some(hwnd) = hwnd_de(id) else { return false };
     // SAFETY: IsWindow accepts any handle value.
     unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool()
 }
@@ -98,6 +104,15 @@ pub(crate) fn nome_processo(pid: u32) -> String {
         let caminho = String::from_utf16_lossy(&buffer[..tamanho as usize]);
         caminho.rsplit('\\').next().unwrap_or_default().to_lowercase()
     }
+}
+
+/// `(now, last input)` in `GetTickCount` milliseconds.
+pub(crate) fn relogio_de_entrada() -> (u32, u32) {
+    let mut info = LASTINPUTINFO { cbSize: size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    // SAFETY: `info` outlives the call and carries its size.
+    let _ = unsafe { GetLastInputInfo(&mut info) };
+    // SAFETY: argument-less query.
+    (unsafe { GetTickCount() }, info.dwTime)
 }
 
 pub(crate) fn primeiro_plano() -> isize {

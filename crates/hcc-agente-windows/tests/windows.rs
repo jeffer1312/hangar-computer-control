@@ -342,3 +342,34 @@ fn check_reads_first_and_toggles_again_only_past_indeterminate() {
     assert_eq!(rodar(Marca::Off, vec![Marca::Indeterminate, Marca::On], true, s), (Delivery::DeliveredVerified, 2));
     assert_eq!(rodar(Marca::On, vec![Marca::On], false, Duration::ZERO), (Delivery::DeliveredUnverified, 1));
 }
+
+#[test]
+fn background_uses_patterns_and_refuses_what_needs_real_input() {
+    use hcc_protocolo::InputMode::{Background, Polite, Real};
+    for tipo in [ActionType::Invoke, ActionType::SetValue, ActionType::Select, ActionType::Toggle, ActionType::Check, ActionType::Expand, ActionType::Scroll] {
+        assert_eq!(caminho(tipo, Some(Background)), Caminho::Padrao, "{tipo}");
+    }
+    for tipo in [ActionType::Keys, ActionType::Text, ActionType::Mouse, ActionType::Activate, ActionType::Focus, ActionType::Launch] {
+        assert_eq!(caminho(tipo, Some(Background)), Caminho::Recusa, "{tipo}");
+    }
+    assert_eq!(caminho(ActionType::Invoke, Some(Polite)), Caminho::Real);
+    assert_eq!(caminho(ActionType::Invoke, Some(Real)), Caminho::Real);
+    assert_eq!(caminho(ActionType::Invoke, None), Caminho::Real);
+}
+
+#[test]
+fn idle_counts_from_the_user_input_not_from_the_agent_own() {
+    assert!(!ocioso(10_000, 9_000, None), "mexeu há 1 s");
+    assert!(ocioso(10_000, 7_900, None), "parado há 2,1 s");
+    assert!(ocioso(10_000, 9_500, Some(9_500)), "a última entrada foi a do próprio agente");
+    assert!(!ocioso(10_000, 9_600, Some(9_500)), "mexeu depois do agente");
+    assert!(ocioso(1_000, u32::MAX - 2_000, None), "contador do Windows deu a volta");
+}
+
+#[test]
+fn user_window_comes_back_unless_a_menu_is_open() {
+    assert!(devolver(Some(7), 9, false));
+    assert!(!devolver(Some(7), 9, true), "menu aberto: devolver fecharia");
+    assert!(!devolver(Some(7), 7, false), "já está na frente");
+    assert!(!devolver(None, 9, false));
+}

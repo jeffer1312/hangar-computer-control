@@ -76,6 +76,8 @@ pub trait Arvore {
     fn focus(&self, node: &Self::Node) -> Result<bool, TreeError>;
     fn invoke(&self, node: &Self::Node, index: usize) -> Result<bool, TreeError>;
     fn text(&self, node: &Self::Node) -> Result<String, TreeError>;
+    /// Replaces the text of an editable control without focus or keys (EditableText).
+    fn set_text(&self, node: &Self::Node, text: &str) -> Result<bool, TreeError>;
     /// Asks for the attributes: Chromium/Electron take it as an assistive technology and build their tree.
     fn despertar(&self, node: &Self::Node) -> Result<(), TreeError>;
 }
@@ -188,6 +190,16 @@ impl Arvore for AtspiTree {
 
     fn text(&self, node: &Self::Node) -> Result<String, TreeError> {
         self.call(async { self.text_proxy(node).await?.get_text(0, -1).await.map_err(classify_error) })
+    }
+
+    fn set_text(&self, node: &Self::Node, text: &str) -> Result<bool, TreeError> {
+        self.call(async {
+            let editavel = atspi::proxy::editable_text::EditableTextProxy::builder(self.connection.connection())
+                .destination(node.name().ok_or_else(|| TreeError::Vanished("aplicativo encerrado".into()))?.clone()).map_err(classify_error)?
+                .path(node.path()).map_err(classify_error)?.cache_properties(zbus::proxy::CacheProperties::No)
+                .build().await.map_err(classify_error)?;
+            editavel.set_text_contents(text).await.map_err(classify_error)
+        })
     }
 
     fn despertar(&self, node: &Self::Node) -> Result<(), TreeError> {

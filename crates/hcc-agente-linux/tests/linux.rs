@@ -86,6 +86,11 @@ impl Arvore for FakeTree {
         if let Some(children) = nodes[*node].wake_children.take() { nodes[*node].children = children; }
         Ok(())
     }
+    fn set_text(&self, node: &usize, text: &str) -> Result<bool, TreeError> {
+        self.events.borrow_mut().push(format!("set_text:{node}:{text}"));
+        *self.readback.borrow_mut() = Some(text.into());
+        Ok(true)
+    }
     fn text(&self, node: &usize) -> Result<String, TreeError> {
         self.events.borrow_mut().push(format!("text:{node}"));
         if let Some(lido) = self.readbacks.borrow_mut().pop_front() { return Ok(lido); }
@@ -120,7 +125,7 @@ impl Default for FakeCommands {
             calls: Rc::default(),
             active: Rc::new(RefCell::new(json!({"address":"0xa", "title":"Editor", "pid":7, "monitor":1, "at":[1542,51], "size":[800,600]}))),
             monitors: Rc::new(RefCell::new(json!([{"id":0,"name":"DP-1","focused":true,"x":0,"y":0,"width":1920,"height":1080,"scale":1.25}, {"id":1,"name":"DP-2","focused":false,"x":1536,"y":0,"width":1920,"height":1080,"scale":1}]))),
-            clients: Rc::new(RefCell::new(json!([{"address":"0xa","title":"Editor","pid":7,"class":"editor","at":[1542,51],"size":[800,600],"mapped":true,"hidden":false}]))),
+            clients: Rc::new(RefCell::new(json!([{"address":"0xa","title":"Editor","pid":7,"class":"editor","monitor":1,"at":[1542,51],"size":[800,600],"mapped":true,"hidden":false}]))),
             dispatch_output: Rc::new(RefCell::new(b"ok\n".to_vec())),
             locked: Rc::default(), fail_keys: Rc::default(), fail_press: Rc::default(), active_error: Rc::default(), fail_release: Rc::default(), classico: Rc::default(),
             cursor: Rc::default(), cursor_stuck: Rc::default(), clipboard: Rc::default(),
@@ -144,7 +149,15 @@ impl Comandos for FakeCommands {
             ["hyprctl", "-j", "monitors"] => Ok(serde_json::to_vec(&*self.monitors.borrow()).unwrap()),
             ["hyprctl", "-j", "clients"] => Ok(serde_json::to_vec(&*self.clients.borrow()).unwrap()),
             ["hyprctl", "dispatch", lua] if *self.classico.borrow() && lua.starts_with("hl.") => Ok(b"Invalid dispatcher".to_vec()),
-            ["hyprctl", "dispatch", _] => Ok(self.dispatch_output.borrow().clone()),
+            ["hyprctl", "dispatch", comando] => {
+                // A focus dispatch brings that window to the front, as Hyprland does.
+                let comando = comando.replace("\\058", ":");
+                if let Some(endereco) = comando.split("address:").nth(1).map(|e| e.trim_end_matches(|c: char| matches!(c, '"' | ' ' | '}' | ')'))) {
+                    let novo = self.clients.borrow().as_array().and_then(|cs| cs.iter().find(|c| c["address"] == endereco).cloned());
+                    if let Some(c) = novo { *self.active.borrow_mut() = c; }
+                }
+                Ok(self.dispatch_output.borrow().clone())
+            }
             ["ydotool", "key", events @ ..] if events.iter().all(|e| e.ends_with(":0")) && self.fail_release.replace(false) => Err("ydotool falhou (3): release falhou".into()),
             ["ydotool", "click", "0x80"] if self.fail_release.replace(false) => Err("ydotool falhou (3): release falhou".into()),
             ["ydotool", "key", ..] if self.fail_keys.replace(false) => Err("ydotool falhou (2): falhou".into()),
@@ -1023,4 +1036,87 @@ fn text_into_a_named_field_pastes_symbols_but_a_password_is_typed() {
     desktop.act(&observed, &Action { value:Some("s3nh@,{x}".into()), ..action(ActionType::Text,Some("e1")) }).unwrap();
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "sh"));
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wtype","-"]));
+}
+
+#[test]
+#[ignore = "desktop real"]
+fn wayland_real_identifies_a_window_and_watches_idle() {
+    let ativa: Value = serde_json::from_slice(&std::process::Command::new("hyprctl").args(["-j", "activewindow"]).output().unwrap().stdout).unwrap();
+    let id = hcc_agente_linux::wayland::identificador(ativa["title"].as_str().unwrap(), ativa["class"].as_str().unwrap()).unwrap();
+    println!("identificador={id}");
+    let png = std::process::Command::new("grim").args(["-T", &id, "-"]).output().unwrap();
+    assert!(png.status.success() && png.stdout.starts_with(b"\x89PNG"), "{}", String::from_utf8_lossy(&png.stderr));
+    let parado = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    hcc_agente_linux::wayland::vigiar_ocioso(parado.clone()).unwrap();
+    std::thread::sleep(Duration::from_millis(2600));
+    println!("parado depois de 2,6 s: {}", parado.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// The Editor (0xa) plus the user's terminal (0xb) in front.
+fn com_terminal_na_frente(desktop: &mut LinuxDesktop<FakeCommands, FakeTree>, commands: &FakeCommands) -> hcc_protocolo::Observation {
+    let terminal = json!({"address":"0xb","title":"Terminal","pid":9,"class":"kitty","monitor":1,"at":[1542,51],"size":[800,600],"mapped":true,"hidden":false});
+    commands.clients.borrow_mut().as_array_mut().unwrap().push(terminal.clone());
+    *commands.active.borrow_mut() = terminal;
+    let observed = desktop.observe(&Scope { window: Some("w0xa".into()), ..Default::default() }).unwrap();
+    commands.calls.borrow_mut().clear();
+    observed
+}
+
+#[test]
+fn background_acts_by_accessibility_on_a_window_behind_without_touching_input() {
+    let mut botao = node("push button", "Salvar"); botao.info.actions = vec!["click".into()];
+    let mut campo = node("entry", "Nome"); campo.info.states.push("editable".into()); campo.info.text = Some(String::new());
+    let (mut desktop, commands, tree) = desktop(vec![botao, campo]);
+    let observed = com_terminal_na_frente(&mut desktop, &commands);
+    assert_eq!(observed.foreground, "w0xa");
+    let invocar = Action { input: Some(hcc_protocolo::InputMode::Background), ..action(ActionType::Invoke, Some("e0")) };
+    desktop.act(&observed, &invocar).unwrap();
+    assert!(tree.events.borrow().iter().any(|e| e.starts_with("invoke:2")), "{:?}", tree.events.borrow());
+    let observed = desktop.observe(&Scope { window: Some("w0xa".into()), ..Default::default() }).unwrap();
+    commands.calls.borrow_mut().clear();
+    let preencher = Action { value: Some("Ana".into()), input: Some(hcc_protocolo::InputMode::Background), ..action(ActionType::SetValue, Some("e1")) };
+    assert_eq!(desktop.act(&observed, &preencher).unwrap(), Delivery::DeliveredVerified);
+    assert!(tree.events.borrow().iter().any(|e| e == "set_text:3:Ana"));
+    let tocou: Vec<_> = commands.calls.borrow().iter().filter(|c| matches!(c.0[0].as_str(), "ydotool" | "wtype") || c.0.get(1).is_some_and(|a| a == "dispatch")).cloned().collect();
+    assert!(tocou.is_empty(), "nada de mouse, tecla ou foco: {tocou:?}");
+    assert_eq!(commands.active.borrow()["address"], "0xb", "o terminal continua na frente");
+}
+
+#[test]
+fn background_refuses_keys_and_waits_for_an_idle_user() {
+    let (mut desktop, commands, _) = desktop(vec![node("push button", "Salvar")]);
+    let observed = com_terminal_na_frente(&mut desktop, &commands);
+    let teclas = Action { keys: Some(vec!["Enter".into()]), input: Some(hcc_protocolo::InputMode::Background), ..action(ActionType::Keys, None) };
+    let erro = desktop.act(&observed, &teclas).unwrap_err();
+    assert_eq!((erro.msg.as_str(), erro.delivery), ("precisa de entrada real", Delivery::NotDelivered));
+    let observed = desktop.observe(&Scope { window: Some("w0xa".into()), ..Default::default() }).unwrap();
+    commands.calls.borrow_mut().clear();
+    desktop.ocioso().store(false, std::sync::atomic::Ordering::Relaxed);
+    let educado = Action { keys: Some(vec!["Enter".into()]), input: Some(hcc_protocolo::InputMode::Polite), ..action(ActionType::Keys, None) };
+    let erro = desktop.act(&observed, &educado).unwrap_err();
+    assert_eq!((erro.msg.as_str(), erro.delivery), ("usuário ativo", Delivery::NotDelivered));
+    assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool" || c.0.get(1).is_some_and(|a| a == "dispatch")));
+}
+
+#[test]
+fn polite_brings_the_app_types_and_gives_the_user_window_back() {
+    let (mut desktop, commands, _) = desktop(vec![node("push button", "Salvar")]);
+    let observed = com_terminal_na_frente(&mut desktop, &commands);
+    let educado = Action { keys: Some(vec!["Enter".into()]), input: Some(hcc_protocolo::InputMode::Polite), ..action(ActionType::Keys, None) };
+    desktop.act(&observed, &educado).unwrap();
+    let chamadas: Vec<String> = commands.calls.borrow().iter().map(|c| c.0.join(" ")).collect();
+    let traz = chamadas.iter().position(|c| c.contains("dispatch") && c.contains("0xa")).expect("traz o app");
+    let tecla = chamadas.iter().position(|c| c.starts_with("ydotool key")).expect("tecla");
+    let devolve = chamadas.iter().rposition(|c| c.contains("dispatch") && c.contains("0xb")).unwrap_or_else(|| panic!("devolve o terminal: {chamadas:#?}"));
+    assert!(traz < tecla && tecla < devolve, "{chamadas:?}");
+    assert_eq!(commands.active.borrow()["address"], "0xb");
+}
+
+#[test]
+fn window_is_captured_by_its_toplevel_identifier() {
+    let (desktop, commands, _) = desktop(vec![node("push button", "Salvar")]);
+    let mut desktop = desktop.com_identificador(|titulo, classe| if (titulo, classe) == ("Editor", "editor") { Ok("abc123".into()) } else { Err("outra".into()) });
+    commands.calls.borrow_mut().clear();
+    assert_eq!(desktop.screenshot_png(Some("w0xa")).unwrap(), b"PNG");
+    assert!(commands.calls.borrow().iter().any(|c| c.0[..3] == ["grim", "-T", "abc123"]), "{:?}", commands.calls.borrow());
 }

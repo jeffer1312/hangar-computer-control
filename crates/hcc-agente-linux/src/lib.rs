@@ -4,10 +4,13 @@ pub mod arvore;
 pub mod comandos;
 pub mod entrada;
 pub mod hypr;
+pub mod wayland;
 
 use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, escalar, role_name};
 use comandos::{Comandos, ComandosSistema};
-use hcc_protocolo::{Action, ActionType, Button, Delivery, Desktop, DesktopError, ErrorKind, MouseMode, Observation, Rect, Scope, Screen, Window, dividir_comando};
+use hcc_protocolo::{Action, ActionType, Button, Delivery, Desktop, DesktopError, ErrorKind, InputMode, MouseMode, Observation, Rect, Scope, Screen, Window, dividir_comando};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -29,6 +32,14 @@ pub struct LinuxDesktop<C: Comandos = ComandosSistema, T: Arvore = AtspiTree> {
     area: Rect,
     apps: Vec<String>,
     despertados: std::sync::Mutex<HashSet<u32>>,
+    /// True while the user has been idle for 2 s (ext-idle-notify); background and polite actions wait for it.
+    parado: Arc<AtomicBool>,
+    /// The toplevel identifier `grim -T` captures, from a window's title and class.
+    identificar: fn(&str, &str) -> Result<String, String>,
+    /// The window in front before a background action moved the focus, to give it back.
+    janela_do_usuario: Option<String>,
+    /// The last observation read a window by id: it may stay behind others.
+    por_id: bool,
 }
 
 impl LinuxDesktop {
@@ -52,6 +63,13 @@ impl LinuxDesktop {
         })?;
         let mut desktop = Self::with_backends(commands, tree, uid);
         desktop._lock = Some(lock);
+        desktop.identificar = wayland::identificador;
+        desktop.parado.store(false, Ordering::Relaxed);
+        if let Err(error) = wayland::vigiar_ocioso(desktop.parado.clone()) {
+            // Without the compositor's idle signal the agent cannot wait for the user: it acts at once.
+            ignorado("ocioso", &error);
+            desktop.parado.store(true, Ordering::Relaxed);
+        }
         Ok(desktop)
     }
 }
@@ -174,11 +192,22 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
     pub fn with_backends(commands: C, tree: T, session_id: u32) -> Self {
         Self { commands, tree, session_id, _lock: None, elements: HashMap::new(), windows: HashMap::new(),
             observed_at: None, foreground: String::new(), area: Rect(0, 0, 0, 0), apps: installed_apps(),
-            despertados: std::sync::Mutex::default() }
+            despertados: std::sync::Mutex::default(), parado: Arc::new(AtomicBool::new(true)),
+            identificar: |_, _| Err("sem identificador de janela".into()), janela_do_usuario: None, por_id: false }
     }
+
+    /// The idle flag, for tests that play the user.
+    pub fn ocioso(&self) -> Arc<AtomicBool> { self.parado.clone() }
+
+    pub fn com_identificador(mut self, identificar: fn(&str, &str) -> Result<String, String>) -> Self { self.identificar = identificar; self }
 
     fn current(&self) -> Result<(Value, Rect, Value), DesktopError> {
         let active = hypr::query(&self.commands, "activewindow").map_err(runtime)?;
+        self.current_de(active)
+    }
+
+    /// `client` with its monitor's logical area and the monitor itself.
+    fn current_de(&self, active: Value) -> Result<(Value, Rect, Value), DesktopError> {
         let monitors = hypr::query(&self.commands, "monitors").map_err(runtime)?;
         let monitor = hypr::reference_monitor(&monitors, &active).map_err(runtime)?;
         Ok((active, hypr::monitor_logico(monitor).map_err(runtime)?, monitor.clone()))
@@ -229,8 +258,43 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         if self.observed_at.is_none_or(|at| at.elapsed() > Duration::from_secs(120)) || observed.foreground != self.foreground {
             return Err(runtime("observação expirada; observe novamente"));
         }
-        if self.foreground()? != self.foreground { return Err(runtime("o foco mudou; observe novamente antes de agir")); }
+        if self.por_id {
+            if !self.has_window(&self.foreground.clone())? { return Err(runtime("a janela fechou; observe novamente antes de agir")); }
+        } else if self.foreground()? != self.foreground { return Err(runtime("o foco mudou; observe novamente antes de agir")); }
         Ok(())
+    }
+
+    /// The Hyprland client of a `Window.id`.
+    fn cliente(&self, id: &str) -> Result<Value, DesktopError> {
+        let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
+        clients.as_array().and_then(|cs| cs.iter().find(|c| c["address"].as_str().is_some_and(|a| format!("w{a}") == id)).cloned())
+            .ok_or_else(|| runtime("a janela fechou; observe novamente"))
+    }
+
+    /// A menu, popup or tooltip of the client's app is showing.
+    fn menu_aberto(&self, client: &Value) -> bool {
+        let Some(pid) = client["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else { return false };
+        let Ok(apps) = self.tree.apps() else { return false };
+        apps.iter().filter(|a| self.tree.pid(a).is_ok_and(|p| p == Some(pid)))
+            .flat_map(|a| self.tree.children(a).unwrap_or_default())
+            .any(|top| self.tree.read(&top).is_ok_and(|i| ["window", "popup menu", "menu", "tool tip"].contains(&i.role.as_str()) && i.has("showing")))
+    }
+
+    /// The user's window goes back in front unless the app opened a menu the next action needs.
+    fn devolver_janela(&mut self) {
+        let Ok(frente) = hypr::query(&self.commands, "activewindow") else { return };
+        let id = foreground_id(&frente);
+        if self.janela_do_usuario.as_ref().is_some_and(|u| *u != id) && !self.menu_aberto(&frente) {
+            let usuario = self.janela_do_usuario.take().unwrap_or_default();
+            if let Err(e) = self.focar(&usuario) { ignorado("devolver_janela", &e); }
+        } else if self.janela_do_usuario.as_deref() == Some(id.as_str()) {
+            self.janela_do_usuario = None;
+        }
+    }
+
+    fn focar(&self, id: &str) -> Result<(), DesktopError> {
+        let endereco = format!("address:{}", id.strip_prefix('w').unwrap_or(id));
+        hypr::dispatch(&self.commands, &format!("hl.dsp.focus({{ window = {} }})", entrada::lua_string(&endereco)), &format!("focuswindow {endereco}")).map_err(runtime)
     }
 
     fn point(&self, x: Option<i32>, y: Option<i32>) -> Result<(), DesktopError> {
@@ -381,14 +445,13 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
 
     /// Check/Uncheck: nothing when the box is already there; else toggles and reads it back, toggling once more
     /// only when it landed on indeterminate.
-    fn marcar(&self, action: &Action, node: &T::Node, info: &NoInfo) -> Result<Delivery, DesktopError> {
+    fn marcar(&self, action: &Action, node: &T::Node, info: &NoInfo, alternar: impl Fn() -> Result<Delivery, DesktopError>) -> Result<Delivery, DesktopError> {
         let quer = action.kind == ActionType::Check;
         let pronto = |i: &NoInfo| i.has("checked") == quer && !i.has("indeterminate");
         if pronto(info) { return Ok(Delivery::DeliveredVerified); }
-        let alternar = Action { kind: ActionType::Toggle, ..action.clone() };
         for vez in 0..2 {
             // After the first toggle the box may have changed: a later refusal is no longer "not delivered".
-            let r = self.element_action(&alternar);
+            let r = alternar();
             if vez > 0 { r.map_err(|e| DesktopError { delivery: Delivery::Unknown, ..e })?; } else { r?; }
             let fim = Instant::now() + Duration::from_millis(500);
             loop {
@@ -410,7 +473,8 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
             return Err(runtime("controle mudou; observe novamente").nao_entregue());
         }
         if matches!(action.kind, ActionType::Check | ActionType::Uncheck) {
-            return self.marcar(action, &element.node, &info);
+            let alternar = Action { kind: ActionType::Toggle, ..action.clone() };
+            return self.marcar(action, &element.node, &info, || self.element_action(&alternar));
         }
         let feito = |r: Result<(), DesktopError>| r.map(|()| Delivery::DeliveredUnverified);
         let active = hypr::query(&self.commands, "activewindow").map_err(runtime)?;
@@ -483,10 +547,11 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
     }
 
     fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
-        if scope.window.is_some() { return Err(invalid("leitura de uma janela por id ainda não suportada")); }
         self.available()?;
         self.observed_at = None; self.elements.clear(); self.windows.clear();
-        let (active, area, monitor) = self.current()?;
+        // A window read by id stays where it is: in front or behind others.
+        let (active, area, monitor) = match &scope.window { Some(id) => self.current_de(self.cliente(id)?)?, None => self.current()? };
+        self.por_id = scope.window.is_some();
         let escala = monitor["scale"].as_f64().filter(|s| *s > 0.0).unwrap_or_else(|| {
             // Without it, web content on a scaled monitor keeps physical pixels and clicks land off.
             ignorado("observe.escala", &format!("monitor sem escala válida: {}", monitor["scale"]));
@@ -519,7 +584,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
             windows.push(Window { id: "desktop".into(), name: "Área de trabalho".into(), process_id: 0, class_name: "desktop".into(), process: String::new(), rect: Rect(0, 0, screen.width as i32, screen.height as i32) });
             (vec![], false)
         };
-        if self.foreground()? != self.foreground { return Err(runtime("a janela ativa mudou durante a observação; tente novamente")); }
+        if !self.por_id && self.foreground()? != self.foreground { return Err(runtime("a janela ativa mudou durante a observação; tente novamente")); }
         self.observed_at = Some(Instant::now());
         Ok(Observation { observation_id: String::new(), connected: true, session_id: self.session_id,
             foreground: self.foreground.clone(), windows, elements, apps: self.apps.clone(), truncated,
@@ -529,12 +594,37 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
     fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
         self.validate_observation(observed).map_err(DesktopError::nao_entregue)?;
         self.observed_at = None;
-        self.agir(action)
+        let Some(modo) = action.input.filter(|m| *m != InputMode::Real) else { return self.agir(action) };
+        let padrao = modo == InputMode::Background;
+        if padrao && !matches!(action.kind, ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle
+            | ActionType::Check | ActionType::Uncheck | ActionType::Expand | ActionType::Collapse) {
+            return Err(invalid("precisa de entrada real").nao_entregue());
+        }
+        if !self.parado.load(Ordering::Relaxed) { return Err(runtime("usuário ativo").nao_entregue()); }
+        let frente = foreground_id(&hypr::query(&self.commands, "activewindow").map_err(|e| runtime(e).nao_entregue())?);
+        if self.janela_do_usuario.is_none() && frente != observed.foreground { self.janela_do_usuario = Some(frente.clone()); }
+        let feito = if padrao { self.agir_padrao(action) } else {
+            if frente != observed.foreground {
+                self.focar(&observed.foreground).map_err(DesktopError::nao_entregue)?;
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            self.agir(action)
+        };
+        self.devolver_janela();
+        feito
     }
 
     fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
-        if window.is_some() { return Err(invalid("print de uma janela ainda não suportado")); }
         self.available()?;
+        if let Some(id) = window {
+            // The window alone, even behind others: the rest of the screen never reaches the vision model.
+            let client = self.cliente(id)?;
+            let alvo = (self.identificar)(hypr::string(&client, "title").map_err(runtime)?, hypr::string(&client, "class").map_err(runtime)?).map_err(runtime)?;
+            let largura = client["size"][0].as_i64().filter(|w| *w > 0).unwrap_or(1280) as f64;
+            let scale = (1280.0_f64).min(largura) / largura;
+            let scale = if scale.fract() == 0.0 { format!("{scale:.1}") } else { scale.to_string() };
+            return self.commands.run(&["grim", "-T", &alvo, "-s", &scale, "-"], None).map_err(runtime);
+        }
         let (_, area, monitor) = self.current()?;
         let width = area.2 - area.0;
         let scale = f64::from(width.min(1280)) / f64::from(width);
@@ -544,6 +634,34 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 }
 
 impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
+    /// Accessibility actions only: no focus, pointer or key reaches the app.
+    fn agir_padrao(&mut self, action: &Action) -> Result<Delivery, DesktopError> {
+        let element = action.target.as_ref().and_then(|t| self.elements.get(t)).ok_or_else(|| invalid("controle não pertence à observação").nao_entregue())?;
+        let info = self.tree.read(&element.node).map_err(|e| tree_error(e).nao_entregue())?;
+        if info.name() != element.name || role_name(&info.role, &info.states) != element.role || (!info.has("enabled") && !info.has("sensitive")) {
+            return Err(runtime("controle mudou; observe novamente").nao_entregue());
+        }
+        let feito = |r: Result<(), DesktopError>| r.map(|()| Delivery::DeliveredUnverified);
+        let alternar = || self.do_action(&element.node, &info, &[&["toggle"], INVOKE].concat()).map(|()| Delivery::DeliveredUnverified);
+        match action.kind {
+            ActionType::Invoke => feito(self.do_action(&element.node, &info, INVOKE)),
+            ActionType::Select | ActionType::Toggle => alternar(),
+            ActionType::Check | ActionType::Uncheck => self.marcar(action, &element.node, &info, alternar),
+            ActionType::Expand | ActionType::Collapse => feito(self.do_action(&element.node, &info, &[&["expand or contract", action.kind.as_str(), "expand or collapse"], INVOKE].concat())),
+            ActionType::SetValue => {
+                let valor = action.value.as_deref().filter(|v| v.chars().count() <= 20000).ok_or_else(|| invalid("valor inválido").nao_entregue())?;
+                if !self.tree.set_text(&element.node, valor).map_err(tree_error)? { return Err(runtime("aplicativo recusou o texto")); }
+                if info.role == "password text" { return Ok(Delivery::DeliveredUnverified); }
+                let lido = self.tree.text(&element.node).map_err(tree_error)?;
+                if lido.replace("\r\n", "\n").trim() != valor.replace("\r\n", "\n").trim() {
+                    return Err(runtime(format!("valor digitado não confirmado; campo ficou com {}", python_repr(&lido.chars().take(80).collect::<String>()))));
+                }
+                Ok(Delivery::DeliveredVerified)
+            }
+            _ => Err(invalid("precisa de entrada real").nao_entregue()),
+        }
+    }
+
     fn agir(&mut self, action: &Action) -> Result<Delivery, DesktopError> {
         let feito = match action.kind {
             ActionType::Activate => {

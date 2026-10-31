@@ -148,6 +148,24 @@ pub(crate) fn focar_janela(janela: &Janela) {
     }
 }
 
+/// The user's window back in front, with the same Alt tap when the foreground lock refuses.
+pub(crate) fn focar_hwnd(h: isize) {
+    if h == 0 || sessao_win::primeiro_plano() == h || !sessao_win::janela_existe(&id_janela(h)) {
+        return;
+    }
+    primeiro_plano(h);
+    if sessao_win::primeiro_plano() != h {
+        entrada::tocar_alt();
+        primeiro_plano(h);
+    }
+}
+
+/// A menu, dropdown or dialog of the window's process is open over it.
+pub(crate) fn menu_aberto(h: isize) -> bool {
+    let hwnd = HWND(h as *mut _);
+    !popups(hwnd, pid(hwnd)).is_empty()
+}
+
 fn primeiro_plano(h: isize) {
     let hwnd = HWND(h as *mut _);
     // SAFETY: plain Win32 calls on a window handle; a stale handle only makes them fail.
@@ -199,7 +217,11 @@ fn popups(foreground: HWND, pid: u32) -> Vec<isize> {
 }
 
 pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError> {
-    let fg = sessao_win::primeiro_plano();
+    // A window read by id stays where it is: in front or behind others.
+    let fg = match &scope.window {
+        Some(id) => sessao_win::hwnd_de(id).filter(|_| sessao_win::janela_existe(id)).ok_or_else(|| runtime_err("a janela fechou; observe novamente"))?,
+        None => sessao_win::primeiro_plano(),
+    };
     let raiz = ua.get_root_element().map_err(com)?;
     let mut enumeradas = filhos(ua, &raiz)?;
     // Dialogs owned by another window can be missing from the desktop enumeration.
@@ -286,7 +308,7 @@ pub(crate) fn ler(ua: &UIAutomation, scope: &Scope) -> Result<Lido, DesktopError
             pendentes.extend(seus.into_iter().map(|f| (f, ancestral_dos_filhos, nivel + 1)));
         }
     }
-    if sessao_win::primeiro_plano() != fg {
+    if scope.window.is_none() && sessao_win::primeiro_plano() != fg {
         return Err(runtime_err("a janela ativa mudou durante a observação; tente novamente"));
     }
     let truncated = cortou_filhos || !pendentes.is_empty();
