@@ -1141,3 +1141,16 @@ fn the_action_print_marks_the_target_box_and_the_click_point() {
     assert!(vermelho(4, 4), "ponto do clique");
     assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255, 255], "fora da caixa intacto");
 }
+
+#[test]
+fn an_unreadable_learning_file_is_kept_as_it_is() {
+    use hcc_laco::modo::Aprendido;
+    let pasta = tempfile::tempdir().unwrap();
+    std::fs::write(pasta.path().join("entrada-real.json"), "{quebrado").unwrap();
+    let mut aprendido = Aprendido::ler(Some(pasta.path()));
+    let mut tela = obs(vec![el("e0", "Lembrar", "CheckBox", &[ElementAction::Toggle], Some("off"), None)]);
+    tela.windows[0].process = "app.exe".into();
+    aprendido.aprender(&tela, &Action { kind: ActionType::Check, target: Some("e0".into()), ..Default::default() });
+    assert!(aprendido.gravar(pasta.path()).is_err());
+    assert_eq!(std::fs::read_to_string(pasta.path().join("entrada-real.json")).unwrap(), "{quebrado");
+}

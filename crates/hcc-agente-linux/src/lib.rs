@@ -417,11 +417,11 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         // The app fetches the pasted text after Ctrl+V: replacing it at once could paste the old content.
         std::thread::sleep(Duration::from_millis(300));
         match anterior {
-            Some(Some((tipo, bytes))) => {
-                if let Err(e) = self.commands.run(&["sh", "-c", "exec wl-copy --sensitive -t \"$0\" 2>/dev/null", &tipo], Some(&bytes)) { ignorado("paste.devolver", &e); }
-            }
-            Some(None) => { if let Err(e) = self.commands.run(&["wl-copy", "--clear"], None) { ignorado("paste.limpar", &e); } }
-            None => {}
+            Some(Some((tipo, bytes))) if self.commands.run(&["sh", "-c", "exec wl-copy --sensitive -t \"$0\" 2>/dev/null", &tipo], Some(&bytes))
+                .inspect_err(|e| ignorado("paste.devolver", e)).is_ok() => {}
+            // Empty before, or what was there could not be read or put back: never leave the pasted text (maybe a
+            // secret from `dados`) on the clipboard.
+            _ => { if let Err(e) = self.commands.run(&["wl-copy", "--clear"], None) { ignorado("paste.limpar", &e); } }
         }
         colado.map(|_| ())
     }

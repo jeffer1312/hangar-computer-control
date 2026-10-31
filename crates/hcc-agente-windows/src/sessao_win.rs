@@ -106,13 +106,15 @@ pub(crate) fn nome_processo(pid: u32) -> String {
     }
 }
 
-/// `(now, last input)` in `GetTickCount` milliseconds.
+/// `(now, last input)` in `GetTickCount` milliseconds. When the last input cannot be read it is "now": the user
+/// counts as active rather than real input going over their typing.
 pub(crate) fn relogio_de_entrada() -> (u32, u32) {
     let mut info = LASTINPUTINFO { cbSize: size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
-    // SAFETY: `info` outlives the call and carries its size.
-    let _ = unsafe { GetLastInputInfo(&mut info) };
     // SAFETY: argument-less query.
-    (unsafe { GetTickCount() }, info.dwTime)
+    let agora = unsafe { GetTickCount() };
+    // SAFETY: `info` outlives the call and carries its size.
+    let lido = unsafe { GetLastInputInfo(&mut info) }.as_bool();
+    (agora, if lido { info.dwTime } else { agora })
 }
 
 pub(crate) fn primeiro_plano() -> isize {

@@ -367,7 +367,12 @@ pub fn walk_ate<T: Arvore>(tree: &T, roots: Vec<(T::Node, f64)>, window: Rect, e
         if rect.is_some_and(|r| r.3 <= window.1 || r.1 >= window.3) { continue; }
         let filhos = match tree.children(&node) {
             Ok(children) => children,
-            Err(error) => { crate::ignorado("walk.children", &error); vec![] }
+            Err(error) => {
+                crate::ignorado("walk.children", &error);
+                // Children that could not be listed are content the loop did not see.
+                if !matches!(error, TreeError::Vanished(_)) { nao_lido(&mut controls, ancestral, 1); }
+                vec![]
+            }
         };
         let mut ancestral_dos_filhos = ancestral;
         if !outside && let Some(mut element) = element_from(&info, window) {

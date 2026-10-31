@@ -48,8 +48,11 @@ pub fn vigiar_ocioso(parado: Arc<AtomicBool>) -> Result<(), String> {
     let mut estado = Ocioso(parado);
     std::thread::spawn(move || {
         let _manter = (aviso, seat, notificador);
-        while fila.blocking_dispatch(&mut estado).is_ok() {}
+        let fim = loop {
+            if let Err(e) = fila.blocking_dispatch(&mut estado) { break e; }
+        };
         // Without the compositor nobody can say the user is active: do not hold the agent back forever.
+        crate::ignorado("ocioso", &format!("o vigia de ociosidade parou: {fim}"));
         estado.0.store(true, Ordering::Relaxed);
     });
     Ok(())

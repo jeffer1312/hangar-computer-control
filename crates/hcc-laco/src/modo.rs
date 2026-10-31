@@ -15,6 +15,9 @@ pub struct Aprendido {
     versao: u32,
     #[serde(default)]
     apps: BTreeMap<String, BTreeSet<String>>,
+    /// The file exists but could not be read: never overwrite what was learned before.
+    #[serde(skip)]
+    ilegivel: bool,
 }
 
 /// The app is its executable (Windows) or Hyprland class; without one, the window class.
@@ -30,12 +33,22 @@ fn chave(acao: &Action, obs: &Observation) -> Option<String> {
 }
 
 impl Aprendido {
-    /// An unreadable file teaches nothing: the actions go background and learn again.
+    /// No file teaches nothing. An unreadable one teaches nothing either, and is kept as it is (see `gravar`).
     pub fn ler(pasta: Option<&Path>) -> Self {
-        pasta.and_then(|p| std::fs::read_to_string(p.join(ARQUIVO)).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        let Some(caminho) = pasta.map(|p| p.join(ARQUIVO)) else { return Self::default() };
+        match std::fs::read_to_string(&caminho).map_err(|e| (e.kind() == std::io::ErrorKind::NotFound, e.to_string()))
+            .and_then(|t| serde_json::from_str(&t).map_err(|e| (false, e.to_string()))) {
+            Ok(a) => a,
+            Err((true, _)) => Self::default(),
+            Err((false, e)) => {
+                eprintln!("{} ilegível, não será regravado: {e}", caminho.display());
+                Self { ilegivel: true, ..Self::default() }
+            }
+        }
     }
 
     pub fn gravar(&self, pasta: &Path) -> Result<(), String> {
+        if self.ilegivel { return Err(format!("{ARQUIVO} ilegível; não regravado")); }
         let texto = serde_json::to_string_pretty(&serde_json::json!({"versao": 1, "apps": &self.apps})).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(pasta).and_then(|()| std::fs::write(pasta.join(ARQUIVO), texto)).map_err(|e| format!("{}: {e}", pasta.display()))
     }

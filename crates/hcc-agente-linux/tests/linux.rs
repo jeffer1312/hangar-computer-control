@@ -119,6 +119,7 @@ struct FakeCommands {
     cursor_stuck: Rc<RefCell<bool>>,
     /// The user's clipboard: offered types and the bytes of each; `None` is empty.
     clipboard: Rc<RefCell<Option<Vec<Copiado>>>>,
+    clipboard_quebrado: Rc<RefCell<bool>>,
 }
 
 impl Default for FakeCommands {
@@ -130,7 +131,7 @@ impl Default for FakeCommands {
             clients: Rc::new(RefCell::new(json!([{"address":"0xa","title":"Editor","pid":7,"class":"editor","monitor":1,"at":[1542,51],"size":[800,600],"mapped":true,"hidden":false}]))),
             dispatch_output: Rc::new(RefCell::new(b"ok\n".to_vec())),
             locked: Rc::default(), fail_keys: Rc::default(), fail_press: Rc::default(), active_error: Rc::default(), fail_release: Rc::default(), classico: Rc::default(),
-            cursor: Rc::default(), cursor_stuck: Rc::default(), clipboard: Rc::default(),
+            cursor: Rc::default(), cursor_stuck: Rc::default(), clipboard: Rc::default(), clipboard_quebrado: Rc::default(),
         }
     }
 }
@@ -166,6 +167,7 @@ impl Comandos for FakeCommands {
             ["ydotool", "click", "0x40"] if self.fail_press.replace(false) => Err("ydotool falhou (2): press falhou".into()),
             ["ydotool", ..] | ["wtype", "-"] | ["wtype", "-d", _, "-"] | ["wtype", "-M", "ctrl", "v", "-m", "ctrl"] | ["sh", "-c", "exec wl-copy --sensitive 2>/dev/null"] => Ok(vec![]),
             ["grim", ..] => Ok(b"PNG".to_vec()),
+            ["wl-paste", "--list-types"] if *self.clipboard_quebrado.borrow() => Err("wl-paste falhou (2): protocolo".into()),
             ["wl-paste", "--list-types"] => match &*self.clipboard.borrow() {
                 Some(tipos) => Ok(tipos.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join("\n").into_bytes()),
                 None => Err("wl-paste falhou (1): Nothing is copied".into()),
@@ -973,6 +975,14 @@ fn paste_gives_the_user_clipboard_back_as_plain_text() {
     let devolve = pos(&|c| c.0.last().is_some_and(|t| t == "text/plain;charset=utf-8") && c.0[0] == "sh" && c.1.as_deref() == Some(b"antigo".as_slice()));
     assert!(guarda < copia && copia < cola && cola < devolve, "{calls:?}");
     drop(calls);
+
+    // Unreadable before: the pasted text does not stay behind.
+    *commands.clipboard_quebrado.borrow_mut() = true;
+    commands.calls.borrow_mut().clear();
+    let observed = desktop.observe(&Scope::default()).unwrap();
+    desktop.act(&observed, &Action { value:Some(valor.into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap();
+    assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wl-copy","--clear"]));
+    *commands.clipboard_quebrado.borrow_mut() = false;
 
     // Empty before: empty after.
     *commands.clipboard.borrow_mut() = None;
