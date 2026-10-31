@@ -2,7 +2,7 @@
 
 use axum::{Json, Router, extract::State, routing::post};
 use hcc_agente::fake::FakeDesktop;
-use hcc_protocolo::{Action, DesktopError, Desktop, Observation};
+use hcc_protocolo::{Action, Delivery, DesktopError, Desktop, Observation, Scope};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -89,7 +89,7 @@ async fn hello_first_then_observe_act_stop() {
     assert!(!conexao.exists(), "o arquivo de conexão deve ser apagado");
     let r = recebidos.lock().unwrap();
     assert_eq!(r[0]["hello"], true);
-    assert_eq!(r[0]["protocol"], 2);
+    assert_eq!(r[0]["protocol"], 3);
     assert_eq!(r[0]["session_id"], 7);
     assert_eq!(r[0]["pid"], std::process::id());
     assert_eq!(r[1]["id"], "c1");
@@ -97,7 +97,7 @@ async fn hello_first_then_observe_act_stop() {
     assert_eq!(id.len(), 32, "uuid4 hex: {id}");
     assert_eq!(r[1]["result"]["elements"][0]["name"], "Salvar");
     assert_eq!(r[2]["id"], "c2");
-    assert_eq!(r[2]["result"], json!({"ok": true}));
+    assert_eq!(r[2]["result"], json!({"ok": true, "delivery": "delivered_unverified"}));
     assert!(r[1].get("hello").is_none() && r[1].get("protocol").is_none());
     assert_eq!(r[1]["boot"], r[0]["boot"]);
     let feitas = acoes(&script);
@@ -120,9 +120,10 @@ async fn second_act_on_same_observation_is_refused() {
     assert_eq!(rodar(FakeDesktop::load(&script).unwrap(), conexao).await, 0);
 
     let r = recebidos.lock().unwrap();
-    assert_eq!(r[2]["result"], json!({"ok": true}));
+    assert_eq!(r[2]["result"]["ok"], true);
     assert_eq!(r[3]["id"], "c3");
     assert_eq!(r[3]["error"], "RuntimeError: observação expirada; observe novamente");
+    assert_eq!(r[3]["delivery"], "not_delivered");
     assert!(r[3].get("result").is_none());
     assert_eq!(acoes(&script).len(), 1);
 }
@@ -142,7 +143,37 @@ async fn expired_command_is_not_executed() {
 
     let r = recebidos.lock().unwrap();
     assert_eq!(r[2]["error"], "TimeoutError: comando expirou antes de chegar ao desktop");
+    assert_eq!(r[2]["delivery"], "not_delivered");
     assert!(acoes(&script).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn desktop_refusal_travels_as_not_delivered_and_scope_reaches_the_desktop() {
+    let (url, recebidos) = controlador(|r| match r.len() {
+        1 => json!({"operation": "observe", "id": "c1", "ttl_ms": 15000, "scope": {"window": "w9"}}),
+        2 => act("c2", &r[1]["result"]["observation_id"], 15000),
+        3 => json!({"operation": "screenshot", "id": "c3", "ttl_ms": 15000, "window": "w9"}),
+        _ => json!({"operation": "stop"}),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (script, conexao) = preparar(dir.path(), &url, "");
+    std::fs::write(
+        &script,
+        json!({"observations": [observacao("w1")], "act_results": [{"error": "usuário ativo", "delivery": "not_delivered"}]}).to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(rodar(FakeDesktop::load(&script).unwrap(), conexao).await, 0);
+
+    let r = recebidos.lock().unwrap();
+    assert_eq!(r[1]["result"]["foreground"], "w9", "a janela pedida vira a lida");
+    assert_eq!(r[2]["error"], "RuntimeError: usuário ativo");
+    assert_eq!(r[2]["delivery"], "not_delivered");
+    assert!(r[3]["result"]["png"].is_string());
+    assert!(acoes(&script).is_empty());
+    let pedidos = std::fs::read_to_string(script.with_extension("calls.jsonl")).unwrap();
+    assert_eq!(pedidos.lines().collect::<Vec<_>>(), [r#"{"observe":{"window":"w9"}}"#, r#"{"screenshot":"w9"}"#]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -207,15 +238,18 @@ impl Desktop for ComRuntimeProprio {
     fn foreground(&mut self) -> Result<String, DesktopError> {
         self.0.foreground()
     }
-    fn observe(&mut self) -> Result<Observation, DesktopError> {
-        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {});
-        self.0.observe()
+    fn has_window(&mut self, id: &str) -> Result<bool, DesktopError> {
+        self.0.has_window(id)
     }
-    fn act(&mut self, observed: &Observation, action: &Action) -> Result<(), DesktopError> {
+    fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {});
+        self.0.observe(scope)
+    }
+    fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
         self.0.act(observed, action)
     }
-    fn screenshot_png(&mut self) -> Result<Vec<u8>, DesktopError> {
-        self.0.screenshot_png()
+    fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
+        self.0.screenshot_png(window)
     }
 }
 

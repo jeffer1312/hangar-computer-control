@@ -2,12 +2,14 @@
 
 use crate::regras::runtime_err;
 use hcc_protocolo::DesktopError;
-use windows::Win32::Foundation::{HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTS_CONNECTSTATE_CLASS, WTSActive, WTSConnectState, WTSFreeMemory, WTSQuerySessionInformationW};
 use windows::Win32::System::StationsAndDesktops::{CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, OpenInputDesktop};
-use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, WaitForSingleObject,
+};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetShellWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetShellWindow, GetSystemMetrics, IsWindow, SM_CXSCREEN, SM_CYSCREEN};
 use windows::core::{HSTRING, PWSTR};
 
 fn win(e: windows::core::Error) -> DesktopError {
@@ -74,6 +76,30 @@ impl Sessao {
 }
 
 /// Foreground window, or the shell window on an empty desktop (Program Manager plays the part).
+/// `id` is a `Window.id` (`w<hwnd>`).
+pub(crate) fn janela_existe(id: &str) -> bool {
+    let Some(hwnd) = id.strip_prefix('w').and_then(|h| h.parse::<isize>().ok()) else { return false };
+    // SAFETY: IsWindow accepts any handle value.
+    unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool()
+}
+
+/// Executable name (`notepad.exe`); empty when the process cannot be opened.
+pub(crate) fn nome_processo(pid: u32) -> String {
+    // SAFETY: the handle is closed below; the buffer outlives the call.
+    unsafe {
+        let Ok(processo) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
+        let mut buffer = [0u16; 1024];
+        let mut tamanho = buffer.len() as u32;
+        let lido = QueryFullProcessImageNameW(processo, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut tamanho);
+        let _ = CloseHandle(processo);
+        if lido.is_err() {
+            return String::new();
+        }
+        let caminho = String::from_utf16_lossy(&buffer[..tamanho as usize]);
+        caminho.rsplit('\\').next().unwrap_or_default().to_lowercase()
+    }
+}
+
 pub(crate) fn primeiro_plano() -> isize {
     // SAFETY: argument-less queries.
     let fg = unsafe { GetForegroundWindow() };

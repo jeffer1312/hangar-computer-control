@@ -20,11 +20,11 @@ pub mod regras {
     use image::ImageEncoder;
 
     pub(crate) fn valor_err(msg: impl Into<String>) -> DesktopError {
-        DesktopError { kind: ErrorKind::ValueError, msg: msg.into() }
+        DesktopError::new(ErrorKind::ValueError, msg)
     }
 
     pub(crate) fn runtime_err(msg: impl Into<String>) -> DesktopError {
-        DesktopError { kind: ErrorKind::RuntimeError, msg: msg.into() }
+        DesktopError::new(ErrorKind::RuntimeError, msg)
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,7 +307,7 @@ pub mod regras {
 mod desktop {
     use crate::regras::{self, runtime_err, valor_err};
     use crate::{arvore, captura, entrada, sessao_win};
-    use hcc_protocolo::{Action, ActionType, Amount, Desktop, DesktopError, Direction, Observation, Screen};
+    use hcc_protocolo::{Action, ActionType, Amount, Delivery, Desktop, DesktopError, Direction, Observation, Scope, Screen};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use uiautomation::UIAutomation;
@@ -366,7 +366,14 @@ mod desktop {
             Ok(arvore::id_janela(sessao_win::primeiro_plano()))
         }
 
-        fn observe(&mut self) -> Result<Observation, DesktopError> {
+        fn has_window(&mut self, id: &str) -> Result<bool, DesktopError> {
+            Ok(sessao_win::janela_existe(id))
+        }
+
+        fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
+            if !scope.is_default() {
+                return Err(valor_err("escopo de leitura ainda não suportado"));
+            }
             self.janelas.clear();
             self.controles.clear();
             let lido = arvore::ler(&self.ua)?;
@@ -387,9 +394,10 @@ mod desktop {
             })
         }
 
-        fn act(&mut self, _observed: &Observation, action: &Action) -> Result<(), DesktopError> {
+        fn act(&mut self, _observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
             let target = action.target.as_deref();
             match action.kind {
+                ActionType::Check | ActionType::Uncheck => return Err(valor_err(format!("{} ainda não suportado", action.kind))),
                 ActionType::Activate => {
                     let janela = target.and_then(|t| self.janelas.get(t)).ok_or_else(|| valor_err("janela não pertence à observação"))?;
                     arvore::focar_janela(janela);
@@ -479,10 +487,13 @@ mod desktop {
                     }
                 }
             }
-            Ok(())
+            Ok(Delivery::DeliveredUnverified)
         }
 
-        fn screenshot_png(&mut self) -> Result<Vec<u8>, DesktopError> {
+        fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
+            if window.is_some() {
+                return Err(valor_err("print de uma janela ainda não suportado"));
+            }
             let (w, h) = sessao_win::tela();
             captura::png_tela(w, h)
         }

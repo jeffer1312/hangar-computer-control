@@ -5,7 +5,7 @@ use hcc_agente_linux::arvore::{Arvore, NoInfo, TreeError, choose_frame, element_
 use hcc_agente_linux::comandos::Comandos;
 use hcc_agente_linux::entrada::{evdev, keys, lua_string};
 use hcc_agente_linux::hypr::{dispatch, monitor_logico, reference_monitor, windows_from};
-use hcc_protocolo::{Action, ActionType, Desktop, ElementAction, ErrorKind, Rect};
+use hcc_protocolo::{Action, ActionType, Desktop, ElementAction, ErrorKind, Rect, Scope};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -305,18 +305,18 @@ fn keys_pressiona_e_solta_em_ordem_inversa() {
 #[test]
 fn texto_com_alvo_desconhecido_e_programa_inexistente_falham() {
     let (mut desktop, commands, _) = desktop(vec![]);
-    let observed = desktop.observe().unwrap(); commands.calls.borrow_mut().clear();
+    let observed = desktop.observe(&Scope::default()).unwrap(); commands.calls.borrow_mut().clear();
     let mut text = action(ActionType::Text,Some("e9")); text.value = Some("x".into());
     let error = desktop.act(&observed,&text).unwrap_err(); assert_eq!(error.kind,ErrorKind::ValueError); assert!(error.msg.contains("não pertence"));
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "wtype" || c.0.get(1).is_some_and(|s| s == "dispatch")));
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     let mut launch = action(ActionType::Launch,None); launch.application = Some("programa-que-nao-existe-hcc".into());
     assert!(desktop.act(&observed,&launch).unwrap_err().msg.contains("não encontrado"));
 }
 
 #[test]
 fn exec_cmd_refuses_missing_program_before_dispatch() {
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap();
     commands.calls.borrow_mut().clear();
     let mut launch = action(ActionType::Launch,None); launch.application = Some("missing".into());
     assert_eq!(desktop.act(&observed,&launch).unwrap_err().to_string(),"ValueError: programa não encontrado: missing");
@@ -333,12 +333,12 @@ fn dispatch_exit_0_with_error_text_is_failure() {
 #[test]
 fn config_classica_do_hyprland_recebe_o_dispatcher_classico() {
     let (mut desktop, commands, _) = desktop(vec![]); *commands.classico.borrow_mut() = true;
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     let click: Action = serde_json::from_value(json!({"type":"mouse","x":10,"y":20,"button":"left","mode":"click"})).unwrap();
     desktop.act(&observed,&click).unwrap();
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     desktop.act(&observed,&action(ActionType::Activate,Some("w0xa"))).unwrap();
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     let mut launch = action(ActionType::Launch,None); launch.application = Some("editor".into());
     desktop.act(&observed,&launch).unwrap();
     let calls = commands.calls.borrow();
@@ -362,11 +362,11 @@ fn botao_visivel_recebe_clique_real_e_item_de_lista_a_acao() {
     let mut item = node("list item","Downloads"); item.info.actions = vec!["open".into()]; item.info.extents = Some((5,43,170,60));
     let (mut desktop, commands, tree) = desktop(vec![button,item]);
     commands.active.borrow_mut()["size"] = json!([1908,958]); commands.clients.borrow_mut()[0]["size"] = json!([1908,958]);
-    let observed = desktop.observe().unwrap(); commands.calls.borrow_mut().clear();
+    let observed = desktop.observe(&Scope::default()).unwrap(); commands.calls.borrow_mut().clear();
     desktop.act(&observed,&action(ActionType::Invoke,Some("e0"))).unwrap();
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["hyprctl","dispatch","hl.dsp.cursor.move({ x = 3428, y = 72 })"]));
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","click","0xc0"]));
-    let observed = desktop.observe().unwrap(); commands.calls.borrow_mut().clear();
+    let observed = desktop.observe(&Scope::default()).unwrap(); commands.calls.borrow_mut().clear();
     desktop.act(&observed,&action(ActionType::Invoke,Some("e1"))).unwrap();
     assert_eq!(*tree.events.borrow(),vec!["invoke:3:0"]);
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool"));
@@ -375,7 +375,7 @@ fn botao_visivel_recebe_clique_real_e_item_de_lista_a_acao() {
 #[test]
 fn real_click_uses_current_window_position() {
     let mut button = node("push button","Salvar"); button.info.actions = vec!["click".into()];
-    let (mut desktop, commands, _) = desktop(vec![button]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![button]); let observed = desktop.observe(&Scope::default()).unwrap();
     commands.active.borrow_mut()["at"] = json!([1600,100]); commands.calls.borrow_mut().clear();
     desktop.act(&observed,&action(ActionType::Invoke,Some("e0"))).unwrap();
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["hyprctl","dispatch","hl.dsp.cursor.move({ x = 1605, y = 105 })"]));
@@ -383,56 +383,56 @@ fn real_click_uses_current_window_position() {
 
 #[test]
 fn mouse_soma_origem_do_monitor_e_rolagem_desce_com_delta_positivo() {
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap(); commands.calls.borrow_mut().clear();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap(); commands.calls.borrow_mut().clear();
     let mouse: Action = serde_json::from_value(json!({"type":"mouse","x":10,"y":20,"button":"left","mode":"scroll","delta":3})).unwrap();
     desktop.act(&observed,&mouse).unwrap();
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["hyprctl","dispatch","hl.dsp.cursor.move({ x = 1546, y = 20 })"]));
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","mousemove","--wheel","-x","0","-y","-3"]));
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     assert!(desktop.act(&observed,&Action { x:Some(1920), ..mouse }).unwrap_err().msg.contains("fora da tela"));
 }
 
 #[test]
 fn observation_consumed_even_when_action_fails_and_focus_changes_block_input() {
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap();
     let invalid = action(ActionType::Invoke,Some("e99")); assert!(desktop.act(&observed,&invalid).is_err());
     assert_eq!(desktop.act(&observed,&invalid).unwrap_err().msg,"observação expirada; observe novamente");
-    let observed = desktop.observe().unwrap(); commands.active.borrow_mut()["address"] = json!("0xb");
+    let observed = desktop.observe(&Scope::default()).unwrap(); commands.active.borrow_mut()["address"] = json!("0xb");
     let error = desktop.act(&observed,&invalid).unwrap_err(); assert_eq!(error.msg,"o foco mudou; observe novamente antes de agir");
 }
 
 #[test]
 fn desktop_empty_and_locked_screen() {
     let (mut desktop, commands, _) = desktop(vec![]); *commands.active.borrow_mut() = json!({}); *commands.clients.borrow_mut() = json!([]);
-    let observed = desktop.observe().unwrap(); assert_eq!(observed.foreground,"desktop"); assert_eq!(observed.windows[0].name,"Área de trabalho");
+    let observed = desktop.observe(&Scope::default()).unwrap(); assert_eq!(observed.foreground,"desktop"); assert_eq!(observed.windows[0].name,"Área de trabalho");
     assert_eq!(observed.screen.width,1536); *commands.locked.borrow_mut() = true;
-    assert_eq!(desktop.observe().unwrap_err().msg,"tela bloqueada");
+    assert_eq!(desktop.observe(&Scope::default()).unwrap_err().msg,"tela bloqueada");
 }
 
 #[test]
 fn screenshot_uses_reference_monitor_and_caps_width() {
-    let (mut desktop, commands, _) = desktop(vec![]); assert_eq!(desktop.screenshot_png().unwrap(),b"PNG");
+    let (mut desktop, commands, _) = desktop(vec![]); assert_eq!(desktop.screenshot_png(None).unwrap(),b"PNG");
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["grim","-o","DP-2","-s","0.6666666666666666","-"]));
     commands.monitors.borrow_mut()[1].as_object_mut().unwrap().remove("name");
-    assert!(desktop.screenshot_png().is_err());
+    assert!(desktop.screenshot_png(None).is_err());
 }
 
 #[test]
 fn set_value_confirms_readback_and_text_uses_stdin() {
     let mut field = node("entry","Nome"); field.info.states.push("editable".into()); field.info.text = Some("old".into());
     let (mut desktop, commands, tree) = desktop(vec![field]); *tree.readback.borrow_mut() = Some(" ação\r\n".into());
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     let set = Action { value:Some("ação\n".into()), ..action(ActionType::SetValue,Some("e0")) };
     desktop.act(&observed,&set).unwrap();
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wtype","-"] && c.1.as_deref() == Some("ação\n".as_bytes())));
-    let observed = desktop.observe().unwrap(); *tree.readback.borrow_mut() = Some("errado".into());
+    let observed = desktop.observe(&Scope::default()).unwrap(); *tree.readback.borrow_mut() = Some("errado".into());
     assert!(desktop.act(&observed,&set).unwrap_err().msg.contains("valor digitado não confirmado"));
 }
 
 #[test]
 fn set_value_without_text_requires_confirmed_focus() {
     let mut field = node("entry","Nome"); field.focus = false; field.info.states.push("editable".into());
-    let (mut desktop, commands, _) = desktop(vec![field]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![field]); let observed = desktop.observe(&Scope::default()).unwrap();
     let set = Action { value:Some("ação".into()), ..action(ActionType::SetValue,Some("e0")) };
     assert_eq!(desktop.act(&observed,&set).unwrap_err().msg,"campo não recebeu o foco; nada foi digitado");
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "wtype" || c.0.get(1).is_some_and(|s| s == "key")));
@@ -441,7 +441,7 @@ fn set_value_without_text_requires_confirmed_focus() {
 #[test]
 fn password_values_are_never_returned_or_read_back() {
     let mut field = node("password text","Senha"); field.info.states.push("editable".into()); field.info.text = Some("secret".into());
-    let (mut desktop, _, tree) = desktop(vec![field]); let observed = desktop.observe().unwrap();
+    let (mut desktop, _, tree) = desktop(vec![field]); let observed = desktop.observe(&Scope::default()).unwrap();
     assert!(observed.elements[0].password); assert_eq!(observed.elements[0].value,None);
     let set = Action { value:Some("secret".into()), ..action(ActionType::SetValue,Some("e0")) };
     desktop.act(&observed,&set).unwrap(); assert!(!tree.events.borrow().iter().any(|e| e.starts_with("text:")));
@@ -449,7 +449,7 @@ fn password_values_are_never_returned_or_read_back() {
 
 #[test]
 fn failed_drag_still_releases_button() {
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap();
     let drag: Action = serde_json::from_value(json!({"type":"mouse","x":1,"y":2,"x2":-1,"y2":2,"button":"left","mode":"drag"})).unwrap();
     assert!(desktop.act(&observed,&drag).is_err());
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","click","0x80"]));
@@ -469,16 +469,16 @@ fn observation_uses_own_pid_and_includes_visible_popups() {
     let mut popup = node("menu", "Menu"); popup.children = vec![4];
     tree.nodes.borrow_mut()[0].children.push(3);
     tree.nodes.borrow_mut().extend([popup,node("menu item","Abrir")]);
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     assert_eq!(observed.elements.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),vec!["Editor content","Abrir"]);
     tree.nodes.borrow_mut()[0].pid = Some(8);
-    assert!(desktop.observe().unwrap().elements.is_empty());
+    assert!(desktop.observe(&Scope::default()).unwrap().elements.is_empty());
 }
 
 #[test]
 fn changed_control_is_not_clicked() {
     let (mut desktop, commands, tree) = desktop(vec![node("push button","Salvar")]);
-    let observed = desktop.observe().unwrap(); tree.nodes.borrow_mut()[2].info.name = b"Apagar".to_vec();
+    let observed = desktop.observe(&Scope::default()).unwrap(); tree.nodes.borrow_mut()[2].info.name = b"Apagar".to_vec();
     commands.calls.borrow_mut().clear();
     assert_eq!(desktop.act(&observed,&action(ActionType::Invoke,Some("e0"))).unwrap_err().msg,"controle mudou; observe novamente");
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool"));
@@ -487,16 +487,16 @@ fn changed_control_is_not_clicked() {
 #[test]
 fn missing_action_is_failure_not_success() {
     let mut button = node("push button", "Salvar"); button.info.extents = None;
-    let (mut desktop, _, _) = desktop(vec![button]); let observed = desktop.observe().unwrap();
+    let (mut desktop, _, _) = desktop(vec![button]); let observed = desktop.observe(&Scope::default()).unwrap();
     let error = desktop.act(&observed,&action(ActionType::Invoke,Some("e0"))).unwrap_err();
     assert!(error.msg.starts_with("controle sem ação click:"));
 }
 
 #[test]
 fn text_length_uses_characters_and_invalid_keys_never_press() {
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap();
     desktop.act(&observed,&Action { value:Some("ç".repeat(20000)), ..action(ActionType::Text,None) }).unwrap();
-    let observed = desktop.observe().unwrap(); commands.calls.borrow_mut().clear();
+    let observed = desktop.observe(&Scope::default()).unwrap(); commands.calls.borrow_mut().clear();
     assert_eq!(desktop.act(&observed,&Action { value:Some("ç".repeat(20001)), ..action(ActionType::Text,None) }).unwrap_err().msg,"texto inválido");
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "wtype"));
     assert!(keys(&commands,&["ctrl".into(),"unknown".into()]).is_err());
@@ -510,7 +510,7 @@ fn focus_fallback_uses_current_geometry_for_text_and_set_value() {
         field.info.states.push("editable".into()); field.info.text = Some("old".into());
         field.info.extents = Some((10,20,30,40));
         let (mut desktop, commands, tree) = desktop(vec![field]);
-        let observed = desktop.observe().unwrap();
+        let observed = desktop.observe(&Scope::default()).unwrap();
         commands.active.borrow_mut()["at"] = json!([1600,100]);
         tree.nodes.borrow_mut()[2].info.extents = Some((30,40,20,20));
         *tree.readback.borrow_mut() = Some("new".into());
@@ -523,7 +523,7 @@ fn focus_fallback_uses_current_geometry_for_text_and_set_value() {
 
 #[test]
 fn failed_drag_press_still_releases_and_preserves_original_error() {
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap();
     *commands.fail_press.borrow_mut() = true; commands.calls.borrow_mut().clear();
     let drag: Action = serde_json::from_value(json!({"type":"mouse","x":1,"y":2,"x2":3,"y2":4,"button":"left","mode":"drag"})).unwrap();
     let error = desktop.act(&observed,&drag).unwrap_err();
@@ -535,13 +535,13 @@ fn failed_drag_press_still_releases_and_preserves_original_error() {
 fn stderr_timeout_words_do_not_change_runtime_error_kind() {
     let (mut desktop, commands, _) = desktop(vec![]);
     *commands.active_error.borrow_mut() = Some("hyprctl falhou (1): excedeu 15 segundos".into());
-    assert_eq!(desktop.observe().unwrap_err().kind,ErrorKind::RuntimeError);
+    assert_eq!(desktop.observe(&Scope::default()).unwrap_err().kind,ErrorKind::RuntimeError);
     *commands.active_error.borrow_mut() = Some("hyprctl falhou (1): AT-SPI excedeu 4 segundos".into());
-    assert_eq!(desktop.observe().unwrap_err().kind,ErrorKind::RuntimeError);
+    assert_eq!(desktop.observe(&Scope::default()).unwrap_err().kind,ErrorKind::RuntimeError);
     *commands.active_error.borrow_mut() = Some("hyprctl excedeu 15 segundos".into());
-    assert_eq!(desktop.observe().unwrap_err().kind,ErrorKind::RuntimeError);
+    assert_eq!(desktop.observe(&Scope::default()).unwrap_err().kind,ErrorKind::RuntimeError);
     *commands.active_error.borrow_mut() = Some("AT-SPI excedeu 4 segundos".into());
-    assert_eq!(desktop.observe().unwrap_err().kind,ErrorKind::RuntimeError);
+    assert_eq!(desktop.observe(&Scope::default()).unwrap_err().kind,ErrorKind::RuntimeError);
 }
 
 fn captured_stderr(test: &str) -> Option<String> {
@@ -593,7 +593,7 @@ fn focus_error_falls_back_to_click() {
     for kind in [ActionType::Text,ActionType::SetValue] {
         let mut field = node("entry","Nome"); field.focus_error = Some("foco indisponível".into());
         field.info.text = Some("old".into()); field.info.states.push("editable".into());
-        let (mut desktop, commands, tree) = desktop(vec![field]); let observed = desktop.observe().unwrap();
+        let (mut desktop, commands, tree) = desktop(vec![field]); let observed = desktop.observe(&Scope::default()).unwrap();
         *tree.readback.borrow_mut() = Some("private-typed-value".into());
         desktop.act(&observed,&Action { value:Some("private-typed-value".into()), ..action(kind,Some("e0")) }).unwrap();
         assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["hyprctl","dispatch","hl.dsp.cursor.move({ x = 1547, y = 56 })"]));
@@ -608,7 +608,7 @@ fn pid_error_skips_app_and_reports_it() {
     }
     let (mut desktop, _, tree) = desktop(vec![node("label","Pronto")]);
     tree.nodes.borrow_mut()[0].pid_error = Some("pid indisponível".into());
-    assert!(desktop.observe().unwrap().elements.is_empty());
+    assert!(desktop.observe(&Scope::default()).unwrap().elements.is_empty());
 }
 
 #[test]
@@ -619,7 +619,7 @@ fn double_release_failure_preserves_original_and_reports_secondary() {
     }
     let commands = FakeCommands::default(); *commands.fail_keys.borrow_mut() = true; *commands.fail_release.borrow_mut() = true;
     assert_eq!(keys(&commands,&["ctrl".into(),"a".into()]).unwrap_err(),"ydotool falhou (2): falhou");
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap();
     *commands.fail_press.borrow_mut() = true; *commands.fail_release.borrow_mut() = true;
     let drag: Action = serde_json::from_value(json!({"type":"mouse","x":1,"y":2,"x2":3,"y2":4,"button":"left","mode":"drag"})).unwrap();
     assert_eq!(desktop.act(&observed,&drag).unwrap_err().to_string(),"RuntimeError: ydotool falhou (2): press falhou");
@@ -629,7 +629,7 @@ fn double_release_failure_preserves_original_and_reports_secondary() {
 fn password_without_confirmed_focus_does_not_type() {
     let mut field = node("password text","Senha"); field.focus = false;
     field.info.text = Some("secret".into()); field.info.states.push("editable".into());
-    let (mut desktop, commands, _) = desktop(vec![field]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![field]); let observed = desktop.observe(&Scope::default()).unwrap();
     let set = Action { value:Some("secret".into()), ..action(ActionType::SetValue,Some("e0")) };
     assert_eq!(desktop.act(&observed,&set).unwrap_err().msg,"campo não recebeu o foco; nada foi digitado");
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "wtype"));
@@ -667,10 +667,10 @@ fn installed_apps_from_xdg_are_cached_and_filtered() {
     }) { return; }
     let (mut desktop, commands, _) = desktop(vec![]);
     let expected = json!([r#"Arquivos => "/opt/My App/files""#, "Editor de Texto => gnome-text-editor"]);
-    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], expected);
+    assert_eq!(serde_json::to_value(desktop.observe(&Scope::default()).unwrap()).unwrap()["apps"], expected);
     let home = std::env::var_os("XDG_DATA_HOME").unwrap();
     std::fs::write(std::path::PathBuf::from(home).join("applications/editor.desktop"), "[Desktop Entry]\nName=Changed\nExec=changed\n").unwrap();
-    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], expected);
+    assert_eq!(serde_json::to_value(desktop.observe(&Scope::default()).unwrap()).unwrap()["apps"], expected);
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] != "pgrep" && c.0 != ["hyprctl", "-j", "activewindow"] && c.0 != ["hyprctl", "-j", "monitors"] && c.0 != ["hyprctl", "-j", "clients"]));
 }
 
@@ -692,7 +692,7 @@ fn installed_exec_preserves_arguments_and_quotes() {
         }
     }) { return; }
     let (mut desktop, _, _) = desktop(vec![]);
-    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], json!([
+    assert_eq!(serde_json::to_value(desktop.observe(&Scope::default()).unwrap()).unwrap()["apps"], json!([
         "A Flatpak => flatpak run org.x.App",
         "B Env => env VAR=x app",
         r#"C Quote => "/opt/My App/files""#,
@@ -718,7 +718,7 @@ fn user_hidden_desktop_entry_overrides_system() {
         std::fs::write(root.join("system/applications/files.desktop"), "[Desktop Entry]\nName=System Files\nExec=system-files\n").unwrap();
     }) { return; }
     let (mut desktop, _, _) = desktop(vec![]);
-    assert_eq!(serde_json::to_value(desktop.observe().unwrap()).unwrap()["apps"], json!(["Files => user-files"]));
+    assert_eq!(serde_json::to_value(desktop.observe(&Scope::default()).unwrap()).unwrap()["apps"], json!(["Files => user-files"]));
 }
 
 #[test]
@@ -730,7 +730,7 @@ fn installed_apps_are_sorted_deduplicated_and_capped() {
         std::fs::write(root.join("system/applications/duplicate.desktop"), "[Desktop Entry]\nName=App 000\nExec=app000\n").unwrap();
     }) { return; }
     let (mut desktop, _, _) = desktop(vec![]);
-    let wire = serde_json::to_value(desktop.observe().unwrap()).unwrap();
+    let wire = serde_json::to_value(desktop.observe(&Scope::default()).unwrap()).unwrap();
     let apps = wire["apps"].as_array().expect("installed apps missing");
     assert_eq!(apps.len(), 150);
     assert_eq!(apps[0], "App 000 => app000");
@@ -741,7 +741,7 @@ fn installed_apps_are_sorted_deduplicated_and_capped() {
 #[test]
 #[ignore = "desktop real"]
 fn observe_real_desktop() {
-    let mut desktop = LinuxDesktop::new().unwrap(); let observed = desktop.observe().unwrap();
+    let mut desktop = LinuxDesktop::new().unwrap(); let observed = desktop.observe(&Scope::default()).unwrap();
     assert!(observed.screen.width > 0 && observed.screen.height > 0);
     assert!(observed.windows.iter().any(|w| w.id == observed.foreground));
     println!("{observed:?}");
@@ -757,7 +757,7 @@ fn frame_sem_filhos_desperta_a_acessibilidade_do_app() {
         let mut nodes = tree.nodes.borrow_mut();
         nodes[1].wake_children = Some(std::mem::take(&mut nodes[1].children));
     }
-    let obs = desk.observe().unwrap();
+    let obs = desk.observe(&Scope::default()).unwrap();
     assert_eq!(obs.elements.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["Enviar"]);
     assert_eq!(tree.events.borrow().iter().filter(|e| e.starts_with("despertar")).count(), 1);
 }
@@ -765,7 +765,7 @@ fn frame_sem_filhos_desperta_a_acessibilidade_do_app() {
 #[test]
 fn frame_com_filhos_nao_e_despertado() {
     let (mut desk, _, tree) = desktop(vec![node("push button", "Enviar")]);
-    desk.observe().unwrap();
+    desk.observe(&Scope::default()).unwrap();
     assert!(!tree.events.borrow().iter().any(|e| e.starts_with("despertar")));
 }
 
@@ -795,7 +795,7 @@ fn grupo_sem_texto_nao_vira_controle() {
 fn documento_rola_pela_roda_no_centro_visivel() {
     let mut pagina = node("document web", "Webhooks"); pagina.info.extents = Some((0, 0, 800, 2000));
     let (mut desktop, commands, _) = desktop(vec![pagina]);
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     assert!(observed.elements[0].actions.contains(&ElementAction::Scroll), "{:?}", observed.elements[0].actions);
     commands.calls.borrow_mut().clear();
     let rolar: Action = serde_json::from_value(json!({"type":"scroll","target":"e0","direction":"down","amount":"small"})).unwrap();
@@ -830,7 +830,7 @@ fn set_value_retypes_slowly_once_when_the_field_lost_characters() {
     let mut field = node("entry","Email"); field.info.states.push("editable".into()); field.info.text = Some(String::new());
     let (mut desktop, commands, tree) = desktop(vec![field]);
     tree.readbacks.borrow_mut().extend(["a@gmaicom".to_owned(), "a@gmail.com".to_owned()]);
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     let set = Action { value:Some("a@gmail.com".into()), ..action(ActionType::SetValue,Some("e0")) };
     desktop.act(&observed,&set).unwrap();
     let wtypes: Vec<Vec<String>> = commands.calls.borrow().iter().filter(|c| c.0[0] == "wtype").map(|c| c.0.clone()).collect();
@@ -840,7 +840,7 @@ fn set_value_retypes_slowly_once_when_the_field_lost_characters() {
 // A cursor that did not reach the point would click whatever is under it (a mode switch, a delete button).
 #[test]
 fn click_fails_when_the_cursor_did_not_reach_the_point() {
-    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe().unwrap();
+    let (mut desktop, commands, _) = desktop(vec![]); let observed = desktop.observe(&Scope::default()).unwrap();
     *commands.cursor_stuck.borrow_mut() = true; commands.calls.borrow_mut().clear();
     let click: Action = serde_json::from_value(json!({"type":"mouse","x":10,"y":20,"button":"left","mode":"click"})).unwrap();
     let error = desktop.act(&observed, &click).unwrap_err();
@@ -854,7 +854,7 @@ fn scrolling_the_page_under_an_open_dialog_scrolls_the_dialog() {
     let mut pagina = node("document web", "Formulário"); pagina.info.extents = Some((0, 0, 800, 2000));
     let mut modal = node("dialog", "Diga-nos o motivo"); modal.info.extents = Some((200, 100, 400, 300));
     let (mut desktop, commands, _) = desktop(vec![pagina, modal]);
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     commands.calls.borrow_mut().clear();
     let rolar: Action = serde_json::from_value(json!({"type":"scroll","target":"e0","direction":"down","amount":"small"})).unwrap();
     desktop.act(&observed, &rolar).unwrap();
@@ -868,7 +868,7 @@ fn set_value_pastes_a_value_with_symbols_and_checks_it() {
     let valor = "POST /PAGE_ID/messages, {\"a\": 1} > 2";
     let mut field = node("entry","Descrição"); field.info.states.push("editable".into()); field.info.text = Some(String::new());
     let (mut desktop, commands, tree) = desktop(vec![field]); *tree.readback.borrow_mut() = Some(valor.into());
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     desktop.act(&observed, &Action { value:Some(valor.into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap();
     let calls = commands.calls.borrow();
     let copia = calls.iter().position(|c| c.0[0] == "sh" && c.1.as_deref() == Some(valor.as_bytes())).expect("wl-copy");
@@ -876,7 +876,7 @@ fn set_value_pastes_a_value_with_symbols_and_checks_it() {
     assert!(copia < cola);
     assert!(!calls.iter().any(|c| c.0 == vec!["wtype","-"] || c.0.get(1).is_some_and(|a| a == "-d")));
     drop(calls);
-    let observed = desktop.observe().unwrap(); *tree.readback.borrow_mut() = Some("POST /PAGE_ID/messages  \"a\": 1  2".into());
+    let observed = desktop.observe(&Scope::default()).unwrap(); *tree.readback.borrow_mut() = Some("POST /PAGE_ID/messages  \"a\": 1  2".into());
     assert!(desktop.act(&observed, &Action { value:Some(valor.into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap_err().msg.contains("valor digitado não confirmado"));
 }
 
@@ -885,7 +885,7 @@ fn set_value_pastes_a_short_value_after_both_typings_failed() {
     let mut field = node("entry","Email"); field.info.states.push("editable".into()); field.info.text = Some(String::new());
     let (mut desktop, commands, tree) = desktop(vec![field]);
     tree.readbacks.borrow_mut().extend(["a@gmaicom".to_owned(), "a@gmaicom".to_owned(), "a@gmail.com".to_owned()]);
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     desktop.act(&observed, &Action { value:Some("a@gmail.com".into()), ..action(ActionType::SetValue,Some("e0")) }).unwrap();
     let wtypes: Vec<Vec<String>> = commands.calls.borrow().iter().filter(|c| c.0[0] == "wtype").map(|c| c.0.clone()).collect();
     assert_eq!(wtypes, vec![vec!["wtype","-"], vec!["wtype","-d","30","-"], vec!["wtype","-M","ctrl","v","-m","ctrl"]]);
@@ -896,12 +896,12 @@ fn set_value_pastes_a_short_value_after_both_typings_failed() {
 fn keys_aimed_at_a_field_focus_it_first() {
     let mut field = node("entry","Descrição"); field.info.states.push("editable".into());
     let (mut desktop, commands, tree) = desktop(vec![field]);
-    let observed = desktop.observe().unwrap(); commands.calls.borrow_mut().clear();
+    let observed = desktop.observe(&Scope::default()).unwrap(); commands.calls.borrow_mut().clear();
     let teclas = Action { keys:Some(vec!["ctrl".into(),"a".into()]), ..action(ActionType::Keys,Some("e0")) };
     desktop.act(&observed, &teclas).unwrap();
     assert_eq!(*tree.events.borrow(), vec!["focus:2"]);
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["ydotool","key","29:1","30:1","30:0","29:0"]));
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     let error = desktop.act(&observed, &Action { target:Some("e9".into()), ..teclas }).unwrap_err();
     assert!(error.msg.contains("não pertence"));
 }
@@ -911,11 +911,11 @@ fn text_into_a_named_field_pastes_symbols_but_a_password_is_typed() {
     let mut field = node("entry","Descrição"); field.info.states.push("editable".into());
     let mut senha = node("password text","Senha"); senha.info.states.push("editable".into());
     let (mut desktop, commands, _) = desktop(vec![field, senha]);
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     desktop.act(&observed, &Action { value:Some("a, {b}".into()), ..action(ActionType::Text,Some("e0")) }).unwrap();
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wtype","-M","ctrl","v","-m","ctrl"]));
     commands.calls.borrow_mut().clear();
-    let observed = desktop.observe().unwrap();
+    let observed = desktop.observe(&Scope::default()).unwrap();
     desktop.act(&observed, &Action { value:Some("s3nh@,{x}".into()), ..action(ActionType::Text,Some("e1")) }).unwrap();
     assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "sh"));
     assert!(commands.calls.borrow().iter().any(|c| c.0 == vec!["wtype","-"]));

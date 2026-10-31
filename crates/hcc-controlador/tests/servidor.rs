@@ -10,7 +10,7 @@ fn client() -> Client {
 }
 
 fn hello() -> Value {
-    json!({"hello":true,"boot":"agent-a","session_id":1,"pid":123,"protocol":2})
+    json!({"hello":true,"boot":"agent-a","session_id":1,"pid":123,"protocol":hcc_protocolo::PROTOCOL})
 }
 
 async fn post(server: &Server, body: Value) -> reqwest::Response {

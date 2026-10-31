@@ -102,7 +102,7 @@ fn keyup_failure_does_not_leave_modifiers_pressed() {
     let e = acorde(&t, |t, baixo| {
         enviados.push(format!("{{{} {}}}", t.nome, if baixo { "down" } else { "up" }));
         if t.nome == "s" && !baixo {
-            return Err(DesktopError { kind: ErrorKind::RuntimeError, msg: "falha de envio".into() });
+            return Err(DesktopError::new(ErrorKind::RuntimeError, "falha de envio"));
         }
         Ok(())
     })
@@ -119,7 +119,7 @@ fn keydown_failure_releases_what_was_pressed_and_reports_the_press_error() {
     let e = acorde(&t, |t, baixo| {
         enviados.push(format!("{{{} {}}}", t.nome, if baixo { "down" } else { "up" }));
         if t.nome == "VK_SHIFT" && baixo {
-            return Err(DesktopError { kind: ErrorKind::RuntimeError, msg: "bloqueado".into() });
+            return Err(DesktopError::new(ErrorKind::RuntimeError, "bloqueado"));
         }
         Ok(())
     })
@@ -301,10 +301,10 @@ fn screenshot_is_reduced_to_1280_wide_opaque_png() {
 fn observe_real_desktop() {
     use hcc_protocolo::Desktop;
     let mut desktop = hcc_agente_windows::WindowsDesktop::new().unwrap();
-    let obs = desktop.observe().unwrap();
+    let obs = desktop.observe(&hcc_protocolo::Scope::default()).unwrap();
     println!("session_id={} foreground={} windows={} elements={} truncated={}", obs.session_id, obs.foreground, obs.windows.len(), obs.elements.len(), obs.truncated);
     for w in &obs.windows {
-        println!("{} {:?} {}", w.id, w.name, w.class_name);
+        println!("{} {:?} {} {}", w.id, w.name, w.class_name, w.process);
     }
     assert!(obs.windows.iter().any(|w| w.id == obs.foreground));
     assert!(obs.screen.width > 0 && obs.screen.height > 0);

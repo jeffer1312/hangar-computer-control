@@ -1,7 +1,8 @@
 //! Scripted desktop for tests: no real screen, mouse or keyboard is touched.
 
-use hcc_protocolo::{Action, Desktop, DesktopError, Observation};
+use hcc_protocolo::{Action, Delivery, Desktop, DesktopError, ErrorKind, Observation, Scope};
 use serde::Deserialize;
+use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -18,20 +19,47 @@ struct Script {
     observations: Vec<Observation>,
     #[serde(default)]
     fail_screenshot: bool,
+    /// One per act, in order; once used up, acts succeed as `delivered_unverified`.
+    #[serde(default)]
+    act_results: Vec<ActResultado>,
+}
+
+#[derive(Deserialize)]
+struct ActResultado {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    delivery: Delivery,
 }
 
 pub struct FakeDesktop {
     script: Script,
     proxima: usize,
     acoes: PathBuf,
+    chamadas: PathBuf,
 }
 
 impl FakeDesktop {
-    /// Acts are appended to `<script>.acts.jsonl`.
+    /// Done acts are appended to `<script>.acts.jsonl`; observe and screenshot calls to `<script>.calls.jsonl`.
     pub fn load(script: &Path) -> Result<Self, String> {
         let texto = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
-        let script_lido = serde_json::from_str(&texto).map_err(|e| format!("{}: {e}", script.display()))?;
-        Ok(Self { script: script_lido, proxima: 0, acoes: script.with_extension("acts.jsonl") })
+        let mut script_lido: Script = serde_json::from_str(&texto).map_err(|e| format!("{}: {e}", script.display()))?;
+        script_lido.act_results.reverse();
+        Ok(Self {
+            script: script_lido,
+            proxima: 0,
+            acoes: script.with_extension("acts.jsonl"),
+            chamadas: script.with_extension("calls.jsonl"),
+        })
+    }
+
+    fn anotar(caminho: &Path, linha: serde_json::Value) -> Result<(), DesktopError> {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(caminho)
+            .and_then(|mut f| writeln!(f, "{linha}"))
+            .map_err(|e| Self::erro(format!("{}: {e}", caminho.display())))
     }
 
     /// Script path from `HCC_FAKE_DESKTOP`.
@@ -46,7 +74,7 @@ impl FakeDesktop {
     }
 
     fn erro(msg: String) -> DesktopError {
-        DesktopError { kind: hcc_protocolo::ErrorKind::RuntimeError, msg }
+        DesktopError::new(ErrorKind::RuntimeError, msg)
     }
 }
 
@@ -63,26 +91,35 @@ impl Desktop for FakeDesktop {
         Ok(self.corrente().map_or_else(|| "desktop".into(), |o| o.foreground.clone()))
     }
 
-    /// In order; the last one repeats.
-    fn observe(&mut self) -> Result<Observation, DesktopError> {
+    fn has_window(&mut self, _: &str) -> Result<bool, DesktopError> {
+        Ok(true)
+    }
+
+    /// In order; the last one repeats. `scope.window` becomes the foreground.
+    fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
+        Self::anotar(&self.chamadas, json!({"observe": scope}))?;
         if self.script.observations.is_empty() {
             return Err(Self::erro("roteiro sem observações".into()));
         }
         self.proxima = (self.proxima + 1).min(self.script.observations.len());
-        Ok(self.corrente().cloned().expect("roteiro não vazio"))
+        let mut o = self.corrente().cloned().expect("roteiro não vazio");
+        if let Some(janela) = &scope.window {
+            o.foreground.clone_from(janela);
+        }
+        Ok(o)
     }
 
-    fn act(&mut self, observed: &Observation, action: &Action) -> Result<(), DesktopError> {
-        let linha = serde_json::json!({"observation_id": observed.observation_id, "action": action});
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.acoes)
-            .and_then(|mut f| writeln!(f, "{linha}"))
-            .map_err(|e| Self::erro(format!("{}: {e}", self.acoes.display())))
+    fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
+        let resultado = self.script.act_results.pop().unwrap_or(ActResultado { error: None, delivery: Delivery::DeliveredUnverified });
+        if let Some(msg) = resultado.error {
+            return Err(DesktopError { delivery: resultado.delivery, ..Self::erro(msg) });
+        }
+        Self::anotar(&self.acoes, json!({"observation_id": observed.observation_id, "action": action}))?;
+        Ok(resultado.delivery)
     }
 
-    fn screenshot_png(&mut self) -> Result<Vec<u8>, DesktopError> {
+    fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
+        Self::anotar(&self.chamadas, json!({"screenshot": window}))?;
         if self.script.fail_screenshot {
             // Simulates the agent process dying mid-objective.
             std::process::exit(3);

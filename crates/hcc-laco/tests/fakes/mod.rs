@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hcc_protocolo::{Action, ActResult, Connector, Observation, Session, SessionError};
+use hcc_protocolo::{Action, ActResult, Connector, Delivery, Observation, Scope, Session, SessionError};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::time::Instant;
@@ -88,7 +88,7 @@ impl Connector for FakeConnector {
 }
 
 impl Session for FakeSession {
-    async fn observe(&mut self) -> Result<Observation, SessionError> {
+    async fn observe(&mut self, _: &Scope) -> Result<Observation, SessionError> {
         let pending = self.0.state.lock().unwrap().observe_pending;
         self.0.entered.notify_one();
         if pending { std::future::pending::<()>().await; }
@@ -107,10 +107,10 @@ impl Session for FakeSession {
         if let Some(c) = &s.cancel_after_act { c.cancel(); }
         if let Some(e) = s.act_errors.pop_front() { return Err(e); }
         if s.advance_on_act && s.views.len() > 1 { s.views.pop_front(); }
-        Ok(ActResult { ok: true })
+        Ok(ActResult { ok: true, delivery: Delivery::DeliveredUnverified })
     }
 
-    async fn screenshot(&mut self) -> Result<Vec<u8>, SessionError> {
+    async fn screenshot(&mut self, _: Option<&str>) -> Result<Vec<u8>, SessionError> {
         let mut s = self.0.state.lock().unwrap();
         s.captures += 1;
         match &s.screenshot_error {

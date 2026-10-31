@@ -260,7 +260,7 @@ pub fn element_from(info: &NoInfo, window: Rect) -> Option<Element> {
     } else { None };
     if actions.is_empty() && name.is_empty() && value.is_none() { return None; }
     Some(Element { id: String::new(), name, role, value, enabled: info.has("enabled") || info.has("sensitive"),
-        rect: info.extents.and_then(|e| element_rect(e, window)), focused: info.has("focused"), actions, password })
+        rect: info.extents.and_then(|e| element_rect(e, window)), focused: info.has("focused"), actions, password, unread: None })
 }
 
 /// A web document as wide as its parent times the monitor scale: Chromium reported it in physical pixels.

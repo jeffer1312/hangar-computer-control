@@ -1,7 +1,7 @@
 #![cfg(feature = "test-fake")]
 
 use hcc_controlador::{AgentConfig, AgentConnector, AgentSession};
-use hcc_protocolo::{Action, Connector, Session, SessionError};
+use hcc_protocolo::{Action, Connector, Scope, Session, SessionError};
 use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
@@ -21,26 +21,38 @@ async fn session(mode: &str, cancel: &CancellationToken) -> AgentSession {
 async fn roundtrip_observe_act() {
     let cancel = CancellationToken::new();
     let mut session = session("normal", &cancel).await;
-    let obs = session.observe().await.unwrap();
+    let obs = session.observe(&Scope::default()).await.unwrap();
     assert_eq!(obs.observation_id, "observation-a");
     assert_eq!(obs.elements[0].name, "ação");
     let action: Action = serde_json::from_value(json!({"type":"text","value":"ação ç"})).unwrap();
     assert!(session.act(&obs.observation_id, &action).await.unwrap().ok);
-    assert_eq!(session.screenshot().await.unwrap(), b"png");
+    assert_eq!(session.screenshot(None).await.unwrap(), b"png");
     session.close().await.unwrap();
     assert!(session.is_closed());
+}
+
+#[tokio::test]
+async fn act_refused_before_touching_the_app_is_not_delivered_and_session_stays_open() {
+    let cancel = CancellationToken::new();
+    let mut session = session("refuse-act", &cancel).await;
+    let obs = session.observe(&Scope::default()).await.unwrap();
+    let action: Action = serde_json::from_value(json!({"type":"invoke","target":"e1"})).unwrap();
+    let error = session.act(&obs.observation_id, &action).await.unwrap_err();
+    assert_eq!(error, SessionError::NotDelivered("RuntimeError: usuário ativo".into()));
+    assert!(!session.is_closed());
+    session.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn rpc_timeout_closes_session_and_never_returns_cached() {
     let cancel = CancellationToken::new();
     let mut session = session("exit-on-screenshot", &cancel).await;
-    session.observe().await.unwrap();
-    let error = session.screenshot().await.unwrap_err();
+    session.observe(&Scope::default()).await.unwrap();
+    let error = session.screenshot(None).await.unwrap_err();
     assert!(matches!(error, SessionError::Timeout(_)));
     assert_eq!(error.to_string(), "agente não respondeu a screenshot; execução encerrada");
     assert!(session.is_closed());
-    assert!(matches!(session.observe().await, Err(SessionError::Cancelled(_))));
+    assert!(matches!(session.observe(&Scope::default()).await, Err(SessionError::Cancelled(_))));
 }
 
 #[tokio::test]
@@ -49,7 +61,7 @@ async fn cancel_prevents_sending_action() {
     let marker = directory.path().join("act.marker");
     let cancel = CancellationToken::new();
     let mut session = AgentSession::start(config("record-act", &[marker.display().to_string()]), &[], cancel.clone()).await.unwrap();
-    let obs = session.observe().await.unwrap();
+    let obs = session.observe(&Scope::default()).await.unwrap();
     cancel.cancel();
     let action = serde_json::from_value(json!({"type":"text","value":"não enviar"})).unwrap();
     let error = session.act(&obs.observation_id, &action).await.unwrap_err();
@@ -87,7 +99,7 @@ async fn local_child_is_reaped_on_close_and_drop() {
 #[tokio::test]
 async fn agent_error_keeps_python_exception_name() {
     let mut session = session("agent-error", &CancellationToken::new()).await;
-    let error = session.observe().await.unwrap_err();
+    let error = session.observe(&Scope::default()).await.unwrap_err();
     assert_eq!(error, SessionError::Agent("ValueError: observação inválida".into()));
     session.close().await.unwrap();
 }
@@ -136,7 +148,7 @@ async fn connector_loads_config_at_connect_and_uses_default_command() {
     assert!(error.to_string().contains("agent.json"));
     std::fs::write(&path, "{}").unwrap();
     let mut session = connector.connect(&CancellationToken::new()).await.unwrap();
-    assert!(session.observe().await.unwrap().connected);
+    assert!(session.observe(&Scope::default()).await.unwrap().connected);
     session.close().await.unwrap();
 }
 
@@ -157,7 +169,7 @@ fn config_defaults_unknown_fields_and_invalid_input() {
 
 async fn paused_session(directory: &Path, cancel: &CancellationToken) -> AgentSession {
     let mut session = AgentSession::start(config("pause-polls", &[directory.display().to_string()]), &[], cancel.clone()).await.unwrap();
-    session.observe().await.unwrap();
+    session.observe(&Scope::default()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(4), async {
         while !tokio::fs::try_exists(directory.join("paused")).await.unwrap() {
             tokio::task::yield_now().await;
@@ -182,7 +194,7 @@ async fn abandoned_rpc_does_not_deliver_action() {
     poll_pending(&mut pending).await;
     drop(pending);
     tokio::fs::write(directory.path().join("release"), b"resume").await.unwrap();
-    session.observe().await.unwrap();
+    session.observe(&Scope::default()).await.unwrap();
     session.close().await.unwrap();
     assert!(!directory.path().join("act.marker").exists(), "abandoned action reached agent");
 }

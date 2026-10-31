@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hcc_protocolo::{Action, ActionType, Connector, Observation, Session, SessionError};
+use hcc_protocolo::{Action, ActionType, Connector, Observation, Scope, Session, SessionError};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -301,7 +301,7 @@ fn percentual(p: f64) -> String { format!("{:.0}%", p * 100.0) }
 
 async fn observar<S: Session>(sessao: &mut S) -> Result<Observation, SessionError> {
     for tentativa in 0..3 {
-        match sessao.observe().await {
+        match sessao.observe(&Scope::default()).await {
             Ok(obs) => {
                 return if obs.connected && !obs.observation_id.is_empty() { Ok(obs) }
                 else { Err(SessionError::Agent("desktop desconectado ou observação sem referência".into())) };
@@ -329,7 +329,7 @@ async fn registrar(pasta: &Path, mut valor: Value, secretos: &Segredos) -> Resul
 
 /// The screen as PNG, saved to `arquivo`. The outer error stops the run (cancel, time, disk); the inner one is the agent's.
 async fn capturar<S: Session>(sessao: &mut S, controle: &mut Controle<'_>, arquivo: &Path) -> Result<Result<Vec<u8>, SessionError>, String> {
-    let png = controle.medir("captura", Progresso::Captura, async { Ok(sessao.screenshot().await) }).await?;
+    let png = controle.medir("captura", Progresso::Captura, async { Ok(sessao.screenshot(None).await) }).await?;
     if let Ok(png) = &png { controle.rodar(async { tokio::fs::write(arquivo, png).await.map_err(erro_io) }).await?; }
     Ok(png)
 }

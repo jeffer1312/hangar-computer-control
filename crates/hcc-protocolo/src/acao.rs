@@ -20,6 +20,19 @@ pub enum ActionType {
     Text,
     Launch,
     Mouse,
+    Check,
+    Uncheck,
+}
+
+/// How the agent delivers an action. `None` on the action means `Real`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum InputMode {
+    /// Accessibility patterns only: no focus change, no pointer, no keys.
+    Background,
+    /// Real input once the user has been idle; focus goes back afterwards.
+    Polite,
+    Real,
 }
 
 impl ActionType {
@@ -38,6 +51,8 @@ impl ActionType {
             Self::Text => "text",
             Self::Launch => "launch",
             Self::Mouse => "mouse",
+            Self::Check => "check",
+            Self::Uncheck => "uncheck",
         }
     }
 }
@@ -117,6 +132,11 @@ pub struct Action {
     pub delta: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotulo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputMode>,
+    /// Draw the cursor moving to the target before acting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cursor: bool,
 }
 
 impl Action {
@@ -133,6 +153,9 @@ impl Action {
         }
         if self.rotulo.as_ref().is_some_and(|r| r.chars().count() > 200) {
             return Err("rotulo com mais de 200 caracteres".into());
+        }
+        if self.kind == ActionType::Launch && self.input.is_some() {
+            return Err("launch não aceita input".into());
         }
         let target = ("target", self.target.is_some());
         let exigidos: &[(&str, bool)] = match self.kind {

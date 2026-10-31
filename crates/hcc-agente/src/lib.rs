@@ -44,14 +44,10 @@ fn ler_conexao(config: &Path) -> Result<Connection, String> {
 fn servir<D: Desktop>(mut desktop: D, config: &Path) -> Result<(), String> {
     let cliente = Cliente::new(&ler_conexao(config)?)?;
     let base = AgentPost {
-        hello: false,
         boot: uuid::Uuid::new_v4().simple().to_string(),
         session_id: desktop.session_id(),
         pid: std::process::id(),
-        protocol: None,
-        id: None,
-        result: None,
-        error: None,
+        ..Default::default()
     };
     let mut resposta = AgentPost { hello: true, protocol: Some(PROTOCOL), ..base.clone() };
     let mut registro = Registro::default();
@@ -59,13 +55,14 @@ fn servir<D: Desktop>(mut desktop: D, config: &Path) -> Result<(), String> {
         let bruto = cliente.enviar(&resposta)?;
         let recebido = Instant::now();
         resposta = base.clone();
+        let operacao = bruto.get("operation").and_then(Value::as_str).unwrap_or_default().to_owned();
         let (id, resultado) = match serde_json::from_value::<Command>(bruto.clone()) {
             Ok(Command::Stop) => return Ok(()),
             Ok(Command::Heartbeat) => continue,
-            Ok(Command::Observe { id, ttl_ms }) => {
+            Ok(Command::Observe { id, ttl_ms, scope }) => {
                 let r = no_prazo(recebido, ttl_ms)
                     .and_then(|()| desktop.available())
-                    .and_then(|()| registro.observar(&mut desktop))
+                    .and_then(|()| registro.observar(&mut desktop, &scope))
                     .and_then(|o| para_json(&o));
                 (id, r)
             }
@@ -73,28 +70,32 @@ fn servir<D: Desktop>(mut desktop: D, config: &Path) -> Result<(), String> {
                 let r = no_prazo(recebido, ttl_ms)
                     .and_then(|()| desktop.available())
                     .and_then(|()| registro.validar_e_consumir(&mut desktop, &observation_id))
+                    .map_err(DesktopError::nao_entregue)
                     .and_then(|observada| desktop.act(&observada, &action))
-                    .and_then(|()| para_json(&ActResult { ok: true }));
+                    .and_then(|delivery| para_json(&ActResult { ok: true, delivery }));
                 (id, r)
             }
-            Ok(Command::Screenshot { id, ttl_ms }) => {
+            Ok(Command::Screenshot { id, ttl_ms, window }) => {
                 let r = no_prazo(recebido, ttl_ms)
                     .and_then(|()| desktop.available())
-                    .and_then(|()| desktop.screenshot_png())
+                    .and_then(|()| desktop.screenshot_png(window.as_deref()))
                     .and_then(|png| para_json(&ScreenshotResult { png: base64::engine::general_purpose::STANDARD.encode(png) }));
                 (id, r)
             }
             Err(e) => {
                 // Missing or unknown operation is what Python's dispatch rejects (windows_uia.py:380).
-                let operacao = bruto.get("operation").and_then(Value::as_str).unwrap_or_default();
                 // Only the operation: the body may carry typed text (a password).
                 let id = bruto.get("id").and_then(Value::as_str).ok_or_else(|| format!("comando sem id do controlador: operation={operacao:?}"))?;
-                let msg = if OPERACOES.contains(&operacao) { format!("comando inválido: {e}") } else { "operação inválida".into() };
-                let invalido = DesktopError { kind: ErrorKind::ValueError, msg };
+                let msg = if OPERACOES.contains(&operacao.as_str()) { format!("comando inválido: {e}") } else { "operação inválida".into() };
+                let invalido = DesktopError::new(ErrorKind::ValueError, msg);
                 let r = if operacao == "act" {
                     // Python validates and spends the observation before rejecting the action (windows_uia.py:244-248).
                     let observation_id = bruto.get("observation_id").and_then(Value::as_str).unwrap_or_default();
-                    desktop.available().and_then(|()| registro.validar_e_consumir(&mut desktop, observation_id)).and(Err(invalido))
+                    desktop
+                        .available()
+                        .and_then(|()| registro.validar_e_consumir(&mut desktop, observation_id))
+                        .and(Err(invalido))
+                        .map_err(DesktopError::nao_entregue)
                 } else {
                     Err(invalido)
                 };
@@ -104,7 +105,10 @@ fn servir<D: Desktop>(mut desktop: D, config: &Path) -> Result<(), String> {
         resposta.id = Some(id);
         match resultado {
             Ok(v) => resposta.result = Some(v),
-            Err(e) => resposta.error = Some(e.to_string()),
+            Err(e) => {
+                resposta.error = Some(e.to_string());
+                resposta.delivery = (operacao == "act").then_some(e.delivery);
+            }
         }
     }
 }
@@ -112,11 +116,11 @@ fn servir<D: Desktop>(mut desktop: D, config: &Path) -> Result<(), String> {
 /// Relative to receipt on the agent's own clock: no skew between controller and desktop.
 fn no_prazo(recebido: Instant, ttl_ms: u64) -> Result<(), DesktopError> {
     if recebido.elapsed() >= Duration::from_millis(ttl_ms) {
-        return Err(DesktopError { kind: ErrorKind::TimeoutError, msg: "comando expirou antes de chegar ao desktop".into() });
+        return Err(DesktopError::new(ErrorKind::TimeoutError, "comando expirou antes de chegar ao desktop"));
     }
     Ok(())
 }
 
 fn para_json(v: &impl serde::Serialize) -> Result<Value, DesktopError> {
-    serde_json::to_value(v).map_err(|e| DesktopError { kind: ErrorKind::ValueError, msg: e.to_string() })
+    serde_json::to_value(v).map_err(|e| DesktopError::new(ErrorKind::ValueError, e.to_string()))
 }

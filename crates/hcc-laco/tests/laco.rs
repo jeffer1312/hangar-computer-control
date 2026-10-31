@@ -1589,7 +1589,7 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     // A dialog closing leaves its app's main window: launching stays available.
     let mut com_dialogo = aberto.clone();
     com_dialogo.windows.push(hcc_protocolo::Window { id: "w9".into(), name: "Salvar como".into(), process_id: 10,
-        class_name: "dialog".into(), rect: Rect(0, 0, 100, 100) });
+        class_name: "dialog".into(), process: String::new(), rect: Rect(0, 0, 100, 100) });
     com_dialogo.foreground = "w9".into();
     let mut sem_dialogo = aberto.clone();
     sem_dialogo.observation_id = "o2".into();
@@ -1604,7 +1604,7 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     // From the bare desktop (pid 0 pseudo-window), opening an app is not "an app closed".
     let mut mesa = aberto.clone();
     mesa.windows = vec![hcc_protocolo::Window { id: "desktop".into(), name: "Área de trabalho".into(), process_id: 0,
-        class_name: "desktop".into(), rect: Rect(0, 0, 800, 600) }];
+        class_name: "desktop".into(), process: String::new(), rect: Rect(0, 0, 800, 600) }];
     mesa.foreground = "desktop".into();
     let mut app = aberto.clone();
     app.observation_id = "o2".into();
@@ -1619,7 +1619,7 @@ async fn app_closed_by_the_loop_is_not_offered_to_launch_again() {
     // A dialog of another process (file portal) closing blocks nothing it does not name.
     let mut portal = aberto.clone();
     portal.windows.push(hcc_protocolo::Window { id: "w8".into(), name: "Salvar arquivo".into(), process_id: 30,
-        class_name: "xdg-desktop-portal-gtk".into(), rect: Rect(0, 0, 100, 100) });
+        class_name: "xdg-desktop-portal-gtk".into(), process: String::new(), rect: Rect(0, 0, 100, 100) });
     portal.foreground = "w8".into();
     let mut sem_portal = aberto.clone();
     sem_portal.observation_id = "o2".into();
@@ -2227,7 +2227,7 @@ async fn piece_jev_does_not_pick_or_that_does_not_fit_leaves_the_run_to_jev() {
 async fn goal_names_in_a_window_that_appeared_confirm_an_app_opened_without_focus() {
     for (ja_existia, ok) in [(false, true), (true, false)] {
         let calculadora = hcc_protocolo::Window { id: "w9".into(), name: "Calculadora".into(), process_id: 9,
-            class_name: "org.gnome.Calculator".into(), rect: Rect(0, 0, 10, 10) };
+            class_name: "org.gnome.Calculator".into(), process: String::new(), rect: Rect(0, 0, 10, 10) };
         let mut o1 = tree("o1", "");
         if ja_existia { o1.windows.push(calculadora.clone()); }
         let mut o2 = tree("o2", "");

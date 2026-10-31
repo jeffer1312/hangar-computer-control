@@ -47,7 +47,7 @@ pub(crate) fn com(e: uiautomation::Error) -> DesktopError {
     match e.code() {
         0 => runtime_err("NoPatternInterfaceError"),
         c if c > 0 => runtime_err(e.to_string()),
-        _ => DesktopError { kind: ErrorKind::ComError, msg: e.to_string() },
+        _ => DesktopError::new(ErrorKind::ComError, e.to_string()),
     }
 }
 
@@ -180,11 +180,13 @@ pub(crate) fn ler(ua: &UIAutomation) -> Result<Lido, DesktopError> {
         }
         let hwnd = handle(&el)?;
         let wid = id_janela(hwnd);
+        let process_id = el.get_process_id().map_err(com)?;
         windows.push(Window {
             id: wid.clone(),
             name: el.get_name().map_err(com)?,
-            process_id: el.get_process_id().map_err(com)?,
+            process_id,
             class_name: el.get_classname().map_err(com)?,
+            process: crate::sessao_win::nome_processo(process_id),
             rect: rect(&el)?,
         });
         janelas.insert(wid, Janela { hwnd, el });
@@ -298,6 +300,7 @@ fn elemento(el: &UIElement, senha: bool, indice: usize) -> Result<Option<Element
         focused: el.has_keyboard_focus().map_err(com)?,
         actions,
         password: senha,
+        unread: None,
         name,
         role,
     }))

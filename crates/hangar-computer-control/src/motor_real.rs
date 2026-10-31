@@ -61,7 +61,7 @@ async fn capturar(config: Option<PathBuf>, cancel: CancellationToken) -> Result<
     let imagem = tokio::select! {
         biased;
         () = cancel.cancelled() => Err("controle cancelado ou encerrado".to_owned()),
-        r = sessao.screenshot() => r.map_err(|e| e.to_string()),
+        r = sessao.screenshot(None) => r.map_err(|e| e.to_string()),
     };
     let fechamento = sessao.close().await;
     let png = imagem?;
@@ -76,10 +76,11 @@ async fn consultar(config: Option<PathBuf>, cancel: CancellationToken) -> String
         Ok(s) => s,
         Err(e) => return format!("indisponível: {e}"),
     };
+    let escopo = hcc_protocolo::Scope::default();
     let observacao = tokio::select! {
         biased;
         () = cancel.cancelled() => Err(hcc_protocolo::SessionError::Cancelled("controle cancelado ou encerrado".to_owned())),
-        r = sessao.observe() => r,
+        r = sessao.observe(&escopo) => r,
     };
     let texto = match observacao {
         Ok(o) if !o.connected => "indisponível: agente desconectado".to_owned(),

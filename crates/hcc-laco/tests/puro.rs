@@ -22,6 +22,7 @@ fn el(id: &str, name: &str, role: &str, actions: &[ElementAction], value: Option
         focused: false,
         actions: actions.to_vec(),
         password: false,
+        unread: None,
     }
 }
 
@@ -31,7 +32,7 @@ fn obs(elements: Vec<Element>) -> Observation {
         connected: true,
         session_id: 1,
         foreground: "w1".into(),
-        windows: vec![Window { id: "w1".into(), name: "Editor".into(), process_id: 1, class_name: "TMainForm".into(), rect: Rect(0, 0, 800, 600) }],
+        windows: vec![Window { id: "w1".into(), name: "Editor".into(), process_id: 1, class_name: "TMainForm".into(), process: String::new(), rect: Rect(0, 0, 800, 600) }],
         elements,
         apps: vec![],
         truncated: false,
@@ -371,7 +372,7 @@ fn secret_masked_in_every_field() {
     let d = dados(json!({"usuario": "s3gr3d0", "senha": "s3gr3d0", "pin": "a"}));
     let mut o = obs(vec![el("e0", "Nome", "Edit", &[ElementAction::SetValue], Some("a"), None)]);
     o.windows[0].name = "Login s3gr3d0".into();
-    o.windows.push(Window { id: "w2".into(), name: "s3gr3d0".into(), process_id: 2, class_name: "X".into(), rect: Rect(0, 0, 1, 1) });
+    o.windows.push(Window { id: "w2".into(), name: "s3gr3d0".into(), process_id: 2, class_name: "X".into(), process: String::new(), rect: Rect(0, 0, 1, 1) });
     let recentes = [Registro { result: "NOT executed: s3gr3d0".into(), ..reg("invoke Text 's3gr3d0'", Some(false)) }];
     let valor = estado_compacto("entrar com s3gr3d0", &d, &o, &recentes, Some("vi s3gr3d0"));
     let estado = serde_json::to_string(&valor).unwrap();

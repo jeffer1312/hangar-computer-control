@@ -21,9 +21,22 @@ fn golden(name: &str) -> Value { serde_json::from_str(&std::fs::read_to_string(f
         assert!(got.as_ref().err().is_some_and(|e| e.contains(want)), "{case}: {got:?}");
     }
 }
-#[test] fn hello_carries_protocol_2_and_password_flag_is_omitted_when_false() {
-    let h = AgentPost { hello: true, boot: "b".into(), session_id: 1, pid: 2, protocol: Some(PROTOCOL), id: None, result: None, error: None };
-    assert_eq!(serde_json::to_value(&h).unwrap(), serde_json::json!({"hello":true,"boot":"b","session_id":1,"pid":2,"protocol":2}));
+#[test] fn hello_carries_protocol_3_and_password_flag_is_omitted_when_false() {
+    let h = AgentPost { hello: true, boot: "b".into(), session_id: 1, pid: 2, protocol: Some(PROTOCOL), ..Default::default() };
+    assert_eq!(serde_json::to_value(&h).unwrap(), serde_json::json!({"hello":true,"boot":"b","session_id":1,"pid":2,"protocol":3}));
+}
+#[test] fn act_result_without_delivery_reads_as_unknown() {
+    let r: ActResult = serde_json::from_value(serde_json::json!({"ok": true})).unwrap();
+    assert_eq!(serde_json::to_value(r).unwrap(), serde_json::json!({"ok": true, "delivery": "unknown"}));
+    let r: ActResult = serde_json::from_value(serde_json::json!({"ok": true, "delivery": "delivered_verified"})).unwrap();
+    assert_eq!(r.delivery, Delivery::DeliveredVerified);
+}
+#[test] fn act_error_carries_not_delivered_and_default_scope_is_omitted() {
+    let e: AgentPost = serde_json::from_value(serde_json::json!({"boot":"b","session_id":1,"pid":2,"id":"a1","error":"ValueError: x","delivery":"not_delivered"})).unwrap();
+    assert_eq!(e.delivery, Some(Delivery::NotDelivered));
+    let c: Command = serde_json::from_value(serde_json::json!({"operation":"observe","id":"a1","ttl_ms":1})).unwrap();
+    assert_eq!(c, Command::Observe { id: "a1".into(), ttl_ms: 1, scope: Scope::default() });
+    assert_eq!(serde_json::to_value(&c).unwrap(), serde_json::json!({"operation":"observe","id":"a1","ttl_ms":1}));
 }
 #[test] fn connection_debug_hides_token() {
     let c = Connection { url: "http://127.0.0.1:1/next".into(), token: "segredo".into() };

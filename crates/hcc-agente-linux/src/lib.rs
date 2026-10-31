@@ -7,7 +7,7 @@ pub mod hypr;
 
 use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, escalar, role_name, walk};
 use comandos::{Comandos, ComandosSistema};
-use hcc_protocolo::{Action, ActionType, Button, Desktop, DesktopError, ErrorKind, MouseMode, Observation, Rect, Screen, Window, dividir_comando};
+use hcc_protocolo::{Action, ActionType, Button, Delivery, Desktop, DesktopError, ErrorKind, MouseMode, Observation, Rect, Scope, Screen, Window, dividir_comando};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -56,14 +56,14 @@ impl LinuxDesktop {
     }
 }
 
-fn runtime(message: impl Into<String>) -> DesktopError { DesktopError { kind: ErrorKind::RuntimeError, msg: message.into() } }
+fn runtime(message: impl Into<String>) -> DesktopError { DesktopError::new(ErrorKind::RuntimeError, message) }
 
 pub(crate) fn ignorado(onde: &str, error: &impl std::fmt::Display) {
     let detail = error.to_string().replace('\r', "\\r").replace('\n', "\\n");
     eprintln!("hcc-agente-linux: ignorado {onde}: {detail}");
 }
 
-fn invalid(message: impl Into<String>) -> DesktopError { DesktopError { kind: ErrorKind::ValueError, msg: message.into() } }
+fn invalid(message: impl Into<String>) -> DesktopError { DesktopError::new(ErrorKind::ValueError, message) }
 fn tree_error(error: TreeError) -> DesktopError { runtime(error.to_string()) }
 
 fn foreground_id(active: &Value) -> String {
@@ -388,7 +388,9 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
                 let (x, y) = center(visivel);
                 self.mouse(&Action { kind: ActionType::Mouse, x: Some(x), y: Some(y), mode: Some(MouseMode::Scroll), delta: Some(delta), ..Default::default() })
             }
-            ActionType::Activate | ActionType::Launch | ActionType::Keys | ActionType::Text | ActionType::Mouse => Err(invalid(format!("tipo de ação desconhecido: {}", action.kind))),
+            ActionType::Activate | ActionType::Launch | ActionType::Keys | ActionType::Text | ActionType::Mouse | ActionType::Check | ActionType::Uncheck => {
+                Err(invalid(format!("tipo de ação desconhecido: {}", action.kind)))
+            }
         }
     }
 }
@@ -418,7 +420,13 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 
     fn foreground(&mut self) -> Result<String, DesktopError> { Ok(foreground_id(&hypr::query(&self.commands, "activewindow").map_err(runtime)?)) }
 
-    fn observe(&mut self) -> Result<Observation, DesktopError> {
+    fn has_window(&mut self, id: &str) -> Result<bool, DesktopError> {
+        let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
+        Ok(clients.as_array().is_some_and(|cs| cs.iter().any(|c| c["address"].as_str().is_some_and(|a| format!("w{a}") == id))))
+    }
+
+    fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
+        if !scope.is_default() { return Err(invalid("escopo de leitura ainda não suportado")); }
         self.available()?;
         self.observed_at = None; self.elements.clear(); self.windows.clear();
         let (active, area, monitor) = self.current()?;
@@ -445,7 +453,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
             }
             (elements, cut)
         } else {
-            windows.push(Window { id: "desktop".into(), name: "Área de trabalho".into(), process_id: 0, class_name: "desktop".into(), rect: Rect(0, 0, screen.width as i32, screen.height as i32) });
+            windows.push(Window { id: "desktop".into(), name: "Área de trabalho".into(), process_id: 0, class_name: "desktop".into(), process: String::new(), rect: Rect(0, 0, screen.width as i32, screen.height as i32) });
             (vec![], false)
         };
         if self.foreground()? != self.foreground { return Err(runtime("a janela ativa mudou durante a observação; tente novamente")); }
@@ -455,9 +463,25 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| runtime(e.to_string()))?.as_secs_f64(), screen })
     }
 
-    fn act(&mut self, observed: &Observation, action: &Action) -> Result<(), DesktopError> {
-        self.validate_observation(observed)?;
+    fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
+        self.validate_observation(observed).map_err(DesktopError::nao_entregue)?;
         self.observed_at = None;
+        self.agir(action).map(|()| Delivery::DeliveredUnverified)
+    }
+
+    fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
+        if window.is_some() { return Err(invalid("print de uma janela ainda não suportado")); }
+        self.available()?;
+        let (_, area, monitor) = self.current()?;
+        let width = area.2 - area.0;
+        let scale = f64::from(width.min(1280)) / f64::from(width);
+        let scale = if scale.fract() == 0.0 { format!("{scale:.1}") } else { scale.to_string() };
+        self.commands.run(&["grim", "-o", hypr::string(&monitor, "name").map_err(runtime)?, "-s", &scale, "-"], None).map_err(runtime)
+    }
+}
+
+impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
+    fn agir(&mut self, action: &Action) -> Result<(), DesktopError> {
         match action.kind {
             ActionType::Activate => {
                 let window = action.target.as_ref().and_then(|t| self.windows.get(t)).ok_or_else(|| invalid("janela não pertence à observação"))?;
@@ -494,16 +518,8 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
                 }
             }
             ActionType::Mouse => self.mouse(action),
+            ActionType::Check | ActionType::Uncheck => Err(invalid(format!("{} ainda não suportado", action.kind))),
             ActionType::Invoke | ActionType::SetValue | ActionType::Select | ActionType::Toggle | ActionType::Expand | ActionType::Collapse | ActionType::Focus | ActionType::Scroll => self.element_action(action),
         }
-    }
-
-    fn screenshot_png(&mut self) -> Result<Vec<u8>, DesktopError> {
-        self.available()?;
-        let (_, area, monitor) = self.current()?;
-        let width = area.2 - area.0;
-        let scale = f64::from(width.min(1280)) / f64::from(width);
-        let scale = if scale.fract() == 0.0 { format!("{scale:.1}") } else { scale.to_string() };
-        self.commands.run(&["grim", "-o", hypr::string(&monitor, "name").map_err(runtime)?, "-s", &scale, "-"], None).map_err(runtime)
     }
 }

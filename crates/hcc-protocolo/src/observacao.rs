@@ -39,6 +39,9 @@ pub struct Window {
     pub name: String,
     pub process_id: u32,
     pub class_name: String,
+    /// Executable name on Windows, Hyprland class on Linux.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process: String,
     pub rect: Rect,
 }
 
@@ -67,6 +70,9 @@ pub struct Element {
     pub actions: Vec<ElementAction>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,
+    /// Direct children left unread (time, node or per-parent limit, or skeleton depth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

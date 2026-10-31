@@ -3,7 +3,7 @@ use crate::local::LocalTransport;
 use crate::servidor::Server;
 use crate::ssh::{NativeRunner, SshTransport};
 use base64::Engine;
-use hcc_protocolo::{ActResult, Action, Command, Connector, Observation, Session, SessionError, ScreenshotResult};
+use hcc_protocolo::{ActResult, Action, Command, Connector, Delivery, Observation, Scope, Session, SessionError, ScreenshotResult};
 use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -108,7 +108,9 @@ impl AgentSession {
                 self.server.send(command).await?;
                 let post = reply.await.map_err(|_| SessionError::Cancelled("controle cancelado ou encerrado".into()))?;
                 self.server.check()?;
-                if let Some(error) = post.error { Err(SessionError::Agent(error)) }
+                if let Some(error) = post.error {
+                    Err(if post.delivery == Some(Delivery::NotDelivered) { SessionError::NotDelivered(error) } else { SessionError::Agent(error) })
+                }
                 else {
                     post.result.ok_or_else(|| SessionError::Agent("resposta do agente sem result".into()))
                         .and_then(|value| serde_json::from_value(value).map_err(|error| SessionError::Agent(error.to_string())))
@@ -141,9 +143,9 @@ impl AgentSession {
 }
 
 impl Session for AgentSession {
-    async fn observe(&mut self) -> Result<Observation, SessionError> {
+    async fn observe(&mut self, scope: &Scope) -> Result<Observation, SessionError> {
         let id = Uuid::new_v4().simple().to_string();
-        self.rpc(id.clone(), Command::Observe { id, ttl_ms: self.ttl_ms() }, "observe").await
+        self.rpc(id.clone(), Command::Observe { id, ttl_ms: self.ttl_ms(), scope: scope.clone() }, "observe").await
     }
 
     async fn act(&mut self, observation_id: &str, action: &Action) -> Result<ActResult, SessionError> {
@@ -151,9 +153,10 @@ impl Session for AgentSession {
         self.rpc(id.clone(), Command::Act { id, ttl_ms: self.ttl_ms(), action: action.clone(), observation_id: observation_id.into() }, "act").await
     }
 
-    async fn screenshot(&mut self) -> Result<Vec<u8>, SessionError> {
+    async fn screenshot(&mut self, window: Option<&str>) -> Result<Vec<u8>, SessionError> {
         let id = Uuid::new_v4().simple().to_string();
-        let result: ScreenshotResult = self.rpc(id.clone(), Command::Screenshot { id, ttl_ms: self.ttl_ms() }, "screenshot").await?;
+        let command = Command::Screenshot { id: id.clone(), ttl_ms: self.ttl_ms(), window: window.map(str::to_owned) };
+        let result: ScreenshotResult = self.rpc(id, command, "screenshot").await?;
         base64::engine::general_purpose::STANDARD.decode(result.png)
             .map_err(|error| SessionError::Agent(error.to_string()))
     }

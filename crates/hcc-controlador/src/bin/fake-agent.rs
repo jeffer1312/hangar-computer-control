@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if mode == "no-hello" { std::future::pending::<()>().await; }
     let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build()?;
-    let mut body = json!({"hello":true,"boot":"agent-a","session_id":1,"pid":std::process::id(),"protocol":2});
+    let mut body = json!({"hello":true,"boot":"agent-a","session_id":1,"pid":std::process::id(),"protocol":hcc_protocolo::PROTOCOL});
     let mut pause_after_reply = false;
     loop {
         let command: Value = client.post(&connection.url).bearer_auth(&connection.token)
@@ -50,6 +50,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["id"] = command["id"].clone();
                 if mode == "agent-error" {
                     body["error"] = json!("ValueError: observação inválida");
+                    continue;
+                }
+                if mode == "refuse-act" && operation == "act" {
+                    body["error"] = json!("RuntimeError: usuário ativo");
+                    body["delivery"] = json!("not_delivered");
                     continue;
                 }
                 body["result"] = match operation {

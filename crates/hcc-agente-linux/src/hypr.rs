@@ -68,6 +68,6 @@ pub fn windows_from(clients: &Value, origin: (i32, i32)) -> Result<Vec<Window>, 
         .map(|c| Ok(Window {
             id: format!("w{}", string(c, "address")?), name: string(c, "title")?.into(),
             process_id: c["pid"].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or("hyprctl retornou pid inválido")?,
-            class_name: string(c, "class")?.into(), rect: client_rect(c, origin)?,
+            class_name: string(c, "class")?.into(), process: string(c, "class")?.into(), rect: client_rect(c, origin)?,
         })).collect()
 }
