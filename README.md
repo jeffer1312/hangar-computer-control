@@ -25,8 +25,10 @@ Como funciona, por ciclo:
 O print vai sempre ao provedor do Jev, sem exceção por segredo ou por alvo (o Jev já recebe por texto o que
 está na árvore). O formato depende do endereço do Jev: pelo OpenRouter a imagem só vale como parte `image_url`
 dentro do `state` (o campo `assets` é ignorado lá); na TypeSafe direta vai em `assets`, com o cabeçalho
-`TypeSafe-Danger-Zone-Images`. Pedido com o print que falha é refeito sem ele, e o resto do objetivo segue sem
-print ao Jev; pedido com o print também tem teto de tempo próprio e só sai com prazo para refazer sem ele.
+`TypeSafe-Danger-Zone-Images`. Pedido com o print que falha é refeito sem ele. Recusa do pedido (HTTP 4xx) ou
+estouro do teto desliga o print pelo resto do objetivo; falha passageira (429, 5xx, rede) só desliga depois de duas
+seguidas. HTTP 429, 503 e 529 são pedidos de novo até duas vezes (depois do `retry-after`, ou 0,5 s e 1 s), sempre
+dentro do prazo. Pedido com o print também tem teto de tempo próprio e só sai com prazo para refazer sem ele.
 5. O agente executa, o laço observa de novo. Repete até DONE, impedimento real ou limite.
 
 Não tem regra por aplicativo. Tela nova é só árvore nova.
@@ -130,8 +132,8 @@ Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGEN
   `observacao-N.json` (a árvore) e `tela-N.png` (o print do ciclo); em `jev.jsonl`, cada decisão com as opções
   oferecidas ao Jev, a dica, `imagem` (se o print foi ao Jev: `enviada`, `falhou`, `desligada`, `sem_prazo`,
   `fora_do_limite`, `sem_print`), `motivo` e `blocked`; as propostas do LLM e qual delas o Jev escolheu; a lista
-  de ações com o resultado de cada uma (`acoes`) e o desfecho (`resultado`). É o que se lê para entender por que
-  um objetivo parou.
+  de ações com o resultado de cada uma (`acoes`) e o desfecho (`resultado`, com `jev`: o modelo que respondeu e os
+  tokens de entrada da execução). É o que se lê para entender por que um objetivo parou.
   Objetivo de leitura ("leia", "mostre", "diga") devolve no `concluído:` o que foi lido: a leitura do print
   (`Leitura: …`) e/ou o texto visível da janela pela árvore (`Texto na janela: …`, até 2000 caracteres).
   `refazer=true` ignora o roteiro gravado (abaixo). `ver=true` deixa você assistir (abaixo).
@@ -168,6 +170,17 @@ Por padrão o objetivo não disputa o computador com você:
   rodaria duas vezes) nem para valor que o agente já conferiu.
 - No Chromium (Edge, Chrome, apps Electron) a ação pela acessibilidade traz a janela por um instante; o agente
   devolve a sua em seguida.
+
+Vários objetivos em segundo plano rodam juntos no mesmo desktop, cada um na sua janela:
+
+- O objetivo fica com cada janela em que age (a do app, a ativada; abrir app não pega nenhuma) até terminar. Outro
+  objetivo que tente agir nela para na hora com `outro objetivo está controlando a janela '<título>'`.
+- Teclado e mouse vão um de cada vez: cada ação pega a vez (arquivo de trava na pasta temporária no Windows, em
+  `$XDG_RUNTIME_DIR` no Linux), espera até 3 s por ela e só então confere se você está parado. Sem a vez, a ação é
+  recusada antes de tocar o app e o laço tenta de novo, como com você mexendo. A ação que deixa um menu do app
+  aberto segura a vez (até 20 s), para outro objetivo não fechar o menu trazendo a janela dele.
+- No Windows, a última entrada de um agente fica gravada na vez: o outro não a toma por você mexendo.
+- `ver=true` pega o desktop inteiro: não roda junto com nenhum outro objetivo.
 
 `ver=true` é para assistir: a janela do app fica na frente, a entrada é a de sempre (mouse e teclado na hora) e,
 no Windows, uma seta vermelha desenhada desliza até cada controle antes da ação.
@@ -289,7 +302,9 @@ visão); quem chama decide quando avisar o usuário. A última notificação sem
   botão ou o verbo; o Jev recebe a dica de cancelar o diálogo. Aviso só com Fechar/OK cobrindo a tela vira dica
   de fechá-lo antes.
   Repita o objetivo dizendo explicitamente ("…substituindo se já existir"). Fechar a janela (o botão Fechar
-  no canto da janela, Alt+F4, Ctrl+Q, Ctrl+Shift+W) só acontece se o objetivo pedir para fechar.
+  no canto da janela, Alt+F4, Ctrl+Q, Ctrl+Shift+W) só acontece se o objetivo pedir para fechar. Atalho que
+  trava, esconde ou tira da sessão (Win sozinha ou com L, D, M, R, X, E, Tab; Alt+Tab; Alt+Esc; Ctrl+Shift+Esc;
+  Ctrl+Alt+Del) nunca é oferecido, nem pedido no objetivo; o Jev recebe a dica de seguir dentro do app.
 - Navegador só é aberto quando o objetivo nomeia esse navegador ou diz "navegador"; um app cujo nome repete
   o de uma janela já aberta ("Chrome (CDP)" com o Chrome aberto) não é oferecido, salvo "nova"/"outra janela".
 - A tela pede algo que não foi dado (login, credencial de rede): devolve isso como impedimento.
@@ -314,7 +329,8 @@ visão); quem chama decide quando avisar o usuário. A última notificação sem
 - Linux: janela numa área de trabalho escondida não aparece como visível no AT-SPI; lida pelo id, vem sem
   controles (o print dela sai). O cursor desenhado de `ver` é só no Windows.
 - Repetição de roteiro e de trecho usa a entrada de sempre, na janela da frente.
-- Um objetivo por vez por Windows alvo (trava na pasta temporária, por usuário e por alvo).
+- Linux: a entrada de um agente conta como atividade para o `ext-idle-notify` do compositor; com dois objetivos
+  digitando, cada um espera os 2 s de ociosidade depois da entrada do outro.
 - Linux, apps Chromium/Electron abertos sem leitor de tela (Slack, Discord): o agente pede os atributos do
   frame (`GetAttributes`), o mesmo sinal que o Orca dá, e o app liga a própria árvore sem reiniciar. Fica
   ligada até o app fechar (mais CPU no app). App aberto com acessibilidade desligada no barramento ou com
