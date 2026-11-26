@@ -102,6 +102,8 @@ O Hangar faz isso pela tela Configurações > Controle do Windows. À mão, no `
 
 Ou `claude mcp add` com os mesmos valores.
 
+No `initialize` o servidor manda `instructions`: diz ao agente o que é o Computer Use, quando oferecê-lo sem pedido e por qual ferramenta começar.
+
 ## Ferramentas
 
 Todas aceitam `alvo` (nome de um `<nome>-agent.json`); sem ele, vale o `HCC_AGENT_CONFIG`.

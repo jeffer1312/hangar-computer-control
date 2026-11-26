@@ -184,6 +184,8 @@ fn tools_list_matches_python_golden() {
     assert_eq!(init["serverInfo"]["name"], golden["initialize"]["serverInfo"]["name"]);
     assert_eq!(init["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(init["capabilities"]["tools"].is_object());
+    let instrucoes = init["instructions"].as_str().expect("initialize sem instructions");
+    assert!(instrucoes.contains("`objetivo`"), "{instrucoes}");
     assert_eq!(ferramentas(&mut s), golden["tools_list"]);
 }
 

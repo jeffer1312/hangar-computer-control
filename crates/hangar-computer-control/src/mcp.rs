@@ -24,6 +24,11 @@ use crate::alvos;
 use crate::motor::{Motor, PedidoObjetivo};
 use crate::progresso;
 
+const INSTRUCOES: &str = "Computer Use: controla o desktop desta máquina e de outras cadastradas como uma pessoa faria: abre programas, clica, digita e lê a tela. \
+Serve para app de desktop fora do navegador e do terminal: programas Windows (Delphi, Bloco de Notas), instaladores, janelas e diálogos do sistema, apps nativos no Linux. \
+Ofereça por iniciativa própria quando o pedido envolver um programa de desktop que você não alcança por comando, arquivo ou API; aja quando a pessoa pedir ou aceitar. \
+Comece por `objetivo` com o pedido em português; `ver_tela` quando ele parar; `estado` confere se o desktop responde; `alvo` escolhe a máquina. \
+Página web vai pelo navegador da sessão; o que um comando resolve vai pelo comando.";
 const DESC_ACT: &str = "Faz um passo só no desktop e diz o que escolheu.\n\n    `intencao` descreve o passo (\"clicar em Salvar\"). O Jev escolhe o controle e o\n    agente age, como um passo do `objetivo`, em segundo plano. A resposta é um JSON com\n    a ação, a confiança, o segundo colocado, o risco, a entrega e se a tela mudou.\n    executar=false só decide, sem agir. Ação arriscada não autorizada não é feita.";
 
 const DESC_OBJETIVO: &str = "Realiza um objetivo no desktop Windows, do começo ao fim.\n\n    Descreva o que quer em português, como pediria a uma pessoa (\"abrir o\n    Bloco de Notas e digitar olá\"). O laço interno lê a árvore de acessibilidade,\n    o Jev decide cada passo e o agente executa até concluir ou desistir.\n\n    `dados` leva valores conhecidos (nome, texto, caminho) que o laço pode digitar.\n    Só conclui com evidência ou devolve um impedimento específico. Ação arriscada\n    (apagar, sobrescrever, enviar) não autorizada no texto para e volta pra você.\n    Segue até concluir, até um impedimento real ou até ficar sem progresso (ciclos\n    sem tela nova). limite_segundos e max_passos são tetos opcionais: só passe se\n    quiser cortar antes.\n\n    Objetivo concluído vira roteiro: a mesma frase, com as mesmas chaves em `dados`,\n    no mesmo alvo repete os passos sem consultar o Jev a cada um e volta ao Jev se a\n    tela divergir. refazer=true ignora o roteiro gravado.\n\n    Por padrão age em segundo plano: lê a janela do app mesmo atrás de outras, espera\n    você parar de mexer e devolve a sua janela. ver=true traz a janela para a frente e\n    mostra o cursor indo até cada controle.";
@@ -285,6 +290,7 @@ impl ServerHandler for Servidor {
     fn get_info(&self) -> InitializeResult {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("hangar-computer-control", env!("CARGO_PKG_VERSION")))
+            .with_instructions(INSTRUCOES)
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
