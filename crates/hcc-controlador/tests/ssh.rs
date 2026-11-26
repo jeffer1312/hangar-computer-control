@@ -143,7 +143,7 @@ async fn scp_only_when_prepare_says_invalid() {
     let artifact = artifact();
     for valid in [true, false] {
         let mut outputs = vec![prepared(valid)];
-        if !valid { outputs.push(success()); }
+        if !valid { outputs.extend([prepared(false), success()]); }
         outputs.extend([success(), success()]);
         let runner = FakeRunner::new(outputs);
         let mut transport = SshTransport::start(&config(artifact.path()), &connection(), runner.clone()).await.unwrap();
@@ -165,17 +165,18 @@ async fn scp_only_when_prepare_says_invalid() {
         let digest: String = Sha256::digest(b"agent artifact").iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(payloads[0], json!({"operation": "prepare", "digest": digest,
             "shared_executable": "\\\\share\\agent.exe"}));
-        assert_eq!(payloads[1]["digest"], digest);
-        assert_eq!(payloads[1]["executable"], REMOTE_EXE);
-        assert_eq!(payloads[1]["connection"], serde_json::to_value(connection()).unwrap());
-        let task = payloads[1]["task"].as_str().unwrap();
+        let inicio = payloads.iter().find(|p| p["operation"] == "start").unwrap();
+        assert_eq!(inicio["digest"], digest);
+        assert_eq!(inicio["executable"], REMOTE_EXE);
+        assert_eq!(inicio["connection"], serde_json::to_value(connection()).unwrap());
+        let task = inicio["task"].as_str().unwrap();
         let suffix = task.strip_prefix("HangarComputerControl-").unwrap();
         assert_eq!(suffix.len(), 32);
         assert!(suffix.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert!(transport.try_wait().unwrap().is_none());
         transport.close(Some(12345)).await.unwrap();
         let payloads = runner.payloads();
-        assert_eq!(payloads[2], json!({"operation": "stop", "task": task,
+        assert_eq!(payloads.last().unwrap(), &json!({"operation": "stop", "task": task,
             "executable": REMOTE_EXE, "pid": 12345}));
         let count = runner.commands().len();
         transport.close(None).await.unwrap();
@@ -226,7 +227,7 @@ async fn failure_messages_keep_only_the_last_characters_and_cleanup_is_visible()
     let err = SshTransport::start(&config(artifact.path()), &connection(), runner).await.err().unwrap();
     assert_eq!(err.to_string(), format!("inicialização Windows falhou: {}", "á".repeat(1500)));
     let stderr = format!("ignored{}", "ç".repeat(1100));
-    let runner = FakeRunner::new(vec![prepared(false), output(1, b"", stderr.as_bytes()), prepared(false), success()]);
+    let runner = FakeRunner::new(vec![prepared(false), prepared(false), output(1, b"", stderr.as_bytes()), prepared(false), success()]);
     let err = SshTransport::start(&config(artifact.path()), &connection(), runner).await.err().unwrap();
     assert_eq!(err.to_string(), format!("falha ao enviar agente: {}", "ç".repeat(1000)));
     let runner = FakeRunner::new(vec![prepared(true), success(), output(1, b"", b"cleanup failed")]);
@@ -493,10 +494,10 @@ fn process_command_debug_hides_stdin() {
 #[tokio::test]
 async fn a_failed_copy_of_an_exe_another_goal_just_sent_goes_on() {
     let artifact = artifact();
-    let runner = FakeRunner::new(vec![prepared(false), output(1, b"", b"arquivo em uso"), prepared(true), success(), success()]);
+    let runner = FakeRunner::new(vec![prepared(false), prepared(false), output(1, b"", b"arquivo em uso"), prepared(true), success(), success()]);
     let mut transport = SshTransport::start(&config(artifact.path()), &connection(), runner.clone()).await.unwrap();
     let operacoes: Vec<Value> = runner.payloads().iter().map(|p| p["operation"].clone()).collect();
-    assert_eq!(operacoes, vec![json!("prepare"), json!("prepare"), json!("start")]);
+    assert_eq!(operacoes, vec![json!("prepare"), json!("prepare"), json!("prepare"), json!("start")]);
     transport.close(None).await.unwrap();
 }
 
@@ -504,15 +505,19 @@ async fn a_failed_copy_of_an_exe_another_goal_just_sent_goes_on() {
 #[tokio::test]
 async fn sending_the_agent_waits_for_another_goal_sending_it() {
     let artifact = artifact();
-    let cfg = config(artifact.path());
+    // A host of its own: the other tests of this file send to vm-a at the same time.
+    let mut cfg = config(artifact.path());
+    cfg.host = Some("vm-espera".into());
     let caminho = hcc_controlador::ssh::trava_de_envio(cfg.host.as_deref().unwrap());
     let outro = std::fs::OpenOptions::new().create(true).append(true).open(&caminho).unwrap();
     outro.try_lock().unwrap();
-    let runner = FakeRunner::new(vec![prepared(true), success(), success()]);
+    let runner = FakeRunner::new(vec![prepared(false)]);
     let esperou = tokio::time::timeout(Duration::from_millis(300), SshTransport::start(&cfg, &connection(), runner.clone())).await;
-    assert!(esperou.is_err(), "não consulta nem envia enquanto outro objetivo envia");
-    assert!(runner.payloads().is_empty());
+    assert!(esperou.is_err(), "não envia enquanto outro objetivo envia");
+    assert_eq!(runner.payloads().len(), 1, "só a primeira consulta");
     drop(outro);
+    let runner = FakeRunner::new(vec![prepared(false), prepared(true), success(), success()]);
     let mut transport = SshTransport::start(&cfg, &connection(), runner.clone()).await.unwrap();
+    assert!(!runner.commands().iter().any(|c| c.program == "scp"), "o outro já enviou: depois da espera o exe vale");
     transport.close(None).await.unwrap();
 }

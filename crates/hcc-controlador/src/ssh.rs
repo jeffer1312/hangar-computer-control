@@ -166,15 +166,10 @@ pub fn trava_de_envio(host: &str) -> std::path::PathBuf {
 }
 
 
-/// Holds `trava_de_envio` while another goal of this machine checks or sends the agent (a copy takes up to 2 min).
+/// Holds `trava_de_envio` while another goal of this machine sends the agent (a copy takes up to 2 min).
 async fn esperar_envio(host: &str) -> Result<std::fs::File, String> {
     let caminho = trava_de_envio(host);
-    let mut abrir = std::fs::OpenOptions::new();
-    abrir.create(true).append(true);
-    // Windows LockFileEx needs read or write access; append-only is refused.
-    #[cfg(windows)]
-    abrir.read(true);
-    let arquivo = abrir.open(&caminho).map_err(|e| format!("{}: {e}", caminho.display()))?;
+    let arquivo = hcc_protocolo::vez::abrir_trava(&caminho).map_err(|e| format!("{}: {e}", caminho.display()))?;
     let fim = Instant::now() + Duration::from_secs(180);
     loop {
         match arquivo.try_lock() {
@@ -213,11 +208,14 @@ impl SshTransport {
             task: format!("HangarComputerControl-{}", uuid::Uuid::new_v4().simple()),
             executable: None, tunnel: Some(ReapingChild(tunnel)), closed: false };
         let result = async {
-            let envio = esperar_envio(host).await?;
-            let prepared = transport.remote(&json!({"operation": "prepare", "digest": digest,
-                "shared_executable": config.shared_executable}), REMOTE_TIMEOUT).await?;
-            let prepared: Prepared = serde_json::from_value(prepared)
-                .map_err(|e| format!("resposta de preparação inválida: {e}"))?;
+            let pedido = json!({"operation": "prepare", "digest": digest, "shared_executable": config.shared_executable});
+            let mut prepared = transport.preparar(&pedido).await?;
+            // Only a copy waits: another goal of this machine may be sending this same exe right now.
+            let envio = if prepared.valid { None } else {
+                let envio = esperar_envio(host).await?;
+                prepared = transport.preparar(&pedido).await?;
+                Some(envio)
+            };
             transport.executable = Some(prepared.executable.clone());
             if !prepared.valid {
                 let mut args = transport.options.clone();
@@ -228,11 +226,8 @@ impl SshTransport {
                     .map_err(|e| format!("falha ao enviar agente: {}", tail(&e, 1000)))?;
                 if !copied.status.success() {
                     let falha = format!("falha ao enviar agente: {}", tail(&decode_stderr(&copied.stderr), 1000));
-                    // Another goal may have just sent the same exe and be running it, so this copy could not overwrite it.
-                    let enviado = transport.remote(&json!({"operation": "prepare", "digest": digest,
-                        "shared_executable": config.shared_executable}), REMOTE_TIMEOUT).await.ok()
-                        .and_then(|v| serde_json::from_value::<Prepared>(v).ok()).is_some_and(|p| p.valid);
-                    if !enviado { return Err(falha); }
+                    // A goal on another machine may have just sent the same exe and be running it.
+                    if !transport.preparar(&pedido).await.is_ok_and(|p| p.valid) { return Err(falha); }
                 }
             }
             drop(envio);
@@ -246,6 +241,10 @@ impl SshTransport {
             return Err(SessionError::Startup(error));
         }
         Ok(transport)
+    }
+
+    async fn preparar(&self, pedido: &Value) -> Result<Prepared, String> {
+        serde_json::from_value(self.remote(pedido, REMOTE_TIMEOUT).await?).map_err(|e| format!("resposta de preparação inválida: {e}"))
     }
 
     pub fn try_wait(&mut self) -> Result<Option<i32>, String> {

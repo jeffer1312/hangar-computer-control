@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hcc_protocolo::{Action, ActionType, Connector, Delivery, InputMode, Observation, RootSpec, Scope, Session, SessionError, recusa};
+use hcc_protocolo::{ActResult, Action, ActionType, Connector, Delivery, InputMode, Observation, RootSpec, Scope, Session, SessionError, recusa};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -103,6 +103,13 @@ impl Controle<'_> {
         self.rodar(async { sleep(tempo).await; Ok(()) }).await
     }
 
+    /// Acts after taking the window (`travar`): every action of the goal goes through here.
+    async fn agir<S: Session>(&mut self, s: &mut S, vista: &Observation, acao: &Action, progresso: Progresso)
+        -> Result<Result<ActResult, SessionError>, String> {
+        self.travar(acao, vista)?;
+        self.medir(&format!("acao:{}", acao.kind), progresso, async { Ok(s.act(&vista.observation_id, acao).await) }).await
+    }
+
     /// Takes the window `acao` acts on (the one activated; none for a launch; else the one read) for this goal:
     /// another goal on it would fight over the same controls.
     fn travar(&mut self, acao: &Action, vista: &Observation) -> Result<(), String> {
@@ -120,12 +127,7 @@ impl Controle<'_> {
     fn tomar(&mut self, janela: &str) -> Result<bool, String> {
         if self.janelas.contains_key(janela) { return Ok(true); }
         let hash: String = Sha256::digest(janela.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
-        let mut abrir = std::fs::OpenOptions::new();
-        abrir.create(true).append(true);
-        // Windows LockFileEx needs read or write access; append-only is refused.
-        #[cfg(windows)]
-        abrir.read(true);
-        let arquivo = abrir.open(format!("{}-{hash}.lock", self.trava)).map_err(erro_io)?;
+        let arquivo = hcc_protocolo::vez::abrir_trava(Path::new(&format!("{}-{hash}.lock", self.trava))).map_err(erro_io)?;
         match arquivo.try_lock() {
             Ok(()) => { self.janelas.insert(janela.to_owned(), arquivo); Ok(true) }
             Err(std::fs::TryLockError::WouldBlock) => Ok(false),
@@ -719,10 +721,8 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
             parou = Some(format!("trecho {} parou no passo {}: confirmação ou ação destrutiva que o objetivo não pede", textos[i], n + 1)); break;
         }
         let nome = secretos.descricao(&acao, &vista, true);
-        controle.travar(&acao, &vista)?;
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false), None),
-            async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
+        let retorno = controle.agir(s, &vista, &acao, Progresso::Acao(secretos.descricao(&acao, &vista, false), None)).await?;
         rodou = true;
         let ok = matches!(&retorno, Ok(ret) if ret.ok);
         let resultado = match &retorno { Ok(ret) if ret.ok => "ok".to_owned(), Ok(_) => "{'ok': False}".to_owned(),
@@ -831,10 +831,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     parou = motivo("confirmação ou ação destrutiva que o objetivo não pede"); break;
                 }
                 let nome = secretos.descricao(&acao, &vista, true);
-                controle.travar(&acao, &vista)?;
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false), None),
-                    async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
+                let retorno = controle.agir(s, &vista, &acao, Progresso::Acao(secretos.descricao(&acao, &vista, false), None)).await?;
                 let resultado = match &retorno {
                     Ok(ret) if ret.ok => "ok".to_owned(),
                     Ok(_) => "{'ok': False}".to_owned(),
@@ -1304,9 +1302,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let rotulo = secretos.descricao(acao, &vista, false);
             let marcado = print_da_acao(&pasta, ciclo, acao, &vista, lido_como.window.as_deref(), print.as_deref());
-            controle.travar(acao, &vista)?;
-            let mut retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone(), marcado),
-                async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
+            let mut retorno = controle.agir(s, &vista, acao, Progresso::Acao(rotulo.clone(), marcado)).await?;
             // Refused before it touched the app, on a fresh look of the same screen: with real input when only that
             // reaches it, after the user stops (up to a minute), or once more for any other refusal.
             let (mut reenviou, mut subiu, desde) = (false, false, Instant::now());
@@ -1316,7 +1312,8 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     subiu = true;
                     candidato.acao.input = Some(InputMode::Polite);
                 } else if ativo && desde.elapsed() < USUARIO_ATIVO {
-                    controle.esperar(Duration::from_secs(1)).await?;
+                    // A busy turn was already waited for by the agent.
+                    if !motivo.contains(recusa::ENTRADA_OCUPADA) { controle.esperar(Duration::from_secs(1)).await?; }
                 } else if !ativo && !reenviou {
                     reenviou = true;
                 } else {
@@ -1334,10 +1331,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 atual = assinatura_tela(&vista);
                 anterior = Some(atual.clone());
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                let (acao, id) = (&candidato.acao, &vista.observation_id);
-                controle.travar(acao, &vista)?;
-                retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone(), None),
-                    async { Ok(s.act(id, acao).await) }).await?;
+                retorno = controle.agir(s, &vista, &candidato.acao, Progresso::Acao(rotulo.clone(), None)).await?;
             }
             let acao = &candidato.acao;
             if let Some(u) = r.ultima.as_mut().filter(|u| u.entrega.is_none()) {
@@ -1419,10 +1413,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     atual = assinatura_tela(&vista);
                     anterior = Some(atual.clone());
                     let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                    let id = vista.observation_id.clone();
-                    controle.travar(&real, &vista)?;
-                    let feito = controle.medir(&format!("acao:{}", real.kind), Progresso::Acao(secretos.descricao(&real, &vista, false), None),
-                        async { Ok(s.act(&id, &real).await) }).await?;
+                    let feito = controle.agir(s, &vista, &real, Progresso::Acao(secretos.descricao(&real, &vista, false), None)).await?;
                     if feito.as_ref().is_ok_and(|r| r.ok) {
                         if let Some(u) = recentes.last_mut() { u.result = "ok (refeito com entrada real)".into(); }
                         if esperar_efeito(conector, sessao, controle, &real, &vista, &atual, secretos, &lido_como).await?

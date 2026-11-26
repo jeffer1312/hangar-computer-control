@@ -407,11 +407,7 @@ mod desktop {
     use crate::regras::{self, runtime_err, valor_err};
     use crate::{arvore, captura, entrada, sessao_win};
     use hcc_protocolo::{Action, ActionType, Amount, Delivery, Desktop, DesktopError, Direction, InputMode, Observation, Scope, Screen, recusa};
-    use hcc_protocolo::vez::Vez;
-
-    /// Short enough that the refusal reaches the controller well within its request timeout; the loop asks again.
-    const ESPERA_VEZ: std::time::Duration = std::time::Duration::from_secs(3);
-    const TETO_MENU: std::time::Duration = std::time::Duration::from_secs(20);
+    use hcc_protocolo::vez::{ESPERA_VEZ, Turno};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use uiautomation::UIAutomation;
@@ -434,11 +430,7 @@ mod desktop {
         /// The drawn cursor of `ver`, made on the first action that asks for it.
         cursor: Option<crate::overlay::Cursor>,
         /// The turn on keyboard and mouse shared with the other agents of this session.
-        vez: std::path::PathBuf,
-        /// The turn kept while a menu of the app stays open: another agent's focus change would close it.
-        vez_segura: Option<Vez>,
-        /// Since when actions keep leaving a menu open; past `TETO_MENU` the turn is no longer kept.
-        menu_desde: Option<std::time::Instant>,
+        turno: Turno,
         /// The last action left a menu of the app open.
         menu_aberto: bool,
     }
@@ -529,9 +521,9 @@ mod desktop {
             sessao_win::dpi_por_monitor();
             let sessao = sessao_win::Sessao::abrir().map_err(|e| e.to_string())?;
             let ua = UIAutomation::new().map_err(|e| arvore::com(e).to_string())?;
-            let vez = std::env::temp_dir().join(format!("hangar-computer-control-entrada-{}.lock", sessao.id));
+            let turno = Turno::new(std::env::temp_dir().join(format!("hangar-computer-control-entrada-{}.lock", sessao.id)), ESPERA_VEZ);
             Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false, janela_devolvida: None, cursor: None,
-                vez, vez_segura: None, menu_desde: None, menu_aberto: false })
+                turno, menu_aberto: false })
         }
 
         /// Today's path: real clicks and keys where the app needs them.
@@ -783,7 +775,7 @@ mod desktop {
         }
 
         fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
-            if self.menu_desde.is_some_and(|d| d.elapsed() > TETO_MENU) { self.vez_segura = None; }
+            self.turno.expirar();
             self.janelas.clear();
             self.controles.clear();
             self.por_id = scope.window.is_some();
@@ -807,17 +799,13 @@ mod desktop {
 
         fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
             // Before anything is read about the user: whoever had the turn may have just typed.
-            let mut vez = match self.vez_segura.take() {
-                Some(v) => v,
-                None => Vez::pegar(&self.vez, ESPERA_VEZ)?,
-            };
+            let mut vez = self.turno.pegar()?;
             // Another agent's last input is not the user's.
             self.entrada_propria = regras::mais_recente(self.entrada_propria, vez.tick(), sessao_win::relogio_de_entrada().0);
             self.menu_aberto = false;
             let feito = self.agir_na_vez(observed, action);
             if let Some(t) = self.entrada_propria { vez.gravar_tick(t); }
-            if !self.menu_aberto { self.menu_desde = None; }
-            else if self.menu_desde.get_or_insert_with(std::time::Instant::now).elapsed() <= TETO_MENU { self.vez_segura = Some(vez); }
+            self.turno.depois(vez, self.menu_aberto);
             feito
         }
 
