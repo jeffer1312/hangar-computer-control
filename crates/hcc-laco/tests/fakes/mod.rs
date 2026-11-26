@@ -214,6 +214,10 @@ impl Respond for Script {
             Answer::SemTela(_) | Answer::Bloqueio(..) => panic!("wrappers do not nest"),
         };
         if let Some(b) = bloqueio { response["answers"]["blocked"] = json!({"noul": b}); }
+        if response.get("answers").is_some() {
+            response["model"] = json!("jev-1.14.0");
+            response["usage"] = json!({"input_tokens": 1000});
+        }
         ResponseTemplate::new(200).set_body_json(response)
     }
 }

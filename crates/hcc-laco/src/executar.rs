@@ -1450,6 +1450,7 @@ where C::S: 'static {
     r.tempos.push(format!("total={:.2}s", inicio.elapsed().as_secs_f64()));
     if let (Some(pasta), Some(secretos)) = (&r.registro, &secretos) {
         let mut fim = json!({"resultado": {"ok": r.ok, "motivo": r.motivo, "tempos": r.tempos}, "t": agora()});
+        if let Some(jev) = &op.jev { fim["jev"] = jev.uso(); }
         secretos.valor(&mut fim);
         let linha = format!("{}\n", py_dumps(&fim));
         // Best effort: the result already reached the caller; a full disk must not turn it into a failure.

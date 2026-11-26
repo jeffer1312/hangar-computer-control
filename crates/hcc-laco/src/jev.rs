@@ -1,6 +1,7 @@
 //! Jev client: one choice + risk request per decision, batches and tournament (laco_uia.py:267-315).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
@@ -30,6 +31,9 @@ pub struct Jev {
     sem_imagem: AtomicBool,
     /// Passing failures in a row of requests with the screenshot.
     passageiras: AtomicU32,
+    /// The model that answered (the alias in `model` resolves to a release) and the input tokens billed so far.
+    respondeu: Mutex<Option<String>>,
+    tokens: AtomicU64,
 }
 
 #[derive(PartialEq)]
@@ -101,7 +105,14 @@ fn arredonda(p: f64) -> f64 {
 
 impl Jev {
     pub fn new(url: String, key: String, model: String) -> Jev {
-        Jev { url, key, model, http: http::cliente(), sem_imagem: AtomicBool::new(false), passageiras: AtomicU32::new(0) }
+        Jev { url, key, model, http: http::cliente(), sem_imagem: AtomicBool::new(false), passageiras: AtomicU32::new(0),
+            respondeu: Mutex::new(None), tokens: AtomicU64::new(0) }
+    }
+
+    /// `{"modelo", "tokens_entrada"}` of the requests made so far.
+    pub fn uso(&self) -> Value {
+        let modelo = self.respondeu.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        json!({"modelo": modelo, "tokens_entrada": self.tokens.load(Ordering::Relaxed)})
     }
 
     /// The answers, and what happened to the screenshot (`enviada` when it went with them). `so_com_imagem` are
@@ -160,6 +171,10 @@ impl Jev {
             }
         }
         let mut r = http::post(&self.http, &self.url, &corpo, &self.key, cabecalhos, timeout).await?;
+        self.tokens.fetch_add(r["usage"]["input_tokens"].as_u64().unwrap_or(0), Ordering::Relaxed);
+        if let Some(m) = r.get("model").and_then(Value::as_str) {
+            *self.respondeu.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(m.to_owned());
+        }
         match r.get_mut("answers").map(Value::take) {
             Some(Value::Object(a)) => Ok(a),
             Some(v) => Err(sem_get(&v)),

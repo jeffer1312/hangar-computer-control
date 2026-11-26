@@ -738,8 +738,9 @@ async fn record_keeps_the_goal_and_every_cycle_screen() {
 #[tokio::test]
 async fn record_shows_the_options_each_outcome_and_the_end() {
     let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let (op, server) = setup(vec![select("set_value"), done()]).await;
     let r = run(op, &con).await;
+    let pedidos_jev = server.received_requests().await.unwrap().iter().filter(|p| p.url.path() == "/jev").count();
     let log: Vec<Value> = std::fs::read_to_string(r.registro.unwrap().join("jev.jsonl")).unwrap()
         .lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     let decisao = log.iter().find(|l| l["ciclo"] == 0 && l.get("choice").is_some()).unwrap();
@@ -747,6 +748,8 @@ async fn record_shows_the_options_each_outcome_and_the_end() {
     assert!(decisao.get("dica").is_some(), "{decisao}");
     let fim = &log.last().unwrap()["resultado"];
     assert_eq!(fim["ok"], true, "{fim}");
+    // Which Jev answered and what the run cost: the alias in the request can resolve to a newer model.
+    assert_eq!(log.last().unwrap()["jev"], json!({"modelo": "jev-1.14.0", "tokens_entrada": 1000 * pedidos_jev}));
     let acoes = log.iter().find_map(|l| l.get("acoes")).unwrap();
     let acao = &acoes[0];
     assert!(acao["acao"].as_str().unwrap().starts_with("set_value"), "{acao}");
