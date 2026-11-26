@@ -330,3 +330,67 @@ async fn model_from_config_goes_in_body() {
     let corpo: Value = serde_json::from_slice(&pedidos[0].body).unwrap();
     assert_eq!(corpo["model"], "~typesafe/jev-latest");
 }
+
+
+async fn em_sequencia(respostas: Vec<(ResponseTemplate, u64)>) -> MockServer {
+    let s = MockServer::start().await;
+    for (r, n) in respostas {
+        Mock::given(method("POST")).respond_with(r).up_to_n_times(n).mount(&s).await;
+    }
+    s
+}
+
+fn levou_imagem(pedido: &wiremock::Request) -> bool {
+    serde_json::from_slice::<Value>(&pedido.body).unwrap().get("assets").is_some()
+}
+
+#[tokio::test]
+async fn http_429_is_asked_again_until_it_answers() {
+    let s = em_sequencia(vec![(ResponseTemplate::new(429), 1), (risco_ok(), 1)]).await;
+    let (risco, _) = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", None, T).await.unwrap();
+    assert_eq!(risco, 0.1);
+    assert_eq!(s.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn retry_after_is_waited_before_asking_again() {
+    let s = em_sequencia(vec![(ResponseTemplate::new(529).insert_header("retry-after", "1"), 1), (risco_ok(), 1)]).await;
+    let inicio = std::time::Instant::now();
+    Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", None, T).await.unwrap();
+    assert!(inicio.elapsed() >= Duration::from_secs(1), "{:?}", inicio.elapsed());
+}
+
+#[tokio::test]
+async fn http_429_three_times_is_the_failure() {
+    let s = responde(ResponseTemplate::new(429)).await;
+    let e = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into()).arriscado(&json!({}), "p", None, T).await.unwrap_err();
+    assert!(e.starts_with("RuntimeError: HTTP 429"), "{e}");
+    assert_eq!(s.received_requests().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn passing_failure_keeps_the_screenshot_until_twice_in_a_row() {
+    let s = em_sequencia(vec![(ResponseTemplate::new(429), 3), (risco_ok(), 1), (ResponseTemplate::new(503), 3), (risco_ok(), 2)]).await;
+    let imagem = Imagem::de_png(png(1280, 720)).unwrap();
+    let jev = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into());
+    let (_, envio) = jev.arriscado(&json!({}), "p", Some(&imagem), COM_IMAGEM).await.unwrap();
+    assert_eq!(envio.imagem, "falhou");
+    jev.arriscado(&json!({}), "p", Some(&imagem), COM_IMAGEM).await.unwrap();
+    jev.arriscado(&json!({}), "p", Some(&imagem), COM_IMAGEM).await.unwrap();
+    let pedidos = s.received_requests().await.unwrap();
+    assert_eq!(pedidos.len(), 9);
+    assert!(levou_imagem(&pedidos[4]), "uma falha passageira não desliga o print");
+    assert!(!levou_imagem(&pedidos[8]), "a segunda seguida desliga");
+}
+
+#[tokio::test]
+async fn refused_screenshot_turns_it_off_at_once() {
+    let s = em_sequencia(vec![(ResponseTemplate::new(400), 1), (risco_ok(), 2)]).await;
+    let imagem = Imagem::de_png(png(1280, 720)).unwrap();
+    let jev = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into());
+    jev.arriscado(&json!({}), "p", Some(&imagem), COM_IMAGEM).await.unwrap();
+    jev.arriscado(&json!({}), "p", Some(&imagem), COM_IMAGEM).await.unwrap();
+    let pedidos = s.received_requests().await.unwrap();
+    assert_eq!(pedidos.len(), 3);
+    assert!(!levou_imagem(&pedidos[2]));
+}

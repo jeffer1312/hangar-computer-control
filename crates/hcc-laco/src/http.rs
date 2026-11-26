@@ -10,13 +10,25 @@ use serde_json::Value;
 pub struct Falha {
     pub tipo: &'static str,
     pub msg: String,
+    /// The HTTP status of a non-2xx answer.
+    pub status: Option<u16>,
 }
 
 impl Falha {
     pub fn new(tipo: &'static str, msg: impl Into<String>) -> Falha {
-        Falha { tipo, msg: msg.into() }
+        Falha { tipo, msg: msg.into(), status: None }
+    }
+
+    /// Overload, rate limit or a network hiccup: the same request may work a moment later.
+    pub fn passageira(&self) -> bool {
+        matches!(self.status, Some(408 | 429 | 500..=599)) || self.tipo == "URLError"
     }
 }
+
+/// Statuses the Jev docs say to retry with backoff (429 rate limit, 503/529 overloaded).
+fn repetir(status: u16) -> bool { matches!(status, 429 | 503 | 529) }
+const ESPERAS: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
+const TETO_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 impl fmt::Display for Falha {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -53,9 +65,27 @@ fn rede(e: reqwest::Error) -> Falha {
 }
 
 /// POST `corpo` with `authorization: Bearer <chave>`; non-2xx becomes `HTTP <code> em <url>: <2000 bytes>`
-/// with the key replaced by `[redigido]`.
+/// with the key replaced by `[redigido]`. 429/503/529 are asked again up to twice (after `retry-after`, or 0.5 s
+/// then 1 s), always within `timeout`.
 pub async fn post(http: &reqwest::Client, url: &str, corpo: &Value, chave: &str, cabecalhos: &[(&str, &str)],
                   timeout: Duration) -> Result<Value, Falha> {
+    let prazo = tokio::time::Instant::now() + timeout;
+    let mut tentativa = 0;
+    loop {
+        let restante = prazo.saturating_duration_since(tokio::time::Instant::now());
+        let (falha, espera) = match uma_vez(http, url, corpo, chave, cabecalhos, restante).await {
+            Err((f, espera)) if f.status.is_some_and(repetir) && tentativa < ESPERAS.len() => (f, espera.unwrap_or(ESPERAS[tentativa])),
+            r => return r.map_err(|(f, _)| f),
+        };
+        if espera >= prazo.saturating_duration_since(tokio::time::Instant::now()) { return Err(falha); }
+        tokio::time::sleep(espera).await;
+        tentativa += 1;
+    }
+}
+
+async fn uma_vez(http: &reqwest::Client, url: &str, corpo: &Value, chave: &str, cabecalhos: &[(&str, &str)],
+                 timeout: Duration) -> Result<Value, (Falha, Option<Duration>)> {
+    let sem_espera = |f| (f, None);
     let mut pedido = http
         .post(url)
         .header("content-type", "application/json")
@@ -68,13 +98,15 @@ pub async fn post(http: &reqwest::Client, url: &str, corpo: &Value, chave: &str,
         .timeout(timeout)
         .send()
         .await
-        .map_err(rede)?;
+        .map_err(|e| sem_espera(rede(e)))?;
     let status = r.status();
     if !status.is_success() {
+        let espera = r.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|s| Duration::from_secs(s).min(TETO_RETRY_AFTER));
         let limite = 2000 + chave.len();
         let mut bruto = Vec::new();
         while bruto.len() < limite {
-            match r.chunk().await.map_err(rede)? {
+            match r.chunk().await.map_err(|e| sem_espera(rede(e)))? {
                 Some(c) => bruto.extend_from_slice(&c),
                 None => break,
             }
@@ -90,10 +122,12 @@ pub async fn post(http: &reqwest::Client, url: &str, corpo: &Value, chave: &str,
         if !chave.is_empty() {
             detalhe = detalhe.replace(chave, "[redigido]");
         }
-        return Err(Falha::new("RuntimeError", format!("HTTP {} em {url}: {detalhe}", status.as_u16())));
+        let mut f = Falha::new("RuntimeError", format!("HTTP {} em {url}: {detalhe}", status.as_u16()));
+        f.status = Some(status.as_u16());
+        return Err((f, espera));
     }
-    let bytes = r.bytes().await.map_err(rede)?;
-    serde_json::from_slice(&bytes).map_err(|e| Falha::new("JSONDecodeError", e.to_string()))
+    let bytes = r.bytes().await.map_err(|e| sem_espera(rede(e)))?;
+    serde_json::from_slice(&bytes).map_err(|e| sem_espera(Falha::new("JSONDecodeError", e.to_string())))
 }
 
 /// Python `float(v)` when `v` is a number (or bool) in [0, 1], else 0.

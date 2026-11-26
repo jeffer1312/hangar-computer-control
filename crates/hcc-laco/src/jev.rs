@@ -1,12 +1,12 @@
 //! Jev client: one choice + risk request per decision, batches and tournament (laco_uia.py:267-315).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
 use serde_json::{Map, Value, json};
 
-use crate::http::{self, prob};
+use crate::http::{self, Falha, prob};
 use crate::llm::Imagem;
 use crate::prompts::{DESFECHOS, PROPOSTA, REGRAS, REGRAS_LOTE, bloqueio_pergunta, risco_pergunta};
 use crate::tipos::{Candidato, Decisao, Envio, Escolha, Intencao};
@@ -26,8 +26,10 @@ pub struct Jev {
     pub key: String,
     pub model: String,
     http: reqwest::Client,
-    /// A request with the screenshot failed once: later requests go without it.
+    /// A request with the screenshot was refused, or failed in passing twice in a row: later requests go without it.
     sem_imagem: AtomicBool,
+    /// Passing failures in a row of requests with the screenshot.
+    passageiras: AtomicU32,
 }
 
 #[derive(PartialEq)]
@@ -50,7 +52,7 @@ fn desfecho(k: &str) -> Result<Escolha, String> {
 }
 
 /// Python `x.get(...)` on a non-dict raises AttributeError: a malformed answer fails closed, never "no risk".
-fn sem_get(v: &Value) -> String {
+fn sem_get(v: &Value) -> Falha {
     let tipo = match v {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",
@@ -60,7 +62,7 @@ fn sem_get(v: &Value) -> String {
         Value::Array(_) => "list",
         Value::Object(_) => "dict",
     };
-    format!("AttributeError: '{tipo}' object has no attribute 'get'")
+    Falha::new("AttributeError", format!("'{tipo}' object has no attribute 'get'"))
 }
 
 /// `respostas.get("risky", {}).get("noul")` (laco_uia.py:270, :286).
@@ -68,7 +70,7 @@ fn risco(r: &Map<String, Value>) -> Result<f64, String> {
     match r.get("risky") {
         None => Ok(0.0),
         Some(Value::Object(m)) => Ok(prob(m.get("noul"))),
-        Some(v) => Err(sem_get(v)),
+        Some(v) => Err(sem_get(v).to_string()),
     }
 }
 
@@ -99,7 +101,7 @@ fn arredonda(p: f64) -> f64 {
 
 impl Jev {
     pub fn new(url: String, key: String, model: String) -> Jev {
-        Jev { url, key, model, http: http::cliente(), sem_imagem: AtomicBool::new(false) }
+        Jev { url, key, model, http: http::cliente(), sem_imagem: AtomicBool::new(false), passageiras: AtomicU32::new(0) }
     }
 
     /// The answers, and what happened to the screenshot (`enviada` when it went with them). `so_com_imagem` are
@@ -117,28 +119,33 @@ impl Jev {
         }
         // The retry gets the whole `timeout`, as the request without it always had: a slow Jev that just timed out
         // would fail again in what was left.
-        let r = self.pedir(state, &Value::Object(questions), None, timeout).await?;
+        let r = self.pedir(state, &Value::Object(questions), None, timeout).await.map_err(|f| f.to_string())?;
         Ok((r, envio))
     }
 
-    /// The request with the screenshot, when it may go: never after one failed (the screenshot stays off for the
-    /// rest of the run), only with `PRAZO_IMAGEM` left, and capped at `TETO_IMAGEM`.
+    /// The request with the screenshot, when it may go: not once it is off for the run (one refusal or timeout, or
+    /// two passing failures in a row), only with `PRAZO_IMAGEM` left, and capped at `TETO_IMAGEM`.
     async fn com_imagem(&self, state: &Value, questions: Map<String, Value>, imagem: &Imagem, timeout: Duration)
         -> Result<Map<String, Value>, Envio> {
         let envio = |imagem, motivo| Envio { imagem, motivo };
         if self.sem_imagem.load(Ordering::Relaxed) { return Err(envio("desligada", String::new())); }
         if timeout < PRAZO_IMAGEM { return Err(envio("sem_prazo", String::new())); }
-        self.pedir(state, &Value::Object(questions), Some(imagem), timeout.min(TETO_IMAGEM)).await.map_err(|e| {
-            self.sem_imagem.store(true, Ordering::Relaxed);
-            envio("falhou", e)
-        })
+        match self.pedir(state, &Value::Object(questions), Some(imagem), timeout.min(TETO_IMAGEM)).await {
+            Ok(r) => { self.passageiras.store(0, Ordering::Relaxed); Ok(r) }
+            Err(e) => {
+                if !e.passageira() || self.passageiras.fetch_add(1, Ordering::Relaxed) + 1 >= 2 {
+                    self.sem_imagem.store(true, Ordering::Relaxed);
+                }
+                Err(envio("falhou", e.to_string()))
+            }
+        }
     }
 
-    async fn pedir(&self, state: &Value, questions: &Value, imagem: Option<&Imagem>, timeout: Duration) -> Result<Map<String, Value>, String> {
+    async fn pedir(&self, state: &Value, questions: &Value, imagem: Option<&Imagem>, timeout: Duration) -> Result<Map<String, Value>, Falha> {
         let mut corpo = json!({"model": self.model, "state": state, "questions": questions});
         let mut cabecalhos: &[(&str, &str)] = &[];
         if let Some(imagem) = imagem {
-            let Value::Object(m) = &mut corpo["state"] else { return Err("TypeError: state sem objeto para a imagem".into()) };
+            let Value::Object(m) = &mut corpo["state"] else { return Err(Falha::new("TypeError", "state sem objeto para a imagem")) };
             let b64 = base64::engine::general_purpose::STANDARD.encode(&imagem.png);
             // OpenRouter silently drops `assets`: there the image only counts as an `image_url` part in `state`.
             if self.url.contains("openrouter.ai") {
@@ -152,11 +159,11 @@ impl Jev {
                 cabecalhos = &[("TypeSafe-Danger-Zone-Images", "true")];
             }
         }
-        let mut r = http::post(&self.http, &self.url, &corpo, &self.key, cabecalhos, timeout).await.map_err(|f| f.to_string())?;
+        let mut r = http::post(&self.http, &self.url, &corpo, &self.key, cabecalhos, timeout).await?;
         match r.get_mut("answers").map(Value::take) {
             Some(Value::Object(a)) => Ok(a),
             Some(v) => Err(sem_get(&v)),
-            None => Err("KeyError: 'answers'".into()),
+            None => Err(Falha::new("KeyError", "'answers'")),
         }
     }
 
