@@ -69,6 +69,10 @@ struct Controle<'a> {
     cancel: &'a CancellationToken,
     progresso: &'a (dyn Fn(Progresso) + Send + Sync),
     tempos: Vec<String>,
+    /// Start of the lock file names of this desktop (`<temp>/hangar-computer-control-<digest>`).
+    trava: String,
+    /// The windows this goal acted on, each locked against the other goals of the desktop until it ends.
+    janelas: HashMap<String, std::fs::File>,
 }
 
 impl Controle<'_> {
@@ -97,6 +101,32 @@ impl Controle<'_> {
 
     async fn esperar(&self, tempo: Duration) -> Result<(), String> {
         self.rodar(async { sleep(tempo).await; Ok(()) }).await
+    }
+
+    /// Takes the window `acao` acts on (the one activated; none for a launch; else the one read) for this goal:
+    /// another goal on it would fight over the same controls.
+    fn travar(&mut self, acao: &Action, vista: &Observation) -> Result<(), String> {
+        let janela = match acao.kind {
+            ActionType::Launch => return Ok(()),
+            ActionType::Activate => match &acao.target { Some(t) => t.clone(), None => return Ok(()) },
+            _ => vista.foreground.clone(),
+        };
+        if self.janelas.contains_key(&janela) { return Ok(()); }
+        let hash: String = Sha256::digest(janela.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
+        let mut abrir = std::fs::OpenOptions::new();
+        abrir.create(true).append(true);
+        // Windows LockFileEx needs read or write access; append-only is refused.
+        #[cfg(windows)]
+        abrir.read(true);
+        let arquivo = abrir.open(format!("{}-{hash}.lock", self.trava)).map_err(erro_io)?;
+        match arquivo.try_lock() {
+            Ok(()) => { self.janelas.insert(janela, arquivo); Ok(()) }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let nome = vista.windows.iter().find(|w| w.id == janela).map_or(janela.as_str(), |w| w.name.as_str());
+                Err(format!("outro objetivo está controlando a janela '{nome}'"))
+            }
+            Err(std::fs::TryLockError::Error(e)) => Err(erro_io(e)),
+        }
     }
 }
 
@@ -672,6 +702,7 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
             parou = Some(format!("trecho {} parou no passo {}: confirmação ou ação destrutiva que o objetivo não pede", textos[i], n + 1)); break;
         }
         let nome = secretos.descricao(&acao, &vista, true);
+        controle.travar(&acao, &vista)?;
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
         let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false), None),
             async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
@@ -783,6 +814,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     parou = motivo("confirmação ou ação destrutiva que o objetivo não pede"); break;
                 }
                 let nome = secretos.descricao(&acao, &vista, true);
+                controle.travar(&acao, &vista)?;
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(secretos.descricao(&acao, &vista, false), None),
                     async { Ok(s.act(&vista.observation_id, &acao).await) }).await?;
@@ -1245,13 +1277,14 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let rotulo = secretos.descricao(acao, &vista, false);
             let marcado = print_da_acao(&pasta, ciclo, acao, &vista, lido_como.window.as_deref(), print.as_deref());
+            controle.travar(acao, &vista)?;
             let mut retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone(), marcado),
                 async { Ok(s.act(&vista.observation_id, acao).await) }).await?;
             // Refused before it touched the app, on a fresh look of the same screen: with real input when only that
             // reaches it, after the user stops (up to a minute), or once more for any other refusal.
             let (mut reenviou, mut subiu, desde) = (false, false, Instant::now());
             while let Err(SessionError::NotDelivered(motivo)) = &retorno {
-                let ativo = motivo.contains(recusa::USUARIO_ATIVO);
+                let ativo = motivo.contains(recusa::USUARIO_ATIVO) || motivo.contains(recusa::ENTRADA_OCUPADA);
                 if [recusa::ENTRADA_REAL, recusa::JANELA_ATRAS, recusa::VALOR_NAO_CONFIRMADO].iter().any(|r| motivo.contains(r)) && !subiu {
                     subiu = true;
                     candidato.acao.input = Some(InputMode::Polite);
@@ -1275,6 +1308,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 anterior = Some(atual.clone());
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                 let (acao, id) = (&candidato.acao, &vista.observation_id);
+                controle.travar(acao, &vista)?;
                 retorno = controle.medir(&format!("acao:{}", acao.kind), Progresso::Acao(rotulo.clone(), None),
                     async { Ok(s.act(id, acao).await) }).await?;
             }
@@ -1356,6 +1390,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     anterior = Some(atual.clone());
                     let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
                     let id = vista.observation_id.clone();
+                    controle.travar(&real, &vista)?;
                     let feito = controle.medir(&format!("acao:{}", real.kind), Progresso::Acao(secretos.descricao(&real, &vista, false), None),
                         async { Ok(s.act(&id, &real).await) }).await?;
                     if feito.as_ref().is_ok_and(|r| r.ok) {
@@ -1415,8 +1450,10 @@ where C::S: 'static {
         .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())).unwrap_or_default();
     let config = op.config.as_ref().map_or_else(|| "None".into(), |p| p.to_string_lossy().into_owned());
     let digest: String = Sha256::digest(format!("{user}:{config}").as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
-    let trava = std::env::temp_dir().join(format!("hangar-computer-control-{digest}.lock"));
-    let mut controle = Controle { prazo: inicio.checked_add(op.limite).unwrap_or(inicio), cancel: &cancel, progresso, tempos: vec![] };
+    let prefixo = std::env::temp_dir().join(format!("hangar-computer-control-{digest}")).to_string_lossy().into_owned();
+    let trava = format!("{prefixo}.lock");
+    let mut controle = Controle { prazo: inicio.checked_add(op.limite).unwrap_or(inicio), cancel: &cancel, progresso, tempos: vec![],
+        trava: prefixo, janelas: HashMap::new() };
     let mut sessao = None;
     let lock = controle.rodar(async {
         let mut abrir = tokio::fs::OpenOptions::new();
@@ -1430,7 +1467,8 @@ where C::S: 'static {
     match lock {
         Err(e) => r.motivo = e,
         Ok(file) => {
-            match file.try_lock() {
+            // Goals in the background share the desktop (each takes its windows); watching takes all of it.
+            match if op.ver { file.try_lock() } else { file.try_lock_shared() } {
                 Err(std::fs::TryLockError::WouldBlock) => r.motivo = "outro objetivo ainda está controlando o desktop".into(),
                 Err(std::fs::TryLockError::Error(e)) => r.motivo = erro_trava(e),
                 Ok(()) => {

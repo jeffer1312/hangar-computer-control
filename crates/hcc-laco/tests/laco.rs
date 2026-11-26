@@ -3007,3 +3007,68 @@ async fn effect_is_looked_for_soon_after_the_action() {
     let depois = *primeira - agiu;
     assert!(depois >= Duration::from_millis(150) && depois < Duration::from_millis(700), "{depois:?}");
 }
+
+fn na_janela(mut obs: Observation, id: &str, nome: &str) -> Observation {
+    obs.foreground = id.into();
+    obs.windows[0].id = id.into();
+    obs.windows[0].name = nome.into();
+    obs
+}
+
+/// Holds the goal on `con` at its next observe after its first action, keeping its windows taken.
+async fn parado_depois_de_agir(con: &FakeConnector) {
+    loop {
+        con.entered.notified().await;
+        let mut s = con.state.lock().unwrap();
+        if !s.acts.is_empty() { s.observe_pending = true; return; }
+    }
+}
+
+// Goals on one desktop run side by side, one window each; watching takes the whole desktop.
+#[tokio::test]
+async fn goals_share_the_desktop_but_never_a_window() {
+    let a = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op_a, _sa) = setup(vec![select("set_value"), done()]).await;
+    let config = op_a.config.clone();
+    let cancel = CancellationToken::new();
+    let corre_a = tokio::spawn({
+        let (a, cancel) = (a.clone(), cancel.clone());
+        async move { executar(op_a, &a, cancel, &|_| {}).await }
+    });
+    parado_depois_de_agir(&a).await;
+
+    let b = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op_b, _sb) = setup(vec![select("set_value"), done()]).await;
+    op_b.config = config.clone();
+    let r = run(op_b, &b).await;
+    assert_eq!(r.motivo, "outro objetivo está controlando a janela 'Editor'");
+    assert!(b.state.lock().unwrap().acts.is_empty());
+
+    let c = FakeConnector::new(vec![na_janela(tree("o1", ""), "w2", "Planilha"), na_janela(tree("o2", "Ana"), "w2", "Planilha")]);
+    let (mut op_c, _sc) = setup(vec![select("set_value"), done()]).await;
+    op_c.config = config.clone();
+    let r = run(op_c, &c).await;
+    assert!(r.ok, "{}", r.resumo());
+
+    let d = FakeConnector::new(vec![na_janela(tree("o1", ""), "w3", "Outra")]);
+    let (mut op_d, _sd) = setup(vec![]).await;
+    (op_d.config, op_d.ver) = (config, true);
+    assert_eq!(run(op_d, &d).await.motivo, "outro objetivo ainda está controlando o desktop");
+
+    cancel.cancel();
+    corre_a.await.unwrap();
+}
+
+// Another goal typing is a wait, like the user typing: the action goes once the turn is free.
+#[tokio::test]
+async fn busy_keyboard_is_waited_for_then_the_action_goes() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    {
+        let mut s = con.state.lock().unwrap();
+        for _ in 0..2 { s.act_errors.push_back(SessionError::NotDelivered(format!("RuntimeError: {}", hcc_protocolo::recusa::ENTRADA_OCUPADA))); }
+    }
+    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(con.state.lock().unwrap().acts.len(), 3);
+}
