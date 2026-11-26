@@ -109,13 +109,14 @@ impl Controle<'_> {
         // The window read by id is taken; before the goal has one, the window in front (or the one activated) is only
         // checked. Another goal working there refuses the action before it leaves, like a busy keyboard: the caller
         // looks again and resends, so the Start menu and the taskbar go to one goal at a time.
-        let alvo = match lida {
-            Some(janela) => Some(janela),
-            None if acao.kind == ActionType::Activate => acao.target.as_deref(),
-            None if acao.kind == ActionType::Launch => None,
-            None => Some(vista.foreground.as_str()),
+        let (alvo, tomar) = match (acao.kind, lida) {
+            (ActionType::Launch, _) => (None, false),
+            // Bringing a window to the front reaches whoever works in it: always the target's.
+            (ActionType::Activate, _) => (acao.target.as_deref(), false),
+            (_, Some(janela)) => (Some(janela), true),
+            (_, None) => (Some(vista.foreground.as_str()), false),
         };
-        if let Some(janela) = alvo && !(if lida.is_some() { self.tomar(janela)? } else { !self.de_outro(janela)? }) {
+        if let Some(janela) = alvo && !(if tomar { self.tomar(janela)? } else { !self.de_outro(janela)? }) {
             return Ok(Err(SessionError::NotDelivered(format!("RuntimeError: {}", ocupada(janela, vista)))));
         }
         self.medir(&format!("acao:{}", acao.kind), progresso, async { Ok(s.act(&vista.observation_id, acao).await) }).await
@@ -959,6 +960,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 if controle.tomar(&w.id)? { adotada = Some(w.id.clone()); break 'adotar; }
             }
             controle.esperar(Duration::from_millis(20)).await?;
+        }
+        if adotada.is_none() && !novas.is_empty() {
+            eprintln!("janela nova não adotada: outro objetivo já trabalha em {:?}", novas.iter().map(|w| w.name.as_str()).collect::<Vec<_>>());
         }
         if let Some(nova) = adotada {
             lancado = None;
