@@ -158,6 +158,34 @@ struct Prepared {
     valid: bool,
 }
 
+/// Lock of this machine's copies of the agent to `host`: two goals starting together on a new version would
+/// write the same exe at once, or over the one the first agent already runs.
+pub fn trava_de_envio(host: &str) -> std::path::PathBuf {
+    let hash: String = Sha256::digest(host.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
+    std::env::temp_dir().join(format!("hangar-computer-control-envio-{hash}.lock"))
+}
+
+
+/// Holds `trava_de_envio` while another goal of this machine checks or sends the agent (a copy takes up to 2 min).
+async fn esperar_envio(host: &str) -> Result<std::fs::File, String> {
+    let caminho = trava_de_envio(host);
+    let mut abrir = std::fs::OpenOptions::new();
+    abrir.create(true).append(true);
+    // Windows LockFileEx needs read or write access; append-only is refused.
+    #[cfg(windows)]
+    abrir.read(true);
+    let arquivo = abrir.open(&caminho).map_err(|e| format!("{}: {e}", caminho.display()))?;
+    let fim = Instant::now() + Duration::from_secs(180);
+    loop {
+        match arquivo.try_lock() {
+            Ok(()) => return Ok(arquivo),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < fim => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(std::fs::TryLockError::WouldBlock) => return Err("outro objetivo ainda está enviando o agente".into()),
+            Err(std::fs::TryLockError::Error(e)) => return Err(format!("{}: {e}", caminho.display())),
+        }
+    }
+}
+
 impl SshTransport {
     pub async fn start(config: &crate::config::AgentConfig, connection: &Connection,
                        runner: Arc<dyn Runner>) -> Result<Self, SessionError> {
@@ -185,6 +213,7 @@ impl SshTransport {
             task: format!("HangarComputerControl-{}", uuid::Uuid::new_v4().simple()),
             executable: None, tunnel: Some(ReapingChild(tunnel)), closed: false };
         let result = async {
+            let envio = esperar_envio(host).await?;
             let prepared = transport.remote(&json!({"operation": "prepare", "digest": digest,
                 "shared_executable": config.shared_executable}), REMOTE_TIMEOUT).await?;
             let prepared: Prepared = serde_json::from_value(prepared)
@@ -206,6 +235,7 @@ impl SshTransport {
                     if !enviado { return Err(falha); }
                 }
             }
+            drop(envio);
             transport.remote(&json!({"operation": "start", "executable": prepared.executable,
                 "digest": digest, "task": transport.task, "connection": connection}), REMOTE_TIMEOUT).await?;
             Ok::<_, String>(())

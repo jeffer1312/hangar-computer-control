@@ -499,3 +499,20 @@ async fn a_failed_copy_of_an_exe_another_goal_just_sent_goes_on() {
     assert_eq!(operacoes, vec![json!("prepare"), json!("prepare"), json!("start")]);
     transport.close(None).await.unwrap();
 }
+
+// Two goals starting together on a new version: the second waits for the first copy, then finds the exe valid.
+#[tokio::test]
+async fn sending_the_agent_waits_for_another_goal_sending_it() {
+    let artifact = artifact();
+    let cfg = config(artifact.path());
+    let caminho = hcc_controlador::ssh::trava_de_envio(cfg.host.as_deref().unwrap());
+    let outro = std::fs::OpenOptions::new().create(true).append(true).open(&caminho).unwrap();
+    outro.try_lock().unwrap();
+    let runner = FakeRunner::new(vec![prepared(true), success(), success()]);
+    let esperou = tokio::time::timeout(Duration::from_millis(300), SshTransport::start(&cfg, &connection(), runner.clone())).await;
+    assert!(esperou.is_err(), "não consulta nem envia enquanto outro objetivo envia");
+    assert!(runner.payloads().is_empty());
+    drop(outro);
+    let mut transport = SshTransport::start(&cfg, &connection(), runner.clone()).await.unwrap();
+    transport.close(None).await.unwrap();
+}
