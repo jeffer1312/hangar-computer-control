@@ -3072,3 +3072,38 @@ async fn busy_keyboard_is_waited_for_then_the_action_goes() {
     assert!(r.ok, "{}", r.resumo());
     assert_eq!(con.state.lock().unwrap().acts.len(), 3);
 }
+
+// Two goals launching at once see both new windows: each takes the one of the app it launched.
+#[tokio::test]
+async fn goals_launching_together_each_take_their_own_app_window() {
+    let mut antes = tree("o1", "");
+    antes.apps = vec!["Calculator => gnome-calculator".into(), "Text Editor => gedit".into()];
+    let mut depois = antes.clone();
+    depois.observation_id = "o2".into();
+    for (id, nome, pid, processo) in [("wG", "Editor de texto", 30, "gedit"), ("wC", "Calculadora", 40, "gnome-calculator")] {
+        let mut w = depois.windows[0].clone();
+        (w.id, w.name, w.process_id, w.process, w.class_name) = (id.into(), nome.into(), pid, processo.into(), processo.into());
+        depois.windows.push(w);
+    }
+    // The launched app comes to the front; both new windows are on the desktop.
+    let telas = |frente: &str| {
+        let mut d = depois.clone();
+        d.foreground = frente.into();
+        let mut p = d.clone();
+        p.observation_id = "o3".into();
+        p.elements[0].value = Some("Ana".into());
+        vec![antes.clone(), d, p]
+    };
+    let (a, b) = (FakeConnector::new(telas("wG")), FakeConnector::new(telas("wC")));
+    let (mut op_a, _sa) = setup(vec![select("launch 'Text Editor'"), select("set_value"), done()]).await;
+    let (mut op_b, _sb) = setup(vec![select("launch 'Calculator'"), select("set_value"), done()]).await;
+    op_b.config = op_a.config.clone();
+    op_a.texto = "abrir o Text Editor e preencher Nome com Ana".into();
+    op_b.texto = "abrir a Calculator e preencher Nome com Ana".into();
+    let (ra, rb) = tokio::join!(run(op_a, &a), run(op_b, &b));
+    assert!(ra.ok, "{}", ra.resumo());
+    assert!(rb.ok, "{}", rb.resumo());
+    let leu = |c: &FakeConnector, j: &str| c.state.lock().unwrap().scopes.iter().any(|s| s.window.as_deref() == Some(j));
+    assert!(leu(&a, "wG") && !leu(&a, "wC"), "o editor ficou com quem o abriu");
+    assert!(leu(&b, "wC") && !leu(&b, "wG"), "a calculadora ficou com quem a abriu");
+}

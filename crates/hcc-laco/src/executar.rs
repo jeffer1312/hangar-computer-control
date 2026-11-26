@@ -111,7 +111,14 @@ impl Controle<'_> {
             ActionType::Activate => match &acao.target { Some(t) => t.clone(), None => return Ok(()) },
             _ => vista.foreground.clone(),
         };
-        if self.janelas.contains_key(&janela) { return Ok(()); }
+        if self.tomar(&janela)? { return Ok(()); }
+        let nome = vista.windows.iter().find(|w| w.id == janela).map_or(janela.as_str(), |w| w.name.as_str());
+        Err(format!("outro objetivo está controlando a janela '{nome}'"))
+    }
+
+    /// Takes `janela` for the rest of this goal; false when another goal of the desktop has it.
+    fn tomar(&mut self, janela: &str) -> Result<bool, String> {
+        if self.janelas.contains_key(janela) { return Ok(true); }
         let hash: String = Sha256::digest(janela.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
         let mut abrir = std::fs::OpenOptions::new();
         abrir.create(true).append(true);
@@ -120,11 +127,8 @@ impl Controle<'_> {
         abrir.read(true);
         let arquivo = abrir.open(format!("{}-{hash}.lock", self.trava)).map_err(erro_io)?;
         match arquivo.try_lock() {
-            Ok(()) => { self.janelas.insert(janela, arquivo); Ok(()) }
-            Err(std::fs::TryLockError::WouldBlock) => {
-                let nome = vista.windows.iter().find(|w| w.id == janela).map_or(janela.as_str(), |w| w.name.as_str());
-                Err(format!("outro objetivo está controlando a janela '{nome}'"))
-            }
+            Ok(()) => { self.janelas.insert(janela.to_owned(), arquivo); Ok(true) }
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
             Err(std::fs::TryLockError::Error(e)) => Err(erro_io(e)),
         }
     }
@@ -301,6 +305,19 @@ fn alvo_observado(mut acao: Action, obs: &Observation) -> Action {
         acao.target = None;
     }
     acao
+}
+
+/// The program's name in a launch command (`C:\\Windows\\notepad.exe`, `/usr/bin/gnome-calculator --x`): `notepad`.
+fn programa(comando: &str) -> String {
+    let exe = comando.split_whitespace().next().unwrap_or_default();
+    let nome = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_lowercase();
+    nome.strip_suffix(".exe").map(str::to_owned).unwrap_or(nome)
+}
+
+/// The window belongs to the program `app` (its executable on Windows, its class on Linux).
+fn do_programa(w: &hcc_protocolo::Window, app: &str) -> bool {
+    let processo = w.process.to_lowercase();
+    !app.is_empty() && (processo.strip_suffix(".exe").unwrap_or(&processo) == app || w.class_name.to_lowercase().contains(app))
 }
 
 /// Invoke on an editable field puts the caret there, like a click.
@@ -862,8 +879,9 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
     let mut janelas_antes: HashSet<String> = HashSet::new();
     // The app's earlier windows, to go back to when a dialog of it closes.
     let mut janelas_do_app: Vec<String> = Vec::new();
-    // Cycles left to take a new window as the launched app's.
+    // Cycles left to take a new window as the launched app's, and that app's program name.
     let mut abriu = 0u32;
+    let mut lancado: Option<String> = None;
     let mut aprendido = crate::modo::Aprendido::ler(op.roteiros.as_deref());
     for ciclo in 0..=op.max_passos {
         let mut base = Scope { window: janela_app.clone().filter(|_| !op.ver), ..Scope::default() };
@@ -906,8 +924,17 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         };
         // A new window of the app (its dialog) becomes the window read.
         let pid_app = base.window.as_ref().and_then(|j| obs.windows.iter().find(|w| &w.id == j)).map(|w| w.process_id);
-        if let Some(nova) = obs.windows.iter().find(|w| (abriu > 0 || Some(w.process_id) == pid_app) && Some(&w.id) != base.window.as_ref()
-            && !janelas_antes.is_empty() && !janelas_antes.contains(&w.id)).map(|w| w.id.clone()) {
+        let mut novas: Vec<&hcc_protocolo::Window> = obs.windows.iter().filter(|w| (abriu > 0 || Some(w.process_id) == pid_app)
+            && Some(&w.id) != base.window.as_ref() && !janelas_antes.is_empty() && !janelas_antes.contains(&w.id)).collect();
+        // Another goal launching at the same time shows its window too: the launched program's comes first, and a
+        // window another goal already took is not this one's.
+        if let Some(app) = lancado.as_deref() { novas.sort_by_key(|w| !do_programa(w, app)); }
+        let mut adotada = None;
+        for w in novas {
+            if controle.tomar(&w.id)? { adotada = Some(w.id.clone()); break; }
+        }
+        if let Some(nova) = adotada {
+            lancado = None;
             janelas_do_app.extend(janela_app.take());
             janela_app = Some(nova);
             abriu = 0;
@@ -1328,7 +1355,10 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                         match acao.kind {
                             ActionType::Activate if !op.ver => janela_app = acao.target.clone(),
                             // The launched app's window shows up in a later look: the first new window becomes the app's.
-                            ActionType::Launch => { janela_app = None; janelas_do_app.clear(); abriu = if op.ver { 0 } else { 3 }; }
+                            ActionType::Launch => {
+                                janela_app = None; janelas_do_app.clear(); abriu = if op.ver { 0 } else { 3 };
+                                lancado = acao.application.as_deref().map(programa);
+                            }
                             _ if acao.target.as_ref().is_some_and(|t| vista.elements.iter().any(|e| &e.id == t)) && !op.ver => janela_app = Some(vista.foreground.clone()),
                             _ => {}
                         }

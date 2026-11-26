@@ -117,7 +117,12 @@ impl Session for FakeSession {
         s.observed.push(Instant::now());
         match s.observe_errors.pop_front() {
             Some(e) => Err(e),
-            None => Ok(s.views.front().unwrap().clone()),
+            // A window read by id is the observation's foreground, as the agents report it.
+            None => Ok({
+                let mut o = s.views.front().unwrap().clone();
+                if let Some(j) = scope.window.as_ref().filter(|j| o.windows.iter().any(|w| &w.id == *j)) { o.foreground = j.clone(); }
+                o
+            }),
         }
     }
 
