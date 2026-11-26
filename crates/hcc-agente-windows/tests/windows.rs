@@ -381,4 +381,5 @@ fn the_last_agent_input_is_the_latest_of_any_agent() {
     assert_eq!(mais_recente(None, Some(9_000), 10_000), Some(9_000));
     assert_eq!(mais_recente(Some(u32::MAX - 100), Some(200), 1_000), Some(200), "contador do Windows deu a volta");
     assert!(ocioso(10_000, 9_500, mais_recente(None, Some(9_500), 10_000)), "a entrada de outro agente não é do usuário");
+    assert_eq!(mais_recente(None, Some(5_000_000), 10_000), None, "gravado antes de reiniciar: o relógio voltou a zero");
 }

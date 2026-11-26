@@ -27,7 +27,9 @@ pub struct LinuxDesktop<C: Comandos = ComandosSistema, T: Arvore = AtspiTree> {
     /// The turn on keyboard and mouse shared with the other agents of this session; `None` acts without it.
     vez: Option<(PathBuf, Duration)>,
     /// The turn kept while a menu of the app stays open: another agent's focus change would close it.
-    vez_segura: Option<(Vez, Instant)>,
+    vez_segura: Option<Vez>,
+    /// Since when actions keep leaving a menu open; past `TETO_MENU` the turn is no longer kept.
+    menu_desde: Option<Instant>,
     /// The last action left a menu of the app open.
     menu_aberto: bool,
     elements: HashMap<String, ObservedElement<T::Node>>,
@@ -194,7 +196,7 @@ fn installed_apps() -> Vec<String> {
 
 impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
     pub fn with_backends(commands: C, tree: T, session_id: u32) -> Self {
-        Self { commands, tree, session_id, vez: None, vez_segura: None, menu_aberto: false, elements: HashMap::new(), windows: HashMap::new(),
+        Self { commands, tree, session_id, vez: None, vez_segura: None, menu_desde: None, menu_aberto: false, elements: HashMap::new(), windows: HashMap::new(),
             observed_at: None, foreground: String::new(), area: Rect(0, 0, 0, 0), apps: installed_apps(),
             despertados: std::sync::Mutex::default(), parado: Arc::new(AtomicBool::new(true)),
             identificar: |_, _| Err("sem identificador de janela".into()), janela_do_usuario: None, por_id: false }
@@ -568,7 +570,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 
     fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
         self.available()?;
-        if self.vez_segura.as_ref().is_some_and(|(_, desde)| desde.elapsed() > TETO_MENU) { self.vez_segura = None; }
+        if self.menu_desde.is_some_and(|d| d.elapsed() > TETO_MENU) { self.vez_segura = None; }
         self.observed_at = None; self.elements.clear(); self.windows.clear();
         // A window read by id stays where it is: in front or behind others.
         let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
@@ -616,13 +618,14 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         self.validate_observation(observed).map_err(DesktopError::nao_entregue)?;
         // Before anything is read about the user: whoever had the turn may have just typed.
         let vez = match (self.vez_segura.take(), &self.vez) {
-            (Some((v, _)), _) => Some(v),
+            (Some(v), _) => Some(v),
             (None, Some((caminho, espera))) => Some(Vez::pegar(caminho, *espera)?),
             (None, None) => None,
         };
         self.menu_aberto = false;
         let feito = self.agir_na_vez(observed, action);
-        if self.menu_aberto && let Some(v) = vez { self.vez_segura = Some((v, Instant::now())); }
+        if !self.menu_aberto { self.menu_desde = None; }
+        else if self.menu_desde.get_or_insert_with(Instant::now).elapsed() <= TETO_MENU { self.vez_segura = vez; }
         feito
     }
     fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {

@@ -191,7 +191,9 @@ pub mod regras {
     }
 
     /// The latest of two input clock readings (`GetTickCount` ms, which wrap around): the one closest behind `agora`.
+    /// `b` comes from a file that outlives a reboot: a reading ahead of `agora` is from before it and is dropped.
     pub fn mais_recente(a: Option<u32>, b: Option<u32>, agora: u32) -> Option<u32> {
+        let b = b.filter(|t| agora.wrapping_sub(*t) as i32 >= 0);
         match (a, b) {
             (Some(x), Some(y)) => Some(if agora.wrapping_sub(x) <= agora.wrapping_sub(y) { x } else { y }),
             (x, y) => x.or(y),
@@ -434,7 +436,9 @@ mod desktop {
         /// The turn on keyboard and mouse shared with the other agents of this session.
         vez: std::path::PathBuf,
         /// The turn kept while a menu of the app stays open: another agent's focus change would close it.
-        vez_segura: Option<(Vez, std::time::Instant)>,
+        vez_segura: Option<Vez>,
+        /// Since when actions keep leaving a menu open; past `TETO_MENU` the turn is no longer kept.
+        menu_desde: Option<std::time::Instant>,
         /// The last action left a menu of the app open.
         menu_aberto: bool,
     }
@@ -527,7 +531,7 @@ mod desktop {
             let ua = UIAutomation::new().map_err(|e| arvore::com(e).to_string())?;
             let vez = std::env::temp_dir().join(format!("hangar-computer-control-entrada-{}.lock", sessao.id));
             Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false, janela_devolvida: None, cursor: None,
-                vez, vez_segura: None, menu_aberto: false })
+                vez, vez_segura: None, menu_desde: None, menu_aberto: false })
         }
 
         /// Today's path: real clicks and keys where the app needs them.
@@ -779,7 +783,7 @@ mod desktop {
         }
 
         fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
-            if self.vez_segura.as_ref().is_some_and(|(_, desde)| desde.elapsed() > TETO_MENU) { self.vez_segura = None; }
+            if self.menu_desde.is_some_and(|d| d.elapsed() > TETO_MENU) { self.vez_segura = None; }
             self.janelas.clear();
             self.controles.clear();
             self.por_id = scope.window.is_some();
@@ -804,7 +808,7 @@ mod desktop {
         fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
             // Before anything is read about the user: whoever had the turn may have just typed.
             let mut vez = match self.vez_segura.take() {
-                Some((v, _)) => v,
+                Some(v) => v,
                 None => Vez::pegar(&self.vez, ESPERA_VEZ)?,
             };
             // Another agent's last input is not the user's.
@@ -812,7 +816,8 @@ mod desktop {
             self.menu_aberto = false;
             let feito = self.agir_na_vez(observed, action);
             if let Some(t) = self.entrada_propria { vez.gravar_tick(t); }
-            if self.menu_aberto { self.vez_segura = Some((vez, std::time::Instant::now())); }
+            if !self.menu_aberto { self.menu_desde = None; }
+            else if self.menu_desde.get_or_insert_with(std::time::Instant::now).elapsed() <= TETO_MENU { self.vez_segura = Some(vez); }
             feito
         }
 
