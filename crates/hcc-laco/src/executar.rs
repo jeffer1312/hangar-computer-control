@@ -71,7 +71,7 @@ struct Controle<'a> {
     tempos: Vec<String>,
     /// Start of the lock file names of this desktop (`<temp>/hangar-computer-control-<digest>`).
     trava: String,
-    /// The windows this goal acted on, each locked against the other goals of the desktop until it ends.
+    /// The window this goal works in, locked against the other goals of the desktop.
     janelas: HashMap<String, std::fs::File>,
 }
 
@@ -103,33 +103,55 @@ impl Controle<'_> {
         self.rodar(async { sleep(tempo).await; Ok(()) }).await
     }
 
-    /// Acts after taking the window (`travar`): every action of the goal goes through here.
-    async fn agir<S: Session>(&mut self, s: &mut S, vista: &Observation, acao: &Action, progresso: Progresso)
+    /// Acts after taking the app's window `lida` (the one read by id), if any: every action of the goal goes here.
+    async fn agir<S: Session>(&mut self, s: &mut S, vista: &Observation, acao: &Action, progresso: Progresso, lida: Option<&str>)
         -> Result<Result<ActResult, SessionError>, String> {
-        self.travar(acao, vista)?;
+        // The window read by id is taken; before the goal has one, the window in front (or the one activated) is only
+        // checked. Either way, another goal working there is waited for, like a busy keyboard: the Start menu and the
+        // taskbar are shared, used by one goal at a time.
+        let alvo = match lida {
+            Some(janela) => Some(janela),
+            None if acao.kind == ActionType::Activate => acao.target.as_deref(),
+            None if acao.kind == ActionType::Launch => None,
+            None => Some(vista.foreground.as_str()),
+        };
+        if let Some(janela) = alvo {
+            let desde = Instant::now();
+            while !(if lida.is_some() { self.tomar(janela)? } else { !self.de_outro(janela)? }) {
+                if desde.elapsed() >= USUARIO_ATIVO { return Err(ocupada(janela, vista)); }
+                self.esperar(Duration::from_secs(1)).await?;
+            }
+        }
         self.medir(&format!("acao:{}", acao.kind), progresso, async { Ok(s.act(&vista.observation_id, acao).await) }).await
     }
 
-    /// Takes the window `acao` acts on (the one activated; none for a launch; else the one read) for this goal:
-    /// another goal on it would fight over the same controls.
-    fn travar(&mut self, acao: &Action, vista: &Observation) -> Result<(), String> {
-        let janela = match acao.kind {
-            ActionType::Launch => return Ok(()),
-            ActionType::Activate => match &acao.target { Some(t) => t.clone(), None => return Ok(()) },
-            _ => vista.foreground.clone(),
-        };
-        if self.tomar(&janela)? { return Ok(()); }
-        let nome = vista.windows.iter().find(|w| w.id == janela).map_or(janela.as_str(), |w| w.name.as_str());
-        Err(format!("outro objetivo está controlando a janela '{nome}'"))
+    /// Another goal of the desktop took `janela`; checked without taking it.
+    fn de_outro(&self, janela: &str) -> Result<bool, String> {
+        if self.janelas.contains_key(janela) { return Ok(false); }
+        let arquivo = hcc_protocolo::vez::abrir_trava(&self.trava_de(janela)).map_err(erro_io)?;
+        match arquivo.try_lock() {
+            Ok(()) => arquivo.unlock().map(|()| false).map_err(erro_io),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(std::fs::TryLockError::Error(e)) => Err(erro_io(e)),
+        }
     }
 
-    /// Takes `janela` for the rest of this goal; false when another goal of the desktop has it.
+    fn trava_de(&self, janela: &str) -> PathBuf {
+        let hash: String = Sha256::digest(janela.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
+        PathBuf::from(format!("{}-{hash}.lock", self.trava))
+    }
+
+    /// Takes `janela` as the window this goal works in, letting go of the one before; false when another goal of
+    /// the desktop has it.
     fn tomar(&mut self, janela: &str) -> Result<bool, String> {
         if self.janelas.contains_key(janela) { return Ok(true); }
-        let hash: String = Sha256::digest(janela.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
-        let arquivo = hcc_protocolo::vez::abrir_trava(Path::new(&format!("{}-{hash}.lock", self.trava))).map_err(erro_io)?;
+        let arquivo = hcc_protocolo::vez::abrir_trava(&self.trava_de(janela)).map_err(erro_io)?;
         match arquivo.try_lock() {
-            Ok(()) => { self.janelas.insert(janela.to_owned(), arquivo); Ok(true) }
+            Ok(()) => {
+                self.janelas.clear();
+                self.janelas.insert(janela.to_owned(), arquivo);
+                Ok(true)
+            }
             Err(std::fs::TryLockError::WouldBlock) => Ok(false),
             Err(std::fs::TryLockError::Error(e)) => Err(erro_io(e)),
         }
@@ -335,6 +357,11 @@ fn confirmacao_barrada(acao: &Action, obs: &Observation, objetivo: &str, secreto
 
 fn com_dica(nome: &Option<String>, texto: String) -> String {
     match nome { Some(n) if texto.is_empty() => n.clone(), Some(n) => format!("{n}\n{texto}"), None => texto }
+}
+
+fn ocupada(janela: &str, vista: &Observation) -> String {
+    let nome = vista.windows.iter().find(|w| w.id == janela).map_or(janela, |w| w.name.as_str());
+    format!("outro objetivo está controlando a janela '{nome}'")
 }
 
 fn erro_sessao(e: SessionError) -> String { format!("{}: {e}", e.tipo()) }
@@ -722,7 +749,7 @@ async fn repetir_trecho<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Op
         }
         let nome = secretos.descricao(&acao, &vista, true);
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-        let retorno = controle.agir(s, &vista, &acao, Progresso::Acao(secretos.descricao(&acao, &vista, false), None)).await?;
+        let retorno = controle.agir(s, &vista, &acao, Progresso::Acao(secretos.descricao(&acao, &vista, false), None), escopo.window.as_deref()).await?;
         rodou = true;
         let ok = matches!(&retorno, Ok(ret) if ret.ok);
         let resultado = match &retorno { Ok(ret) if ret.ok => "ok".to_owned(), Ok(_) => "{'ok': False}".to_owned(),
@@ -832,7 +859,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 }
                 let nome = secretos.descricao(&acao, &vista, true);
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                let retorno = controle.agir(s, &vista, &acao, Progresso::Acao(secretos.descricao(&acao, &vista, false), None)).await?;
+                let retorno = controle.agir(s, &vista, &acao, Progresso::Acao(secretos.descricao(&acao, &vista, false), None), None).await?;
                 let resultado = match &retorno {
                     Ok(ret) if ret.ok => "ok".to_owned(),
                     Ok(_) => "{'ok': False}".to_owned(),
@@ -1302,7 +1329,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
             let rotulo = secretos.descricao(acao, &vista, false);
             let marcado = print_da_acao(&pasta, ciclo, acao, &vista, lido_como.window.as_deref(), print.as_deref());
-            let mut retorno = controle.agir(s, &vista, acao, Progresso::Acao(rotulo.clone(), marcado)).await?;
+            let mut retorno = controle.agir(s, &vista, acao, Progresso::Acao(rotulo.clone(), marcado), lido_como.window.as_deref()).await?;
             // Refused before it touched the app, on a fresh look of the same screen: with real input when only that
             // reaches it, after the user stops (up to a minute), or once more for any other refusal.
             let (mut reenviou, mut subiu, desde) = (false, false, Instant::now());
@@ -1331,7 +1358,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                 atual = assinatura_tela(&vista);
                 anterior = Some(atual.clone());
                 let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                retorno = controle.agir(s, &vista, &candidato.acao, Progresso::Acao(rotulo.clone(), None)).await?;
+                retorno = controle.agir(s, &vista, &candidato.acao, Progresso::Acao(rotulo.clone(), None), lido_como.window.as_deref()).await?;
             }
             let acao = &candidato.acao;
             if let Some(u) = r.ultima.as_mut().filter(|u| u.entrega.is_none()) {
@@ -1413,7 +1440,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
                     atual = assinatura_tela(&vista);
                     anterior = Some(atual.clone());
                     let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
-                    let feito = controle.agir(s, &vista, &real, Progresso::Acao(secretos.descricao(&real, &vista, false), None)).await?;
+                    let feito = controle.agir(s, &vista, &real, Progresso::Acao(secretos.descricao(&real, &vista, false), None), lido_como.window.as_deref()).await?;
                     if feito.as_ref().is_ok_and(|r| r.ok) {
                         if let Some(u) = recentes.last_mut() { u.result = "ok (refeito com entrada real)".into(); }
                         if esperar_efeito(conector, sessao, controle, &real, &vista, &atual, secretos, &lido_como).await?

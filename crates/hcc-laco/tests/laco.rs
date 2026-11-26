@@ -3015,48 +3015,59 @@ fn na_janela(mut obs: Observation, id: &str, nome: &str) -> Observation {
     obs
 }
 
-/// Holds the goal on `con` at its next observe after its first action, keeping its windows taken.
-async fn parado_depois_de_agir(con: &FakeConnector) {
-    loop {
-        con.entered.notified().await;
-        let mut s = con.state.lock().unwrap();
-        if !s.acts.is_empty() { s.observe_pending = true; return; }
-    }
+/// Holds the goal on `con` at its next observe after `n` actions, keeping its windows taken.
+async fn parado_depois_de_agir(con: &FakeConnector, n: usize) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            con.entered.notified().await;
+            let mut s = con.state.lock().unwrap();
+            if s.acts.len() >= n { s.observe_pending = true; return; }
+        }
+    }).await.unwrap_or_else(|_| panic!("o objetivo não chegou a {n} ações: {:?}", con.state.lock().unwrap().acts.iter().map(|a| a.0.kind).collect::<Vec<_>>()));
 }
 
-// Goals on one desktop run side by side, one window each; watching takes the whole desktop.
+// Goals on one desktop run side by side, one app window each; watching takes the whole desktop. A window another
+// goal works in is waited for, like a busy keyboard; one no goal took (the user's, the shell's) is free.
 #[tokio::test]
-async fn goals_share_the_desktop_but_never_a_window() {
-    let a = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (op_a, _sa) = setup(vec![select("set_value"), done()]).await;
+async fn goals_share_the_desktop_and_wait_for_a_window_in_use() {
+    let a = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana"), tree("o3", "Ana")]);
+    let (op_a, _sa) = setup(vec![select("set_value"), select("invoke Button 'Salvar'"), done()]).await;
     let config = op_a.config.clone();
     let cancel = CancellationToken::new();
     let corre_a = tokio::spawn({
         let (a, cancel) = (a.clone(), cancel.clone());
         async move { executar(op_a, &a, cancel, &|_| {}).await }
     });
-    parado_depois_de_agir(&a).await;
+    // The first action names the app's window; the second, on that window read by id, takes it.
+    parado_depois_de_agir(&a, 2).await;
 
-    let b = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
-    let (mut op_b, _sb) = setup(vec![select("set_value"), done()]).await;
-    op_b.config = config.clone();
-    let r = run(op_b, &b).await;
-    assert_eq!(r.motivo, "outro objetivo está controlando a janela 'Editor'");
-    assert!(b.state.lock().unwrap().acts.is_empty());
-
-    let c = FakeConnector::new(vec![na_janela(tree("o1", ""), "w2", "Planilha"), na_janela(tree("o2", "Ana"), "w2", "Planilha")]);
-    let (mut op_c, _sc) = setup(vec![select("set_value"), done()]).await;
-    op_c.config = config.clone();
-    let r = run(op_c, &c).await;
+    let livre = FakeConnector::new(vec![na_janela(tree("o1", ""), "w9", "Terminal"), na_janela(tree("o2", "Ana"), "w9", "Terminal")]);
+    let (mut op_l, _sl) = setup(vec![select("set_value"), done()]).await;
+    op_l.config = config.clone();
+    let r = run(op_l, &livre).await;
     assert!(r.ok, "{}", r.resumo());
 
     let d = FakeConnector::new(vec![na_janela(tree("o1", ""), "w3", "Outra")]);
     let (mut op_d, _sd) = setup(vec![]).await;
-    (op_d.config, op_d.ver) = (config, true);
+    (op_d.config, op_d.ver) = (config.clone(), true);
     assert_eq!(run(op_d, &d).await.motivo, "outro objetivo ainda está controlando o desktop");
 
+    let b = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (mut op_b, sb) = setup(vec![select("set_value"), done()]).await;
+    op_b.config = config;
+    let corre_b = tokio::spawn({
+        let b = b.clone();
+        async move { executar(op_b, &b, CancellationToken::new(), &|_| {}).await }
+    });
+    // B decided its action and waits for the window A works in.
+    tokio::time::timeout(Duration::from_secs(10), async { while bodies(&sb).await.is_empty() { tokio::time::sleep(Duration::from_millis(20)).await } }).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(b.state.lock().unwrap().acts.is_empty(), "não age na janela em que A trabalha");
     cancel.cancel();
     corre_a.await.unwrap();
+    let r = corre_b.await.unwrap();
+    assert!(r.ok, "{}", r.resumo());
+    assert_eq!(b.state.lock().unwrap().acts.len(), 1);
 }
 
 // Another goal typing is a wait, like the user typing: the action goes once the turn is free.
