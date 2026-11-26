@@ -2,17 +2,17 @@
 
 use crate::regras::runtime_err;
 use hcc_protocolo::DesktopError;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTS_CONNECTSTATE_CLASS, WTSActive, WTSConnectState, WTSFreeMemory, WTSQuerySessionInformationW};
 use windows::Win32::System::StationsAndDesktops::{CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, OpenInputDesktop};
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, WaitForSingleObject,
+    GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetShellWindow, GetSystemMetrics, IsWindow, SM_CXSCREEN, SM_CYSCREEN};
-use windows::core::{HSTRING, PWSTR};
+use windows::core::PWSTR;
 
 fn win(e: windows::core::Error) -> DesktopError {
     let c = e.code().0 as u32;
@@ -29,8 +29,6 @@ pub(crate) fn dpi_por_monitor() {
 
 pub(crate) struct Sessao {
     pub id: u32,
-    // Held for the life of the process: it marks this session as taken.
-    _mutex: HANDLE,
 }
 
 impl Sessao {
@@ -41,15 +39,7 @@ impl Sessao {
         if id == 0 {
             return Err(runtime_err("o agente deve rodar na sessão gráfica, não na sessão 0"));
         }
-        let nome = HSTRING::from(format!("Local\\HangarComputerControl-{id}"));
-        // SAFETY: named mutex with default security; the handle is kept, never closed.
-        let mutex = unsafe { CreateMutexW(None, false, &nome) }.map_err(|_| runtime_err("outro agente já controla esta sessão Windows"))?;
-        // SAFETY: valid handle from CreateMutexW; zero timeout.
-        let espera = unsafe { WaitForSingleObject(mutex, 0) };
-        if espera != WAIT_OBJECT_0 && espera != WAIT_ABANDONED {
-            return Err(runtime_err("outro agente já controla esta sessão Windows"));
-        }
-        Ok(Sessao { id, _mutex: mutex })
+        Ok(Sessao { id })
     }
 
     /// Active (not disconnected) session and an input desktop we can read (not locked, not UAC).

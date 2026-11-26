@@ -1152,3 +1152,24 @@ fn activating_the_app_from_the_user_window_gives_that_window_back() {
     assert!(chamadas.iter().any(|c| c.contains("dispatch") && c.contains("0xa")), "{chamadas:?}");
     assert_eq!(commands.active.borrow()["address"], "0xb", "o terminal do usuário volta: {chamadas:?}");
 }
+
+// Several agents on one session act one at a time; the turn is taken before anything is read about the user.
+#[test]
+fn an_act_waits_for_the_turn_held_by_another_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let caminho = dir.path().join("vez.lock");
+    let (mut desktop, commands, _) = desktop(vec![node("push button", "Salvar")]);
+    desktop.usar_vez(caminho.clone(), Duration::from_millis(50));
+    let observed = com_terminal_na_frente(&mut desktop, &commands);
+    let outro = hcc_protocolo::vez::Vez::pegar(&caminho, Duration::from_secs(5)).unwrap();
+    desktop.ocioso().store(false, std::sync::atomic::Ordering::Relaxed);
+    let educado = Action { keys: Some(vec!["Enter".into()]), input: Some(hcc_protocolo::InputMode::Polite), ..action(ActionType::Keys, None) };
+    let erro = desktop.act(&observed, &educado).unwrap_err();
+    assert_eq!((erro.msg.as_str(), erro.delivery), (hcc_protocolo::recusa::ENTRADA_OCUPADA, Delivery::NotDelivered));
+    assert!(!commands.calls.borrow().iter().any(|c| c.0[0] == "ydotool" || c.0.get(1).is_some_and(|a| a == "dispatch")));
+    drop(outro);
+    desktop.ocioso().store(true, std::sync::atomic::Ordering::Relaxed);
+    let observed = desktop.observe(&Scope { window: Some("w0xa".into()), ..Default::default() }).unwrap();
+    desktop.act(&observed, &educado).unwrap();
+    assert!(hcc_protocolo::vez::Vez::pegar(&caminho, Duration::from_millis(50)).is_ok(), "sem menu aberto, a vez é solta");
+}

@@ -16,3 +16,6 @@ atspi.workspace = true
 zbus.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

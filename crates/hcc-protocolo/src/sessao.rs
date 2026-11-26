@@ -16,6 +16,7 @@ pub mod recusa {
     pub const JANELA_FECHOU: &str = "a janela fechou";
     pub const VALOR_NAO_CONFIRMADO: &str = "valor digitado não confirmado";
     pub const REGIAO_SUMIU: &str = "região sumiu";
+    pub const ENTRADA_OCUPADA: &str = "outro objetivo está usando teclado e mouse";
 }
 
 /// Python exception class an error travels as (`"<Kind>: <msg>"` on the wire).

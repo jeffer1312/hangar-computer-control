@@ -190,6 +190,14 @@ pub mod regras {
         propria.is_some_and(|p| ultima_entrada.wrapping_sub(p) as i32 <= 0) || agora.wrapping_sub(ultima_entrada) >= 2000
     }
 
+    /// The latest of two input clock readings (`GetTickCount` ms, which wrap around): the one closest behind `agora`.
+    pub fn mais_recente(a: Option<u32>, b: Option<u32>, agora: u32) -> Option<u32> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(if agora.wrapping_sub(x) <= agora.wrapping_sub(y) { x } else { y }),
+            (x, y) => x.or(y),
+        }
+    }
+
     /// The user's window goes back in front when another took its place and no menu of the app is open.
     pub fn devolver(usuario: Option<isize>, frente: isize, menu_aberto: bool) -> bool {
         usuario.is_some_and(|u| u != frente) && !menu_aberto
@@ -397,6 +405,11 @@ mod desktop {
     use crate::regras::{self, runtime_err, valor_err};
     use crate::{arvore, captura, entrada, sessao_win};
     use hcc_protocolo::{Action, ActionType, Amount, Delivery, Desktop, DesktopError, Direction, InputMode, Observation, Scope, Screen, recusa};
+    use hcc_protocolo::vez::Vez;
+
+    /// Short enough that the refusal reaches the controller well within its request timeout; the loop asks again.
+    const ESPERA_VEZ: std::time::Duration = std::time::Duration::from_secs(3);
+    const TETO_MENU: std::time::Duration = std::time::Duration::from_secs(20);
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use uiautomation::UIAutomation;
@@ -418,6 +431,12 @@ mod desktop {
         janela_devolvida: Option<isize>,
         /// The drawn cursor of `ver`, made on the first action that asks for it.
         cursor: Option<crate::overlay::Cursor>,
+        /// The turn on keyboard and mouse shared with the other agents of this session.
+        vez: std::path::PathBuf,
+        /// The turn kept while a menu of the app stays open: another agent's focus change would close it.
+        vez_segura: Option<(Vez, std::time::Instant)>,
+        /// The last action left a menu of the app open.
+        menu_aberto: bool,
     }
 
     /// UIA objects live in the multithreaded apartment: usable from the thread that waits on a blocking Invoke.
@@ -439,12 +458,76 @@ mod desktop {
     }
 
     impl WindowsDesktop {
+        fn agir_na_vez(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
+            if action.cursor {
+                self.mostrar_cursor(action);
+            }
+            // The window the action is aimed at: the one activated, else the one read.
+            let mirada = if action.kind == ActionType::Activate { action.target.as_deref().unwrap_or_default() } else { observed.foreground.as_str() };
+            let alvo = self.janelas.get(mirada).map_or(0, |j| j.hwnd);
+            let frente = sessao_win::primeiro_plano();
+            if action.input.is_none_or(|m| m == InputMode::Real) {
+                // Real input lands on whatever is in front: never on a window read behind others.
+                if self.por_id && frente != alvo {
+                    return Err(valor_err(recusa::JANELA_ATRAS).nao_entregue());
+                }
+                let r = self.agir_real(action);
+                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
+                return r;
+            }
+            let caminho = regras::caminho(action.kind, action.input);
+            if caminho == regras::Caminho::Recusa {
+                return Err(valor_err(recusa::ENTRADA_REAL).nao_entregue());
+            }
+            let (agora, ultima) = sessao_win::relogio_de_entrada();
+            if !regras::ocioso(agora, ultima, self.entrada_propria) {
+                return Err(runtime_err(recusa::USUARIO_ATIVO).nao_entregue());
+            }
+            // The window in front now is the user's unless it belongs to the app (its dialog or menu).
+            if frente != alvo && !arvore::mesmo_processo(frente, alvo) {
+                self.janela_do_usuario = Some(frente);
+            }
+            // Only with a window to give back are the app's menus worth listing.
+            let mut popups_antes = if self.janela_do_usuario.is_some() { arvore::popups_de(alvo) } else { vec![] };
+            if let Some(j) = action.target.as_deref().and_then(|t| self.janelas.get(t)).filter(|_| action.kind == ActionType::Activate && self.janela_do_usuario.is_some()) {
+                popups_antes.extend(arvore::popups_de(j.hwnd));
+            }
+            let feito = if caminho == regras::Caminho::Padrao {
+                self.agir_padrao(action)
+            } else {
+                if action.kind != ActionType::Activate && let Some(j) = self.janelas.get(&observed.foreground) {
+                    arvore::focar_janela(j);
+                }
+                self.agir_real(action)
+            };
+            // Chromium brings its window up a moment after the accessibility call returns: look twice.
+            let mut tocou = false;
+            if self.janela_do_usuario.is_some() {
+                pausa(0.25);
+                tocou = self.devolver_janela(&popups_antes);
+            }
+            if tocou {
+                pausa(0.25);
+                if self.janela_do_usuario.is_none() && sessao_win::primeiro_plano() == alvo {
+                    self.janela_do_usuario = self.janela_devolvida;
+                    tocou |= self.devolver_janela(&popups_antes);
+                }
+            }
+            // The input just sent is ours (keys, clicks, the Alt that unlocks the focus): not the user being active.
+            if caminho == regras::Caminho::Real || tocou {
+                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
+            }
+            feito
+        }
+
         pub fn new() -> Result<WindowsDesktop, String> {
             // Before any UIA/GDI call, else rects and the capture come in scaled coordinates.
             sessao_win::dpi_por_monitor();
             let sessao = sessao_win::Sessao::abrir().map_err(|e| e.to_string())?;
             let ua = UIAutomation::new().map_err(|e| arvore::com(e).to_string())?;
-            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false, janela_devolvida: None, cursor: None })
+            let vez = std::env::temp_dir().join(format!("hangar-computer-control-entrada-{}.lock", sessao.id));
+            Ok(WindowsDesktop { sessao, ua, janelas: HashMap::new(), controles: HashMap::new(), janela_do_usuario: None, entrada_propria: None, por_id: false, janela_devolvida: None, cursor: None,
+                vez, vez_segura: None, menu_aberto: false })
         }
 
         /// Today's path: real clicks and keys where the app needs them.
@@ -643,7 +726,8 @@ mod desktop {
         /// Whether it moved the focus (an Alt tap may have been sent).
         fn devolver_janela(&mut self, popups_antes: &[isize]) -> bool {
             let frente = sessao_win::primeiro_plano();
-            if regras::devolver(self.janela_do_usuario, frente, arvore::menu_aberto(frente, popups_antes)) {
+            self.menu_aberto = arvore::menu_aberto(frente, popups_antes);
+            if regras::devolver(self.janela_do_usuario, frente, self.menu_aberto) {
                 self.janela_devolvida = self.janela_do_usuario.take();
                 arvore::focar_hwnd(self.janela_devolvida.unwrap_or_default());
                 return true;
@@ -695,6 +779,7 @@ mod desktop {
         }
 
         fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
+            if self.vez_segura.as_ref().is_some_and(|(_, desde)| desde.elapsed() > TETO_MENU) { self.vez_segura = None; }
             self.janelas.clear();
             self.controles.clear();
             self.por_id = scope.window.is_some();
@@ -717,64 +802,17 @@ mod desktop {
         }
 
         fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
-            if action.cursor {
-                self.mostrar_cursor(action);
-            }
-            // The window the action is aimed at: the one activated, else the one read.
-            let mirada = if action.kind == ActionType::Activate { action.target.as_deref().unwrap_or_default() } else { observed.foreground.as_str() };
-            let alvo = self.janelas.get(mirada).map_or(0, |j| j.hwnd);
-            let frente = sessao_win::primeiro_plano();
-            if action.input.is_none_or(|m| m == InputMode::Real) {
-                // Real input lands on whatever is in front: never on a window read behind others.
-                if self.por_id && frente != alvo {
-                    return Err(valor_err(recusa::JANELA_ATRAS).nao_entregue());
-                }
-                let r = self.agir_real(action);
-                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
-                return r;
-            }
-            let caminho = regras::caminho(action.kind, action.input);
-            if caminho == regras::Caminho::Recusa {
-                return Err(valor_err(recusa::ENTRADA_REAL).nao_entregue());
-            }
-            let (agora, ultima) = sessao_win::relogio_de_entrada();
-            if !regras::ocioso(agora, ultima, self.entrada_propria) {
-                return Err(runtime_err(recusa::USUARIO_ATIVO).nao_entregue());
-            }
-            // The window in front now is the user's unless it belongs to the app (its dialog or menu).
-            if frente != alvo && !arvore::mesmo_processo(frente, alvo) {
-                self.janela_do_usuario = Some(frente);
-            }
-            // Only with a window to give back are the app's menus worth listing.
-            let mut popups_antes = if self.janela_do_usuario.is_some() { arvore::popups_de(alvo) } else { vec![] };
-            if let Some(j) = action.target.as_deref().and_then(|t| self.janelas.get(t)).filter(|_| action.kind == ActionType::Activate && self.janela_do_usuario.is_some()) {
-                popups_antes.extend(arvore::popups_de(j.hwnd));
-            }
-            let feito = if caminho == regras::Caminho::Padrao {
-                self.agir_padrao(action)
-            } else {
-                if action.kind != ActionType::Activate && let Some(j) = self.janelas.get(&observed.foreground) {
-                    arvore::focar_janela(j);
-                }
-                self.agir_real(action)
+            // Before anything is read about the user: whoever had the turn may have just typed.
+            let mut vez = match self.vez_segura.take() {
+                Some((v, _)) => v,
+                None => Vez::pegar(&self.vez, ESPERA_VEZ)?,
             };
-            // Chromium brings its window up a moment after the accessibility call returns: look twice.
-            let mut tocou = false;
-            if self.janela_do_usuario.is_some() {
-                pausa(0.25);
-                tocou = self.devolver_janela(&popups_antes);
-            }
-            if tocou {
-                pausa(0.25);
-                if self.janela_do_usuario.is_none() && sessao_win::primeiro_plano() == alvo {
-                    self.janela_do_usuario = self.janela_devolvida;
-                    tocou |= self.devolver_janela(&popups_antes);
-                }
-            }
-            // The input just sent is ours (keys, clicks, the Alt that unlocks the focus): not the user being active.
-            if caminho == regras::Caminho::Real || tocou {
-                self.entrada_propria = Some(sessao_win::relogio_de_entrada().1);
-            }
+            // Another agent's last input is not the user's.
+            self.entrada_propria = regras::mais_recente(self.entrada_propria, vez.tick(), sessao_win::relogio_de_entrada().0);
+            self.menu_aberto = false;
+            let feito = self.agir_na_vez(observed, action);
+            if let Some(t) = self.entrada_propria { vez.gravar_tick(t); }
+            if self.menu_aberto { self.vez_segura = Some((vez, std::time::Instant::now())); }
             feito
         }
 

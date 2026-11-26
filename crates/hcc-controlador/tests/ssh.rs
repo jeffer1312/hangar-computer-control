@@ -226,7 +226,7 @@ async fn failure_messages_keep_only_the_last_characters_and_cleanup_is_visible()
     let err = SshTransport::start(&config(artifact.path()), &connection(), runner).await.err().unwrap();
     assert_eq!(err.to_string(), format!("inicialização Windows falhou: {}", "á".repeat(1500)));
     let stderr = format!("ignored{}", "ç".repeat(1100));
-    let runner = FakeRunner::new(vec![prepared(false), output(1, b"", stderr.as_bytes()), success()]);
+    let runner = FakeRunner::new(vec![prepared(false), output(1, b"", stderr.as_bytes()), prepared(false), success()]);
     let err = SshTransport::start(&config(artifact.path()), &connection(), runner).await.err().unwrap();
     assert_eq!(err.to_string(), format!("falha ao enviar agente: {}", "ç".repeat(1000)));
     let runner = FakeRunner::new(vec![prepared(true), success(), output(1, b"", b"cleanup failed")]);
@@ -486,4 +486,16 @@ fn process_command_debug_hides_stdin() {
     let command = ProcessCommand { program: OsString::from("ssh"), args: vec![],
         stdin: connection().token.into_bytes(), timeout: Duration::from_secs(60) };
     assert!(!format!("{command:?}").contains("secret-not-for-logs"));
+}
+
+// Two goals on the first run of a version both find the exe missing: the second copy fails on the file the
+// first agent is already running, which is the exe it needed.
+#[tokio::test]
+async fn a_failed_copy_of_an_exe_another_goal_just_sent_goes_on() {
+    let artifact = artifact();
+    let runner = FakeRunner::new(vec![prepared(false), output(1, b"", b"arquivo em uso"), prepared(true), success(), success()]);
+    let mut transport = SshTransport::start(&config(artifact.path()), &connection(), runner.clone()).await.unwrap();
+    let operacoes: Vec<Value> = runner.payloads().iter().map(|p| p["operation"].clone()).collect();
+    assert_eq!(operacoes, vec![json!("prepare"), json!("prepare"), json!("start")]);
+    transport.close(None).await.unwrap();
 }

@@ -198,7 +198,12 @@ impl SshTransport {
                     stdin: vec![], timeout: Duration::from_secs(120) }).await
                     .map_err(|e| format!("falha ao enviar agente: {}", tail(&e, 1000)))?;
                 if !copied.status.success() {
-                    return Err(format!("falha ao enviar agente: {}", tail(&decode_stderr(&copied.stderr), 1000)));
+                    let falha = format!("falha ao enviar agente: {}", tail(&decode_stderr(&copied.stderr), 1000));
+                    // Another goal may have just sent the same exe and be running it, so this copy could not overwrite it.
+                    let enviado = transport.remote(&json!({"operation": "prepare", "digest": digest,
+                        "shared_executable": config.shared_executable}), REMOTE_TIMEOUT).await.ok()
+                        .and_then(|v| serde_json::from_value::<Prepared>(v).ok()).is_some_and(|p| p.valid);
+                    if !enviado { return Err(falha); }
                 }
             }
             transport.remote(&json!({"operation": "start", "executable": prepared.executable,

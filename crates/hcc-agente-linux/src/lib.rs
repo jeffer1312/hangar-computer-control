@@ -9,11 +9,11 @@ pub mod wayland;
 use arvore::{Arvore, AtspiTree, INVOKE, ITEMS, NoInfo, TreeError, choose_frame, element_rect, escalar, role_name};
 use comandos::{Comandos, ComandosSistema};
 use hcc_protocolo::{Action, ActionType, Button, Delivery, Desktop, DesktopError, ErrorKind, InputMode, MouseMode, Observation, Rect, Scope, Screen, Window, dividir_comando, recusa};
+use hcc_protocolo::vez::Vez;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,7 +24,12 @@ pub struct LinuxDesktop<C: Comandos = ComandosSistema, T: Arvore = AtspiTree> {
     commands: C,
     tree: T,
     session_id: u32,
-    _lock: Option<File>,
+    /// The turn on keyboard and mouse shared with the other agents of this session; `None` acts without it.
+    vez: Option<(PathBuf, Duration)>,
+    /// The turn kept while a menu of the app stays open: another agent's focus change would close it.
+    vez_segura: Option<(Vez, Instant)>,
+    /// The last action left a menu of the app open.
+    menu_aberto: bool,
     elements: HashMap<String, ObservedElement<T::Node>>,
     windows: HashMap<String, Value>,
     observed_at: Option<Instant>,
@@ -56,13 +61,8 @@ impl LinuxDesktop {
             .ok_or("não foi possível determinar o usuário da sessão")?;
         if uid == 0 { return Err("o agente não deve rodar como root".into()); }
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-        let lock = OpenOptions::new().create(true).append(true).open(runtime.join("hangar-computer-control-agent.lock")).map_err(|e| e.to_string())?;
-        lock.try_lock().map_err(|e| match e {
-            std::fs::TryLockError::WouldBlock => "outro agente já controla esta sessão".into(),
-            std::fs::TryLockError::Error(e) => e.to_string(),
-        })?;
         let mut desktop = Self::with_backends(commands, tree, uid);
-        desktop._lock = Some(lock);
+        desktop.usar_vez(runtime.join("hangar-computer-control-entrada.lock"), ESPERA_VEZ);
         desktop.identificar = wayland::identificador;
         desktop.parado.store(false, Ordering::Relaxed);
         if let Err(error) = wayland::vigiar_ocioso(desktop.parado.clone()) {
@@ -73,6 +73,10 @@ impl LinuxDesktop {
         Ok(desktop)
     }
 }
+
+/// Short enough that the refusal reaches the controller well within its request timeout; the loop asks again.
+const ESPERA_VEZ: Duration = Duration::from_secs(3);
+const TETO_MENU: Duration = Duration::from_secs(20);
 
 fn runtime(message: impl Into<String>) -> DesktopError { DesktopError::new(ErrorKind::RuntimeError, message) }
 
@@ -190,11 +194,14 @@ fn installed_apps() -> Vec<String> {
 
 impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
     pub fn with_backends(commands: C, tree: T, session_id: u32) -> Self {
-        Self { commands, tree, session_id, _lock: None, elements: HashMap::new(), windows: HashMap::new(),
+        Self { commands, tree, session_id, vez: None, vez_segura: None, menu_aberto: false, elements: HashMap::new(), windows: HashMap::new(),
             observed_at: None, foreground: String::new(), area: Rect(0, 0, 0, 0), apps: installed_apps(),
             despertados: std::sync::Mutex::default(), parado: Arc::new(AtomicBool::new(true)),
             identificar: |_, _| Err("sem identificador de janela".into()), janela_do_usuario: None, por_id: false }
     }
+
+    /// Act only with the turn in `caminho`, waiting up to `espera` for another agent to let go.
+    pub fn usar_vez(&mut self, caminho: PathBuf, espera: Duration) { self.vez = Some((caminho, espera)); }
 
     /// The idle flag, for tests that play the user.
     pub fn ocioso(&self) -> Arc<AtomicBool> { self.parado.clone() }
@@ -296,6 +303,7 @@ impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
         let Ok(frente) = hypr::query(&self.commands, "activewindow") else { return };
         let id = foreground_id(&frente);
         let menu = self.popups_de(&frente).iter().any(|p| !antes.contains(p));
+        self.menu_aberto = menu;
         if self.janela_do_usuario.as_ref().is_some_and(|u| *u != id) && !menu {
             let usuario = self.janela_do_usuario.take().unwrap_or_default();
             if let Err(e) = self.focar(&usuario) { ignorado("devolver_janela", &e); }
@@ -560,6 +568,7 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 
     fn observe(&mut self, scope: &Scope) -> Result<Observation, DesktopError> {
         self.available()?;
+        if self.vez_segura.as_ref().is_some_and(|(_, desde)| desde.elapsed() > TETO_MENU) { self.vez_segura = None; }
         self.observed_at = None; self.elements.clear(); self.windows.clear();
         // A window read by id stays where it is: in front or behind others.
         let clients = hypr::query(&self.commands, "clients").map_err(runtime)?;
@@ -605,6 +614,38 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
 
     fn act(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
         self.validate_observation(observed).map_err(DesktopError::nao_entregue)?;
+        // Before anything is read about the user: whoever had the turn may have just typed.
+        let vez = match (self.vez_segura.take(), &self.vez) {
+            (Some((v, _)), _) => Some(v),
+            (None, Some((caminho, espera))) => Some(Vez::pegar(caminho, *espera)?),
+            (None, None) => None,
+        };
+        self.menu_aberto = false;
+        let feito = self.agir_na_vez(observed, action);
+        if self.menu_aberto && let Some(v) = vez { self.vez_segura = Some((v, Instant::now())); }
+        feito
+    }
+    fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
+        self.available()?;
+        if let Some(id) = window {
+            // The window alone, even behind others: the rest of the screen never reaches the vision model.
+            let client = self.cliente(id)?;
+            let alvo = (self.identificar)(hypr::string(&client, "title").map_err(runtime)?, hypr::string(&client, "class").map_err(runtime)?).map_err(runtime)?;
+            let largura = client["size"][0].as_i64().filter(|w| *w > 0).unwrap_or(1280) as f64;
+            let scale = (1280.0_f64).min(largura) / largura;
+            let scale = if scale.fract() == 0.0 { format!("{scale:.1}") } else { scale.to_string() };
+            return self.commands.run(&["grim", "-T", &alvo, "-s", &scale, "-"], None).map_err(runtime);
+        }
+        let (_, area, monitor) = self.current()?;
+        let width = area.2 - area.0;
+        let scale = f64::from(width.min(1280)) / f64::from(width);
+        let scale = if scale.fract() == 0.0 { format!("{scale:.1}") } else { scale.to_string() };
+        self.commands.run(&["grim", "-o", hypr::string(&monitor, "name").map_err(runtime)?, "-s", &scale, "-"], None).map_err(runtime)
+    }
+}
+
+impl<C: Comandos, T: Arvore> LinuxDesktop<C, T> {
+    fn agir_na_vez(&mut self, observed: &Observation, action: &Action) -> Result<Delivery, DesktopError> {
         let ativa = hypr::query(&self.commands, "activewindow").map_err(|e| runtime(e).nao_entregue())?;
         let frente = foreground_id(&ativa);
         let Some(modo) = action.input.filter(|m| *m != InputMode::Real) else {
@@ -644,24 +685,6 @@ impl<C: Comandos, T: Arvore> Desktop for LinuxDesktop<C, T> {
         };
         self.devolver_janela(&popups_antes);
         feito
-    }
-
-    fn screenshot_png(&mut self, window: Option<&str>) -> Result<Vec<u8>, DesktopError> {
-        self.available()?;
-        if let Some(id) = window {
-            // The window alone, even behind others: the rest of the screen never reaches the vision model.
-            let client = self.cliente(id)?;
-            let alvo = (self.identificar)(hypr::string(&client, "title").map_err(runtime)?, hypr::string(&client, "class").map_err(runtime)?).map_err(runtime)?;
-            let largura = client["size"][0].as_i64().filter(|w| *w > 0).unwrap_or(1280) as f64;
-            let scale = (1280.0_f64).min(largura) / largura;
-            let scale = if scale.fract() == 0.0 { format!("{scale:.1}") } else { scale.to_string() };
-            return self.commands.run(&["grim", "-T", &alvo, "-s", &scale, "-"], None).map_err(runtime);
-        }
-        let (_, area, monitor) = self.current()?;
-        let width = area.2 - area.0;
-        let scale = f64::from(width.min(1280)) / f64::from(width);
-        let scale = if scale.fract() == 0.0 { format!("{scale:.1}") } else { scale.to_string() };
-        self.commands.run(&["grim", "-o", hypr::string(&monitor, "name").map_err(runtime)?, "-s", &scale, "-"], None).map_err(runtime)
     }
 }
 

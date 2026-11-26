@@ -4,6 +4,7 @@ pub mod acao;
 pub mod comando;
 pub mod observacao;
 pub mod sessao;
+pub mod vez;
 
 pub use acao::*;
 pub use comando::*;
