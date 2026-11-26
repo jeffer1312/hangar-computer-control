@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use hcc_laco::barreiras::{Barreiras, aviso, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
+use hcc_laco::barreiras::{Barreiras, atalho_de_sessao, aviso, fecha_janela, itens_pendentes, objetivo_pede_fechar, pendente, segurar_segredos};
 use hcc_laco::candidatos::{apps_do_objetivo, candidatos, descrever_acao, mesmo_alvo, segredos, sem_app_aberto, texto_no_editavel};
 use hcc_laco::descrever::intencao;
 use hcc_laco::estado::{assinatura_tela, estado_compacto};
@@ -1153,4 +1153,20 @@ fn an_unreadable_learning_file_is_kept_as_it_is() {
     aprendido.aprender(&tela, &Action { kind: ActionType::Check, target: Some("e0".into()), ..Default::default() });
     assert!(aprendido.gravar(pasta.path()).is_err());
     assert_eq!(std::fs::read_to_string(pasta.path().join("entrada-real.json")).unwrap(), "{quebrado");
+}
+
+#[test]
+fn session_wrecking_shortcuts_are_never_offered() {
+    let keys = |k: &[&str]| Action { kind: ActionType::Keys, keys: Some(k.iter().map(|s| s.to_string()).collect()), ..Default::default() };
+    for k in [&["win", "l"][..], &["super", "d"], &["meta", "m"], &["win", "r"], &["win", "x"], &["win", "e"], &["win", "tab"], &["win"],
+              &["alt", "tab"], &["alt", "escape"], &["ctrl", "shift", "escape"], &["ctrl", "alt", "delete"], &["Control", "Alt", "Delete"]] {
+        assert!(atalho_de_sessao(&keys(k)), "{k:?}");
+    }
+    for k in [&["ctrl", "c"][..], &["alt", "f"], &["shift", "tab"], &["escape"], &["delete"], &["ctrl", "escape", "x"]] {
+        assert!(!atalho_de_sessao(&keys(k)), "{k:?}");
+    }
+    // Asked in the goal or not, the shortcut never goes: it locks or hides the session the agent works in.
+    let cands = vec![candidato(keys(&["win", "l"])), candidato(invoke("e1"))];
+    let (ficam, _) = Barreiras::sem_confirmar(cands, &obs(vec![]), "bloquear a tela com win+l");
+    assert_eq!(ficam.into_iter().map(|c| c.acao).collect::<Vec<_>>(), vec![invoke("e1")]);
 }

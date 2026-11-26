@@ -182,6 +182,20 @@ pub fn sem_acao_pedida(objetivo: &str, obs: &Observation, recentes: &[Registro])
         .map(|l| format!("nada foi feito ainda nesta execução: o objetivo pede agir em '{l}', que continua na tela"))
 }
 
+/// Win alone or with L, D, M, R, X, E, Tab; Alt+Tab; Alt+Esc; Ctrl+Shift+Esc; Ctrl+Alt+Del: they lock, hide or leave
+/// the session the agent works in, whatever the goal says.
+pub fn atalho_de_sessao(acao: &Action) -> bool {
+    if acao.kind != ActionType::Keys { return false; }
+    let teclas: HashSet<String> = acao.keys.iter().flatten().map(|k| match casefold(k).as_str() {
+        "control" => "ctrl".into(), "super" | "meta" => "win".into(), "esc" => "escape".into(), "del" => "delete".into(), k => k.to_owned(),
+    }).collect();
+    let tem = |k: &str| teclas.contains(k);
+    (tem("win") && (teclas.len() == 1 || ["l", "d", "m", "r", "x", "e", "tab"].iter().any(|k| tem(k))))
+        || (tem("alt") && (tem("tab") || tem("escape")) && !tem("ctrl"))
+        || (tem("ctrl") && tem("shift") && tem("escape"))
+        || (tem("ctrl") && tem("alt") && tem("delete"))
+}
+
 /// Alt+F4, Ctrl+Q, Ctrl+Shift+W, or the Close button of the title bar: closes the whole window, not a tab.
 pub fn fecha_janela(acao: &Action, obs: &Observation) -> bool {
     if acao.kind == ActionType::Keys {
@@ -294,7 +308,7 @@ impl Barreiras {
         if !DESTRUIR.is_match(&pedido) {
             proibidos.extend(obs.elements.iter().filter(|e| ACIONAVEIS.contains(&e.role.as_str()) && DESTRUIR.is_match(&palavras(&e.name))));
         }
-        let ficam = cands.into_iter().filter(|c| !proibidos.iter().any(|e| {
+        let ficam = cands.into_iter().filter(|c| !atalho_de_sessao(&c.acao) && !proibidos.iter().any(|e| {
             c.acao.target.as_deref() == Some(e.id.as_str())
                 || matches!((c.acao.kind, c.acao.x, c.acao.y, e.rect), (ActionType::Mouse, Some(x), Some(y), Some(q)) if q.0 <= x && x < q.2 && q.1 <= y && y < q.3)
         })).collect();

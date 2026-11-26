@@ -29,6 +29,7 @@ impl Falha {
 fn repetir(status: u16) -> bool { matches!(status, 429 | 503 | 529) }
 const ESPERAS: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
 const TETO_RETRY_AFTER: Duration = Duration::from_secs(5);
+const PISO_TENTATIVA: Duration = Duration::from_secs(1);
 
 impl fmt::Display for Falha {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -77,7 +78,8 @@ pub async fn post(http: &reqwest::Client, url: &str, corpo: &Value, chave: &str,
             Err((f, espera)) if f.status.is_some_and(repetir) && tentativa < ESPERAS.len() => (f, espera.unwrap_or(ESPERAS[tentativa])),
             r => return r.map_err(|(f, _)| f),
         };
-        if espera >= prazo.saturating_duration_since(tokio::time::Instant::now()) { return Err(falha); }
+        // A retry squeezed into the last moments would time out and hide the passing failure behind a timeout.
+        if espera + PISO_TENTATIVA >= prazo.saturating_duration_since(tokio::time::Instant::now()) { return Err(falha); }
         tokio::time::sleep(espera).await;
         tentativa += 1;
     }
