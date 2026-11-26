@@ -147,25 +147,37 @@ impl Arvore for AtspiTree {
     fn read(&self, node: &Self::Node) -> Result<NoInfo, TreeError> {
         self.call(async {
             let accessible = node.as_accessible_proxy(self.connection.connection()).await.map_err(classify_error)?;
-            let role = accessible.get_role().await.map_err(classify_error)?;
-            let estendido = if role == atspi::Role::Extended { Some(accessible.get_role_name().await.map_err(classify_error)?) } else { None };
-            let role = nome_papel(role, estendido);
-            let name = accessible.name().await.map_err(classify_error)?.into_bytes();
-            let states = accessible.get_state().await.map_err(classify_error)?.iter().map(|s| s.to_string()).collect();
-            let interfaces = accessible.get_interfaces().await.map_err(classify_error)?;
-            let mut actions = vec![];
-            if interfaces.contains(Interface::Action) {
-                let action = self.action_proxy(node).await?;
-                for i in 0..action.n_actions().await.map_err(classify_error)? {
-                    actions.push(action.get_name(i).await.map_err(classify_error)?);
+            // Each property is its own D-Bus round trip: asked together, a node costs two waits instead of seven.
+            let papel = async {
+                let role = accessible.get_role().await.map_err(classify_error)?;
+                let estendido = if role == atspi::Role::Extended { Some(accessible.get_role_name().await.map_err(classify_error)?) } else { None };
+                Ok::<_, TreeError>(nome_papel(role, estendido))
+            };
+            let (role, name, states, interfaces) = tokio::try_join!(papel,
+                async { accessible.name().await.map_err(classify_error) },
+                async { accessible.get_state().await.map_err(classify_error) },
+                async { accessible.get_interfaces().await.map_err(classify_error) })?;
+            let name = name.into_bytes();
+            let states = states.iter().map(|s| s.to_string()).collect();
+            let acoes = async {
+                let mut actions = vec![];
+                if interfaces.contains(Interface::Action) {
+                    let action = self.action_proxy(node).await?;
+                    for i in 0..action.n_actions().await.map_err(classify_error)? {
+                        actions.push(action.get_name(i).await.map_err(classify_error)?);
+                    }
                 }
-            }
-            let extents = if interfaces.contains(Interface::Component) {
-                Some(self.component_proxy(node).await?.get_extents(CoordType::Window).await.map_err(classify_error)?)
-            } else { None };
-            let text = if role != "password text" && interfaces.contains(Interface::Text) {
-                Some(self.text_proxy(node).await?.get_text(0, 4000).await.map_err(classify_error)?)
-            } else { None };
+                Ok::<_, TreeError>(actions)
+            };
+            let extents = async {
+                if !interfaces.contains(Interface::Component) { return Ok(None); }
+                Ok(Some(self.component_proxy(node).await?.get_extents(CoordType::Window).await.map_err(classify_error)?))
+            };
+            let texto = async {
+                if role == "password text" || !interfaces.contains(Interface::Text) { return Ok(None); }
+                Ok(Some(self.text_proxy(node).await?.get_text(0, 4000).await.map_err(classify_error)?))
+            };
+            let (actions, extents, text) = tokio::try_join!(acoes, extents, texto)?;
             Ok(NoInfo { role, name, states, actions, extents, text })
         })
     }
