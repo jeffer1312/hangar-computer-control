@@ -173,8 +173,11 @@ Por padrão o objetivo não disputa o computador com você:
 
 Vários objetivos em segundo plano rodam juntos no mesmo desktop, cada um na sua janela:
 
-- O objetivo fica com cada janela em que age (a do app, a ativada; abrir app não pega nenhuma) até terminar. Outro
-  objetivo que tente agir nela para na hora com `outro objetivo está controlando a janela '<título>'`.
+- O objetivo fica com a janela do app em que está trabalhando (a que ele lê pelo id) e a solta quando passa para
+  outra. A janela que você tem na frente, o Iniciar e a barra de tarefas não ficam com ninguém. Ação numa janela em
+  que outro objetivo trabalha é recusada antes de sair (`outro objetivo está controlando a janela '<título>'`) e o
+  laço olha de novo e reenvia, por até 1 minuto, como com você mexendo: dois objetivos passam pelo Iniciar um de
+  cada vez e seguem juntos, cada um no seu app.
 - Teclado e mouse vão um de cada vez: cada ação pega a vez (arquivo de trava na pasta temporária no Windows, em
   `$XDG_RUNTIME_DIR` no Linux), espera até 3 s por ela e só então confere se você está parado. Sem a vez, a ação é
   recusada antes de tocar o app e o laço tenta de novo, como com você mexendo. A ação que deixa um menu do app
