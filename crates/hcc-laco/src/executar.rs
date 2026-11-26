@@ -107,20 +107,16 @@ impl Controle<'_> {
     async fn agir<S: Session>(&mut self, s: &mut S, vista: &Observation, acao: &Action, progresso: Progresso, lida: Option<&str>)
         -> Result<Result<ActResult, SessionError>, String> {
         // The window read by id is taken; before the goal has one, the window in front (or the one activated) is only
-        // checked. Either way, another goal working there is waited for, like a busy keyboard: the Start menu and the
-        // taskbar are shared, used by one goal at a time.
+        // checked. Another goal working there refuses the action before it leaves, like a busy keyboard: the caller
+        // looks again and resends, so the Start menu and the taskbar go to one goal at a time.
         let alvo = match lida {
             Some(janela) => Some(janela),
             None if acao.kind == ActionType::Activate => acao.target.as_deref(),
             None if acao.kind == ActionType::Launch => None,
             None => Some(vista.foreground.as_str()),
         };
-        if let Some(janela) = alvo {
-            let desde = Instant::now();
-            while !(if lida.is_some() { self.tomar(janela)? } else { !self.de_outro(janela)? }) {
-                if desde.elapsed() >= USUARIO_ATIVO { return Err(ocupada(janela, vista)); }
-                self.esperar(Duration::from_secs(1)).await?;
-            }
+        if let Some(janela) = alvo && !(if lida.is_some() { self.tomar(janela)? } else { !self.de_outro(janela)? }) {
+            return Ok(Err(SessionError::NotDelivered(format!("RuntimeError: {}", ocupada(janela, vista)))));
         }
         self.medir(&format!("acao:{}", acao.kind), progresso, async { Ok(s.act(&vista.observation_id, acao).await) }).await
     }
@@ -361,8 +357,10 @@ fn com_dica(nome: &Option<String>, texto: String) -> String {
 
 fn ocupada(janela: &str, vista: &Observation) -> String {
     let nome = vista.windows.iter().find(|w| w.id == janela).map_or(janela, |w| w.name.as_str());
-    format!("outro objetivo está controlando a janela '{nome}'")
+    format!("{} '{nome}'", JANELA_OCUPADA)
 }
+
+const JANELA_OCUPADA: &str = "outro objetivo está controlando a janela";
 
 fn erro_sessao(e: SessionError) -> String { format!("{}: {e}", e.tipo()) }
 fn erro_io(e: io::Error) -> String { format!("OSError: {e}") }
@@ -955,8 +953,12 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
         // window another goal already took is not this one's.
         if let Some(app) = lancado.as_deref() { novas.sort_by_key(|w| !do_programa(w, app)); }
         let mut adotada = None;
-        for w in novas {
-            if controle.tomar(&w.id)? { adotada = Some(w.id.clone()); break; }
+        // Another goal checking the window in front holds its lock for an instant: a few tries, not one.
+        'adotar: for _ in 0..3 {
+            for w in &novas {
+                if controle.tomar(&w.id)? { adotada = Some(w.id.clone()); break 'adotar; }
+            }
+            controle.esperar(Duration::from_millis(20)).await?;
         }
         if let Some(nova) = adotada {
             lancado = None;
@@ -1334,7 +1336,7 @@ async fn ciclo_passos<C: Connector>(op: &Opcoes, conector: &C, sessao: &mut Opti
             // reaches it, after the user stops (up to a minute), or once more for any other refusal.
             let (mut reenviou, mut subiu, desde) = (false, false, Instant::now());
             while let Err(SessionError::NotDelivered(motivo)) = &retorno {
-                let ativo = motivo.contains(recusa::USUARIO_ATIVO) || motivo.contains(recusa::ENTRADA_OCUPADA);
+                let ativo = [recusa::USUARIO_ATIVO, recusa::ENTRADA_OCUPADA, JANELA_OCUPADA].iter().any(|r| motivo.contains(r));
                 if [recusa::ENTRADA_REAL, recusa::JANELA_ATRAS, recusa::VALOR_NAO_CONFIRMADO].iter().any(|r| motivo.contains(r)) && !subiu {
                     subiu = true;
                     candidato.acao.input = Some(InputMode::Polite);
