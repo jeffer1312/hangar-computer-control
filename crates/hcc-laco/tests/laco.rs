@@ -2993,3 +2993,17 @@ async fn when_the_app_dialog_closes_the_loop_goes_back_to_the_app_window_not_the
     assert_eq!(scopes.last().unwrap().as_deref(), Some("w1"), "volta à janela do app, não à da frente: {scopes:?}");
     assert!(scopes[i..].iter().all(Option::is_some), "nunca leu a janela da frente depois do diálogo: {scopes:?}");
 }
+
+// The effect of an action is looked for soon after it, not after a fixed 800 ms: fast apps answer in a few hundred.
+#[tokio::test]
+async fn effect_is_looked_for_soon_after_the_action() {
+    let con = FakeConnector::new(vec![tree("o1", ""), tree("o2", "Ana")]);
+    let (op, _server) = setup(vec![select("set_value"), done()]).await;
+    let r = run(op, &con).await;
+    assert!(r.ok, "{}", r.resumo());
+    let s = con.state.lock().unwrap();
+    let agiu = s.acts[0].2;
+    let primeira = s.observed.iter().find(|t| **t > agiu).expect("olhada depois da ação");
+    let depois = *primeira - agiu;
+    assert!(depois >= Duration::from_millis(150) && depois < Duration::from_millis(700), "{depois:?}");
+}

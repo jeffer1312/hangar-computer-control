@@ -447,25 +447,44 @@ async fn reconectar<C: Connector>(conector: &C, sessao: &mut Option<C::S>, contr
     Ok(())
 }
 
+/// The screen counts as changed by the action when the change holds: seen twice in a row, or seen once after
+/// `ASSENTAR` (a menu or popover still filling up shows a half screen in the first few hundred ms).
+fn efeito_visto(mudou: bool, igual_a_anterior: bool, desde_acao: Duration) -> bool {
+    mudou && (igual_a_anterior || desde_acao >= ASSENTAR)
+}
+
+const PRIMEIRA_OLHADA: Duration = Duration::from_millis(200);
+const ASSENTAR: Duration = Duration::from_millis(800);
+
 #[allow(clippy::too_many_arguments)]
 async fn esperar_efeito<C: Connector>(conector: &C, sessao: &mut Option<C::S>, controle: &mut Controle<'_>,
     acao: &Action, vista: &Observation, atual: &AssinaturaTela, secretos: &Segredos, escopo: &Scope) -> Result<bool, String> {
+    let desde = Instant::now();
     // Blind (empty tree): only the title could change; no polling, the next observation looks.
-    let prazo = Instant::now() + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
+    let normal = acao.kind != ActionType::Launch && !vista.elements.is_empty();
+    let prazo = desde + if acao.kind == ActionType::Launch { Duration::from_secs(45) }
         else if vista.elements.is_empty() { Duration::from_millis(800) } else { Duration::from_secs(3) };
-    controle.esperar(Duration::from_millis(800)).await?;
+    controle.esperar(if normal { PRIMEIRA_OLHADA } else { ASSENTAR }).await?;
+    let mut anterior: Option<AssinaturaTela> = None;
     while Instant::now() < prazo {
         let s = sessao.as_mut().ok_or("RuntimeError: sessão indisponível")?;
+        let olhada = Instant::now();
         match controle.rodar(async { Ok(observar(s, escopo).await) }).await? {
-            Ok(nova) if assinatura_tela(&nova) != *atual => return Ok(true),
-            Ok(_) => {}
+            Ok(nova) => {
+                let a = assinatura_tela(&nova);
+                let mudou = a != *atual;
+                if !normal && mudou || efeito_visto(mudou, anterior.as_ref() == Some(&a), desde.elapsed()) { return Ok(true); }
+                anterior = mudou.then_some(a);
+            }
             Err(e) if reconectavel(&e) => reconectar(conector, sessao, controle).await?,
             Err(e) if e.tipo() == "RuntimeError" => eprintln!("observação durante espera ignorada: {}", secretos.texto(&e.to_string())),
             Err(e) => return Err(erro_sessao(e)),
         }
-        controle.esperar(Duration::from_secs(1)).await?;
+        // A slow app (Delphi reads take seconds) is not read back to back.
+        controle.esperar(if normal { PRIMEIRA_OLHADA.max(olhada.elapsed()) } else { Duration::from_secs(1) }).await?;
     }
-    Ok(false)
+    // Changed but still moving at the deadline: it did change, and a redo would undo a toggle.
+    Ok(anterior.is_some())
 }
 
 /// The pieces of a run that went right, under `trechos/` of the scripts folder: each cut is a new piece file or
@@ -1465,6 +1484,15 @@ where C::S: 'static {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_change_needs_a_second_equal_look() {
+        let cedo = Duration::from_millis(300);
+        assert!(!efeito_visto(true, false, cedo), "menu montando: a primeira olhada cedo não basta");
+        assert!(efeito_visto(true, true, cedo), "a mesma tela duas vezes seguidas basta");
+        assert!(efeito_visto(true, false, Duration::from_millis(900)), "depois de 800 ms conta direto");
+        assert!(!efeito_visto(false, false, Duration::from_secs(2)));
+    }
 
     #[tokio::test]
     async fn log_write_error_is_not_ignored() {
