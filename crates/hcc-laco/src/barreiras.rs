@@ -308,6 +308,10 @@ impl Barreiras {
         if !DESTRUIR.is_match(&pedido) {
             proibidos.extend(obs.elements.iter().filter(|e| ACIONAVEIS.contains(&e.role.as_str()) && DESTRUIR.is_match(&palavras(&e.name))));
         }
+        if let Some(c) = cands.iter().find(|c| atalho_de_sessao(&c.acao)) {
+            dica.get_or_insert_with(|| format!("'{}' locks, hides or leaves the session: it is never sent; reach the goal inside the app.",
+                c.descricao));
+        }
         let ficam = cands.into_iter().filter(|c| !atalho_de_sessao(&c.acao) && !proibidos.iter().any(|e| {
             c.acao.target.as_deref() == Some(e.id.as_str())
                 || matches!((c.acao.kind, c.acao.x, c.acao.y, e.rect), (ActionType::Mouse, Some(x), Some(y), Some(q)) if q.0 <= x && x < q.2 && q.1 <= y && y < q.3)

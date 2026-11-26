@@ -1167,6 +1167,7 @@ fn session_wrecking_shortcuts_are_never_offered() {
     }
     // Asked in the goal or not, the shortcut never goes: it locks or hides the session the agent works in.
     let cands = vec![candidato(keys(&["win", "l"])), candidato(invoke("e1"))];
-    let (ficam, _) = Barreiras::sem_confirmar(cands, &obs(vec![]), "bloquear a tela com win+l");
+    let (ficam, dica) = Barreiras::sem_confirmar(cands, &obs(vec![]), "bloquear a tela com win+l");
     assert_eq!(ficam.into_iter().map(|c| c.acao).collect::<Vec<_>>(), vec![invoke("e1")]);
+    assert!(dica.is_some_and(|d| d.contains("never sent")), "o descarte aparece na dica");
 }

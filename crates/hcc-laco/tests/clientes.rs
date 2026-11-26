@@ -394,3 +394,13 @@ async fn refused_screenshot_turns_it_off_at_once() {
     assert_eq!(pedidos.len(), 3);
     assert!(!levou_imagem(&pedidos[2]));
 }
+
+#[tokio::test]
+async fn answers_without_usage_are_counted_apart() {
+    let s = em_sequencia(vec![(ResponseTemplate::new(200).set_body_json(json!({"answers": {"risky": {"noul": 0.1}},
+        "model": "jev-1.14.0", "usage": {"input_tokens": 700}})), 1), (risco_ok(), 1)]).await;
+    let jev = Jev::new(s.uri(), "KEY".into(), JEV_MODEL.into());
+    jev.arriscado(&json!({}), "p", None, T).await.unwrap();
+    jev.arriscado(&json!({}), "p", None, T).await.unwrap();
+    assert_eq!(jev.uso(), json!({"modelo": "jev-1.14.0", "tokens_entrada": 700, "respostas_sem_uso": 1}));
+}

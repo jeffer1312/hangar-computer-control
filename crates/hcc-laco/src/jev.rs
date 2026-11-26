@@ -34,6 +34,8 @@ pub struct Jev {
     /// The model that answered (the alias in `model` resolves to a release) and the input tokens billed so far.
     respondeu: Mutex<Option<String>>,
     tokens: AtomicU64,
+    /// Answers without `usage.input_tokens`: the total then undercounts.
+    sem_uso: AtomicU64,
 }
 
 #[derive(PartialEq)]
@@ -106,13 +108,16 @@ fn arredonda(p: f64) -> f64 {
 impl Jev {
     pub fn new(url: String, key: String, model: String) -> Jev {
         Jev { url, key, model, http: http::cliente(), sem_imagem: AtomicBool::new(false), passageiras: AtomicU32::new(0),
-            respondeu: Mutex::new(None), tokens: AtomicU64::new(0) }
+            respondeu: Mutex::new(None), tokens: AtomicU64::new(0), sem_uso: AtomicU64::new(0) }
     }
 
     /// `{"modelo", "tokens_entrada"}` of the requests made so far.
     pub fn uso(&self) -> Value {
         let modelo = self.respondeu.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        json!({"modelo": modelo, "tokens_entrada": self.tokens.load(Ordering::Relaxed)})
+        let mut uso = json!({"modelo": modelo, "tokens_entrada": self.tokens.load(Ordering::Relaxed)});
+        let sem = self.sem_uso.load(Ordering::Relaxed);
+        if sem > 0 { uso["respostas_sem_uso"] = json!(sem); }
+        uso
     }
 
     /// The answers, and what happened to the screenshot (`enviada` when it went with them). `so_com_imagem` are
@@ -171,7 +176,10 @@ impl Jev {
             }
         }
         let mut r = http::post(&self.http, &self.url, &corpo, &self.key, cabecalhos, timeout).await?;
-        self.tokens.fetch_add(r["usage"]["input_tokens"].as_u64().unwrap_or(0), Ordering::Relaxed);
+        match r["usage"]["input_tokens"].as_u64() {
+            Some(n) => self.tokens.fetch_add(n, Ordering::Relaxed),
+            None => self.sem_uso.fetch_add(1, Ordering::Relaxed),
+        };
         if let Some(m) = r.get("model").and_then(Value::as_str) {
             *self.respondeu.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(m.to_owned());
         }
